@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        node-version:
+          - "22.19.0"
+          - "24.x"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      # Native dependencies must run their install scripts so failures remain visible.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts=false
+      - name: Run checks
+        run: npm run check
+      - name: Run package smoke test
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.19.0'
+        run: npm run package-smoke
+      - name: Audit production dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.19.0'
+        run: npm audit --omit=dev
+      - name: Verify package creation
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.19.0'
+        run: npm pack --dry-run --json

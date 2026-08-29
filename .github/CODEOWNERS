@@ -1,0 +1,15 @@
+# npm package manifests and lockfiles.
+/package.json @hcohe
+/package-lock.json @hcohe
+/npm-shrinkwrap.json @hcohe
+
+# Ownership policy, dependency updates, and workflows.
+/.github/CODEOWNERS @hcohe
+/.github/actionlint.yaml @hcohe
+/.github/dependabot.yml @hcohe
+/.github/workflows/ @hcohe
+
+# Release, publication, and packaging automation.
+/scripts/*release* @hcohe
+/scripts/*publish* @hcohe
+/scripts/*package* @hcohe

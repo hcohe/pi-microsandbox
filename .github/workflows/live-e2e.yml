@@ -1,0 +1,389 @@
+name: Live E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Optional OCI image reference (default ubuntu:24.04)
+        required: false
+        type: string
+  schedule:
+    - cron: "23 4 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-e2e
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  live-e2e:
+    name: Live E2E (Linux/KVM)
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, kvm, microsandbox]
+    timeout-minutes: 180
+    steps:
+      - name: Initialize private diagnostics
+        run: |
+          LIVE_PRIVATE_DIR="$RUNNER_TEMP/pi-msb-live-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          SANITIZED_LOG="$LIVE_PRIVATE_DIR/sanitized-failure.log"
+          printf 'LIVE_PRIVATE_DIR=%s\nSANITIZED_LOG=%s\n' "$LIVE_PRIVATE_DIR" "$SANITIZED_LOG" >> "$GITHUB_ENV"
+          install -d -m 700 "$LIVE_PRIVATE_DIR"
+          umask 077
+          {
+            printf 'pi-microsandbox live E2E (sanitized)\n'
+            printf 'Run: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Commit: %s\n' "$GITHUB_SHA"
+            printf 'Attempt: %s\n' "$GITHUB_RUN_ATTEMPT"
+          } > "$SANITIZED_LOG"
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+
+      - name: Validate image input
+        id: image
+        env:
+          REQUESTED_IMAGE: ${{ inputs.image || '' }}
+        run: |
+          if ! node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+
+          const requested = process.env.REQUESTED_IMAGE ?? "";
+          const image = requested === "" ? "ubuntu:24.04" : requested;
+          const component = String.raw`[a-z0-9]+(?:[._-][a-z0-9]+)*`;
+          const registry = String.raw`(?:(?:localhost|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::([0-9]{1,5}))?/)`;
+          const tag = String.raw`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`;
+          const digest = String.raw`sha256:[a-f0-9]{64}`;
+          const match = image.match(new RegExp(`^(?=.{1,255}$)(?:${registry})?${component}(?:/${component})*(?::${tag})?(?:@${digest})?$`));
+          const port = match?.[1] === undefined ? undefined : Number(match[1]);
+
+          if (!match || (port !== undefined && (port < 1 || port > 65535))) {
+            process.exitCode = 1;
+          } else {
+            appendFileSync(process.env.GITHUB_OUTPUT, `image=${image}\n`, { encoding: "utf8" });
+          }
+          NODE
+          then
+            printf 'Image input validation: FAILED (value omitted)\n' >> "$SANITIZED_LOG"
+            exit 1
+          fi
+          printf 'Image input validation: PASS\n' >> "$SANITIZED_LOG"
+
+      - name: Install dependencies
+        run: |
+          # fs-ext is native and must build; intentionally do not use --ignore-scripts.
+          npm ci
+          printf '%s\n' "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Snapshot scoped resources
+        run: |
+          umask 077
+          cat > "$LIVE_PRIVATE_DIR/resource-guard.mjs" <<'NODE'
+          import { createHash } from "node:crypto";
+          import { appendFile, readFile, writeFile } from "node:fs/promises";
+          import { createRequire } from "node:module";
+          import { join } from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const privateDir = process.env.LIVE_PRIVATE_DIR;
+          const safeLog = process.env.SANITIZED_LOG;
+          const require = createRequire(join(process.env.GITHUB_WORKSPACE, "package.json"));
+          const sdk = await import(pathToFileURL(require.resolve("microsandbox")).href);
+          const { Sandbox, Volume } = sdk;
+          const baselinePath = join(privateDir, "resource-baseline.json");
+          const sessionPattern = /^(?:pi-msb-live-[0-9]+-[0-9a-f]+|parent-[0-9]+|fork-[0-9]+|prune-[0-9]+|bad-[0-9]+|fallback-[0-9]+|deny-[0-9]+|prepared-[0-9]+)$/;
+          const probePattern = /^pi-msb-live-probe-[0-9]+-[0-9]+$/;
+
+          const resourceId = (session) => createHash("sha256").update(session).digest("hex").slice(0, 20);
+          const sandboxName = (session) => `pi-msb-${resourceId(session)}`;
+          const volumeName = (session) => `pi-msb-vol-${resourceId(session)}`;
+          const labelsForSandbox = (handle) => handle.config()?.labels ?? {};
+          const managedLabels = (labels) =>
+            labels["pi-msb.managed"] === "true" &&
+            labels["pi-msb.schema"] === "1" &&
+            labels["pi-msb.keep"] === "true" &&
+            sessionPattern.test(labels["pi-msb.session"] ?? "");
+          const isOwnedSandbox = (handle) => {
+            const labels = labelsForSandbox(handle);
+            return managedLabels(labels) && handle.name === sandboxName(labels["pi-msb.session"]);
+          };
+          const isOwnedVolume = (handle) => {
+            const labels = handle.labels ?? {};
+            return managedLabels(labels) && handle.name === volumeName(labels["pi-msb.session"]);
+          };
+
+          async function sandboxes() {
+            const result = [];
+            let cursor;
+            do {
+              const page = cursor
+                ? await Sandbox.listWith((list) => list.cursor(cursor))
+                : await Sandbox.list();
+              result.push(...page.sandboxes);
+              cursor = page.nextCursor;
+            } while (cursor);
+            return result;
+          }
+
+          async function inventory() {
+            return {
+              sandboxes: (await sandboxes()).map((item) => item.name),
+              volumes: (await Volume.list()).map((item) => item.name),
+            };
+          }
+
+          if (process.argv[2] === "snapshot") {
+            await writeFile(baselinePath, JSON.stringify(await inventory()), { mode: 0o600 });
+          } else if (process.argv[2] === "cleanup") {
+            const baseline = JSON.parse(await readFile(baselinePath, "utf8"));
+            const oldSandboxes = new Set(baseline.sandboxes);
+            const oldVolumes = new Set(baseline.volumes);
+            const newSandboxes = (await sandboxes()).filter((item) => !oldSandboxes.has(item.name));
+            const newVolumes = (await Volume.list()).filter((item) => !oldVolumes.has(item.name));
+            let removedSandboxes = 0;
+            let removedVolumes = 0;
+            let errors = 0;
+
+            for (const item of newSandboxes) {
+              if (!probePattern.test(item.name) && !isOwnedSandbox(item)) continue;
+              try {
+                const current = await Sandbox.get(item.name);
+                if (!probePattern.test(current.name) && !isOwnedSandbox(current)) throw new Error("identity changed");
+                try { await current.stopWithTimeout(10_000); } catch {}
+                await (await Sandbox.get(item.name)).remove();
+                removedSandboxes++;
+              } catch { errors++; }
+            }
+
+            for (const item of newVolumes) {
+              if (!isOwnedVolume(item)) continue;
+              try {
+                const current = await Volume.get(item.name);
+                if (!isOwnedVolume(current)) throw new Error("identity changed");
+                await Volume.remove(item.name);
+                removedVolumes++;
+              } catch { errors++; }
+            }
+
+            await appendFile(
+              safeLog,
+              `Resource cleanup: detected ${newSandboxes.length} new sandbox record(s) and ${newVolumes.length} new volume record(s); removed ${removedSandboxes} sandbox(es) and ${removedVolumes} volume(s); ${errors} error(s).\n`,
+              { encoding: "utf8" },
+            );
+            if (errors > 0) process.exitCode = 1;
+          } else {
+            throw new Error("resource guard mode is required");
+          }
+          NODE
+
+          if ! node "$LIVE_PRIVATE_DIR/resource-guard.mjs" snapshot > "$LIVE_PRIVATE_DIR/resource-guard.log" 2>&1; then
+            printf 'Resource baseline: FAILED (details withheld)\n' >> "$SANITIZED_LOG"
+            exit 1
+          fi
+
+          tmp_root="${TMPDIR:-/tmp}"
+          find "$GITHUB_WORKSPACE" -maxdepth 1 -type d -name '.pi-msb-e2e.*' -print > "$LIVE_PRIVATE_DIR/workspace-temp-baseline"
+          find "$tmp_root" -maxdepth 1 \( \
+            -name 'pi-msb-e2e-output.*' -o \
+            -name 'pi-msb-live-repo-*' -o \
+            -name 'pi-msb-live-tools-*' -o \
+            -name 'pi-msb-live-skill-*' -o \
+            -name 'pi-msb-live-output-*' -o \
+            -name 'pi-msb-live-direct-*' -o \
+            -name 'pi-msb-live-none-*' -o \
+            -name 'pi-msb-live-concurrent-*' -o \
+            -name 'pi-msb-live-export-*' \
+          \) -print > "$LIVE_PRIVATE_DIR/host-temp-baseline"
+          printf 'Resource baseline: PASS\n' >> "$SANITIZED_LOG"
+
+      - name: Verify runner prerequisites
+        run: |
+          doctor_log="$LIVE_PRIVATE_DIR/msb-doctor.log"
+          trap 'rm -f -- "$doctor_log"' EXIT
+          status=0
+
+          if [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]; then
+            printf 'Runner platform: PASS (Linux x64)\n' >> "$SANITIZED_LOG"
+          else
+            printf 'Runner platform: FAILED (Linux x64 required)\n' >> "$SANITIZED_LOG"
+            status=1
+          fi
+
+          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+            printf 'KVM device access: PASS\n' >> "$SANITIZED_LOG"
+          else
+            printf 'KVM device access: FAILED\n' >> "$SANITIZED_LOG"
+            status=1
+          fi
+
+          for command in node git msb; do
+            if ! command -v "$command" >/dev/null 2>&1; then status=1; fi
+          done
+          if [[ "$status" -eq 0 ]] && msb doctor > "$doctor_log" 2>&1; then
+            printf 'Microsandbox doctor: PASS\n' >> "$SANITIZED_LOG"
+          else
+            printf 'Microsandbox doctor: FAILED (details withheld)\n' >> "$SANITIZED_LOG"
+            status=1
+          fi
+          exit "$status"
+
+      - name: Run 16 live scenarios
+        id: live
+        continue-on-error: true
+        env:
+          PI_MSB_LIVE_TEST: "1"
+          PI_MSB_LIVE_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          raw_log="$LIVE_PRIVATE_DIR/raw-live.log"
+          trap 'rm -f -- "$raw_log"' EXIT
+          set +e
+          ./scripts/e2e-smoke.sh > "$raw_log" 2>&1
+          live_status=$?
+          set -e
+
+          node --input-type=module - "$raw_log" "$SANITIZED_LOG" "$live_status" <<'NODE'
+          import { appendFile, readFile } from "node:fs/promises";
+
+          const [rawPath, safePath, exitText] = process.argv.slice(2);
+          const scenarios = [
+            "Git bundle excludes untracked files",
+            "Git volume is clean and host-readable",
+            "Shutdown removes sandbox and retains volume",
+            "Reload and off/on reuse the volume",
+            "Forked session gets a new identity",
+            "Duplicate owner is blocked before mutation",
+            "SIGKILL owner is pruned, volume retained",
+            "Idle timeout wakes before execution",
+            "Boot failure blocks and host modes differ",
+            "Host target requires exact approval",
+            "Skill reads enforce canonical containment",
+            "Generated output grants one exact path",
+            "Direct and none preserve their documented paths",
+            "Bootstrap and deny-network behavior",
+            "Concurrent exec, abort, timeout, grep, and find",
+            "Export and managed-volume removal are guarded",
+          ];
+          const statuses = Array(scenarios.length).fill("MISSING");
+          const raw = await readFile(rawPath, "utf8");
+
+          for (const line of raw.split(/\r?\n/)) {
+            const match = line.match(/^(PASS|FAIL|SKIP)\s+([0-9]{2})\s+(.+?)\s+\(/);
+            if (!match) continue;
+            const index = Number(match[2]) - 1;
+            if (index < 0 || index >= scenarios.length || match[3] !== scenarios[index]) continue;
+            statuses[index] = statuses[index] === "MISSING" ? match[1] : "INVALID";
+          }
+
+          const counts = Object.fromEntries(["PASS", "FAIL", "SKIP", "MISSING", "INVALID"].map(
+            (status) => [status, statuses.filter((item) => item === status).length],
+          ));
+          const lines = [
+            `Matrix process: ${Number(exitText) === 0 ? "exit zero" : "exit nonzero"}`,
+            `Matrix summary: ${counts.PASS} PASS, ${counts.FAIL} FAIL, ${counts.SKIP} SKIP, ${counts.MISSING} MISSING, ${counts.INVALID} INVALID`,
+            ...statuses.map((status, index) => `${status.padEnd(7)} ${String(index + 1).padStart(2, "0")}  ${scenarios[index]}`),
+          ];
+          await appendFile(safePath, `${lines.join("\n")}\n`, { encoding: "utf8" });
+          if (Number(exitText) !== 0 || counts.PASS !== scenarios.length) {
+            process.exitCode = 1;
+          }
+          NODE
+
+          exit "$live_status"
+
+      - name: Cleanup and safe diagnostics
+        if: always()
+        run: |
+          cleanup_status=0
+          guard_log="$LIVE_PRIVATE_DIR/resource-guard.log"
+
+          if [[ -f "$LIVE_PRIVATE_DIR/resource-guard.mjs" && -f "$LIVE_PRIVATE_DIR/resource-baseline.json" ]]; then
+            if ! node "$LIVE_PRIVATE_DIR/resource-guard.mjs" cleanup > "$guard_log" 2>&1; then
+              printf 'Resource cleanup guard: FAILED (details withheld)\n' >> "$SANITIZED_LOG"
+              cleanup_status=1
+            fi
+          else
+            printf 'Resource cleanup guard: not required (no baseline)\n' >> "$SANITIZED_LOG"
+          fi
+
+          removed_temp=0
+          cleanup_new_temp() {
+            local baseline=$1
+            shift
+            local candidate
+            while IFS= read -r -d '' candidate; do
+              if [[ ! -f "$baseline" ]] || ! grep -Fqx -- "$candidate" "$baseline"; then
+                if rm -rf -- "$candidate"; then
+                  removed_temp=$((removed_temp + 1))
+                else
+                  cleanup_status=1
+                fi
+              fi
+            done < <(find "$@" -print0)
+          }
+
+          cleanup_new_temp "$LIVE_PRIVATE_DIR/workspace-temp-baseline" \
+            "$GITHUB_WORKSPACE" -maxdepth 1 -type d -name '.pi-msb-e2e.*'
+          cleanup_new_temp "$LIVE_PRIVATE_DIR/host-temp-baseline" \
+            "${TMPDIR:-/tmp}" -maxdepth 1 \( \
+              -name 'pi-msb-e2e-output.*' -o \
+              -name 'pi-msb-live-repo-*' -o \
+              -name 'pi-msb-live-tools-*' -o \
+              -name 'pi-msb-live-skill-*' -o \
+              -name 'pi-msb-live-output-*' -o \
+              -name 'pi-msb-live-direct-*' -o \
+              -name 'pi-msb-live-none-*' -o \
+              -name 'pi-msb-live-concurrent-*' -o \
+              -name 'pi-msb-live-export-*' \
+            \)
+
+          printf 'Temporary-path cleanup: removed %s scoped path(s).\n' "$removed_temp" >> "$SANITIZED_LOG"
+          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+            printf 'Final KVM diagnostic: accessible\n' >> "$SANITIZED_LOG"
+          else
+            printf 'Final KVM diagnostic: inaccessible\n' >> "$SANITIZED_LOG"
+          fi
+
+          {
+            printf '## Live E2E sanitized result\n\n```text\n'
+            cat "$SANITIZED_LOG"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$cleanup_status"
+
+      - name: Upload sanitized failure log
+        if: ${{ always() && (failure() || steps.live.outcome == 'failure') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-e2e-sanitized-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pi-msb-live-${{ github.run_id }}-${{ github.run_attempt }}/sanitized-failure.log
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          include-hidden-files: false
+
+      - name: Remove private diagnostics
+        if: always()
+        run: rm -rf -- "$LIVE_PRIVATE_DIR"
+
+      - name: Enforce live result
+        if: always()
+        env:
+          LIVE_OUTCOME: ${{ steps.live.outcome }}
+        run: |
+          if [[ "$LIVE_OUTCOME" == failure ]]; then
+            exit 1
+          fi
