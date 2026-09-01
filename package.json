@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "fs-ext": "2.1.1",
-    "microsandbox": "0.6.8"
+    "microsandbox": "0.6.15"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
