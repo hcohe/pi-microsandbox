@@ -19,6 +19,9 @@ concurrency:
 jobs:
   analyze:
     name: CodeQL (JavaScript/TypeScript)
+    # Code scanning is unavailable for private personal repositories without
+    # GitHub Code Security. Run automatically once the repository is public.
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
