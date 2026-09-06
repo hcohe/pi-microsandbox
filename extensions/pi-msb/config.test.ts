@@ -95,6 +95,47 @@ test("object-form secret and mount removals are recognized", () => {
   assert.deepEqual((parsed.value as any).removeMounts, [{ guestPath: "/mnt/data" }]);
 });
 
+test("prototype-polluting keys are rejected at every config ingress", () => {
+  const objectPrototype = Object.prototype as Record<string, unknown>;
+  const isConfigError = (error: unknown) => error instanceof ConfigError;
+  delete objectPrototype.piMsbPolluted;
+
+  try {
+    for (const toml of [
+      "[__proto__]\npi_msb_polluted = true",
+      'network = { __proto__ = { pi_msb_polluted = true } }',
+      "[[mounts]]\nconstructor = {}",
+      "prototype.value = true",
+      '["__proto__"]\npi_msb_polluted = true',
+    ]) {
+      assert.throws(() => parseTomlConfig(toml, "project"), isConfigError);
+      assert.equal(objectPrototype.piMsbPolluted, undefined);
+    }
+
+    assert.throws(() => parseEnvConfig({ PI_MSB_CONSTRUCTOR: "value" }), isConfigError);
+    assert.throws(() => parseEnvConfig({ PI_MSB_NETWORK: '{"__proto__":{"piMsbPolluted":true}}' }), isConfigError);
+
+    for (const value of [
+      JSON.parse('{"__proto__":{"piMsbPolluted":true}}'),
+      JSON.parse('{"network":{"constructor":{}}}'),
+      JSON.parse('{"mounts":[{"prototype":{}}]}'),
+      { network: { __proto__: { piMsbPolluted: true } } },
+    ]) {
+      assert.throws(() => mergeConfigLayers([layer("global", value)]), isConfigError);
+      assert.throws(() => validateConfig(value), isConfigError);
+      assert.equal(objectPrototype.piMsbPolluted, undefined);
+    }
+
+    assert.throws(() => applyOverride({}, "__proto__.pi_msb_polluted", true), isConfigError);
+    assert.throws(() => applyOverride({}, "network", JSON.parse('{"constructor":{}}')), isConfigError);
+    assert.throws(() => removeOverride(JSON.parse('{"prototype":{}}'), "network"), isConfigError);
+    assert.throws(() => overridesToToml(JSON.parse('{"__proto__":{}}')), isConfigError);
+    assert.equal(objectPrototype.piMsbPolluted, undefined);
+  } finally {
+    delete objectPrototype.piMsbPolluted;
+  }
+});
+
 test("nested network removal controls remove only network allowlists", () => {
   const merged = mergeConfigLayers([
     { name: "defaults", value: DEFAULT_CONFIG, warnings: [] },

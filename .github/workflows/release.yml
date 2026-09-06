@@ -14,7 +14,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: "24.x"
+  # Node 24.19.0 bundles npm 11.17.0, so both release tools are supplied by
+  # one immutable Node distribution instead of an ad-hoc global npm install.
+  NODE_VERSION: "24.19.0"
   NPM_VERSION: "11.17.0"
   NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
 
@@ -44,11 +46,10 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
 
-      - name: Install the pinned npm CLI
+      - name: Verify the bundled npm CLI
         shell: bash
         run: |
           set -euo pipefail
-          npm install --global "npm@${NPM_VERSION}"
           actual_npm_version="$(npm --version)"
           if [[ "$actual_npm_version" != "$NPM_VERSION" ]]; then
             echo "Expected npm ${NPM_VERSION}, got ${actual_npm_version}" >&2
@@ -318,11 +319,10 @@ jobs:
           registry-url: https://registry.npmjs.org/
           package-manager-cache: false
 
-      - name: Install the pinned npm CLI
+      - name: Verify the bundled npm CLI
         shell: bash
         run: |
           set -euo pipefail
-          npm install --global "npm@${NPM_VERSION}"
           actual_npm_version="$(npm --version)"
           if [[ "$actual_npm_version" != "$NPM_VERSION" ]]; then
             echo "Expected npm ${NPM_VERSION}, got ${actual_npm_version}" >&2

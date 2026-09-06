@@ -16,6 +16,7 @@ const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "h
 const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeHostRoAllowlist", "removeAllowHosts", "removePublishPorts"]);
 const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
+const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 /** Defaults from PLAN §11.2. Values containing credentials are deliberately absent. */
 export const DEFAULT_CONFIG: Config = {
@@ -75,6 +76,40 @@ export class ConfigError extends Error {
   }
 }
 
+function createRecord(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>;
+}
+function assertSafeConfigKey(key: string, path: readonly string[]): void {
+  let semanticKey = key;
+  if (key.length >= 2 && key[0] === key[key.length - 1] && (key[0] === "\"" || key[0] === "'")) {
+    if (key[0] === "'") semanticKey = key.slice(1, -1);
+    else {
+      try { semanticKey = JSON.parse(key) as string; } catch { /* malformed TOML is rejected elsewhere */ }
+    }
+  }
+  if (FORBIDDEN_CONFIG_KEYS.has(key) || FORBIDDEN_CONFIG_KEYS.has(semanticKey)) {
+    throw new ConfigError([`forbidden config key ${path.join(".")}`]);
+  }
+}
+function assertSafeConfigPath(parts: readonly string[]): void {
+  for (let index = 0; index < parts.length; index++) assertSafeConfigKey(parts[index]!, parts.slice(0, index + 1));
+}
+function assertSafeConfigValue(value: unknown, path: readonly string[] = []): void {
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => assertSafeConfigValue(child, [...path, `[${index}]`]));
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new ConfigError([`unsafe config object at ${path.join(".") || "<root>"}`]);
+  }
+  for (const [key, child] of Object.entries(value)) {
+    assertSafeConfigKey(key, [...path, key]);
+    assertSafeConfigValue(child, [...path, key]);
+  }
+}
+
 type LayerValue = DeepPartial<Config> & {
   removeSecrets?: unknown;
   removeMounts?: unknown;
@@ -100,7 +135,9 @@ function snake(key: string): string {
 }
 function pathKey(parts: string[]): string { return parts.join("."); }
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 function withoutSecret(value: unknown): string {
   return typeof value === "string" && /^\$(?:ENV|FILE):[^\s]+$/.test(value) ? value : "<redacted>";
@@ -151,11 +188,13 @@ function parseTomlValue(text: string): unknown {
   const value = text.trim();
   if (value.startsWith("[") && value.endsWith("]")) return splitTopLevel(value.slice(1, -1)).map(parseTomlValue);
   if (value.startsWith("{") && value.endsWith("}")) {
-    const object: Record<string, unknown> = {};
+    const object = createRecord();
     for (const part of splitTopLevel(value.slice(1, -1))) {
       const at = findEquals(part);
       if (at < 0) throw new Error("invalid inline table");
-      object[part.slice(0, at).trim()] = parseTomlValue(part.slice(at + 1));
+      const key = part.slice(0, at).trim();
+      assertSafeConfigKey(key, [key]);
+      object[key] = parseTomlValue(part.slice(at + 1));
     }
     return object;
   }
@@ -168,17 +207,18 @@ function parseTomlValue(text: string): unknown {
   return value;
 }
 function assign(root: Record<string, unknown>, keys: string[], value: unknown): void {
+  assertSafeConfigPath(keys);
   let current = root;
   for (const key of keys.slice(0, -1)) {
-    if (!isPlainObject(current[key])) current[key] = {};
+    if (!isPlainObject(current[key])) current[key] = createRecord();
     current = current[key] as Record<string, unknown>;
   }
-  current[keys[keys.length - 1]] = value;
+  current[keys[keys.length - 1]!] = value;
 }
 
 /** A small dependency-free TOML reader for the config subset. It intentionally has no I/O. */
 function readToml(text: string): Record<string, unknown> {
-  const root: Record<string, unknown> = {};
+  const root = createRecord();
   let section: string[] = [];
   let arraySection: string[] | null = null;
   for (const raw of text.split(/\r?\n/)) {
@@ -186,23 +226,25 @@ function readToml(text: string): Record<string, unknown> {
     if (!line) continue;
     if (line.startsWith("[[") && line.endsWith("]]")) {
       const keys = line.slice(2, -2).trim().split(".").map((x) => x.trim());
+      assertSafeConfigPath(keys);
       let parent: Record<string, unknown> = root;
       for (const key of keys.slice(0, -1)) {
         if (!Array.isArray(parent[key])) parent[key] = [];
         const list = parent[key] as unknown[];
         const last = list[list.length - 1];
-        if (!isPlainObject(last)) list.push({});
+        if (!isPlainObject(last)) list.push(createRecord());
         parent = list[list.length - 1] as Record<string, unknown>;
       }
-      const final = keys[keys.length - 1];
+      const final = keys[keys.length - 1]!;
       if (!Array.isArray(parent[final])) parent[final] = [];
-      (parent[final] as unknown[]).push({});
+      (parent[final] as unknown[]).push(createRecord());
       arraySection = keys;
       section = [];
       continue;
     }
     if (line.startsWith("[") && line.endsWith("]")) {
       section = line.slice(1, -1).trim().split(".").map((x) => x.trim());
+      assertSafeConfigPath(section);
       arraySection = null;
       continue;
     }
@@ -217,17 +259,23 @@ function readToml(text: string): Record<string, unknown> {
         if (!Array.isArray(list) || !isPlainObject(list[list.length - 1])) throw new Error("invalid array table");
         parent = list[list.length - 1] as Record<string, unknown>;
       }
+      assertSafeConfigKey(key, [...arraySection, key]);
       parent[key] = value;
     } else assign(root, [...section, ...key.split(".").map((x) => x.trim())], value);
   }
   return root;
 }
 
-function normalizeValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeValue);
+function normalizeValue(value: unknown, path: readonly string[] = []): unknown {
+  if (Array.isArray(value)) return value.map((child, index) => normalizeValue(child, [...path, `[${index}]`]));
   if (!isPlainObject(value)) return value;
   const out: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) out[camel(key)] = normalizeValue(child);
+  for (const [key, child] of Object.entries(value)) {
+    assertSafeConfigKey(key, [...path, key]);
+    const normalizedKey = camel(key);
+    assertSafeConfigKey(normalizedKey, [...path, normalizedKey]);
+    out[normalizedKey] = normalizeValue(child, [...path, normalizedKey]);
+  }
   return out;
 }
 function knownPath(path: string): boolean {
@@ -273,6 +321,7 @@ function withMountDefaults(value: LayerValue): LayerValue {
   return result;
 }
 function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, source?: string): ParsedConfigLayer {
+  assertSafeConfigValue(raw);
   const value = withMountDefaults(normalizeValue(raw) as LayerValue);
   const warnings: string[] = [];
   collectUnknown(value, [], warnings);
@@ -294,7 +343,9 @@ export function parseTomlConfig(text: string, source: string): ParsedConfigLayer
 function envScalar(text: string, key: string): unknown {
   const trimmed = text.trim();
   if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.endsWith(trimmed[0] === "{" ? "}" : "]")) {
-    try { return normalizeValue(JSON.parse(trimmed)); } catch { /* use scalar below */ }
+    let parsed: unknown;
+    try { parsed = JSON.parse(trimmed); } catch { /* use scalar below */ }
+    if (parsed !== undefined) return normalizeValue(parsed);
   }
   if (trimmed === "true" || trimmed === "false") return trimmed === "true";
   if (/^[+-]?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
@@ -310,7 +361,7 @@ function envScalar(text: string, key: string): unknown {
   return text;
 }
 export function parseEnvConfig(env: NodeJS.ProcessEnv): ParsedConfigLayer {
-  const root: Record<string, unknown> = {};
+  const root = createRecord();
   const warnings: string[] = [];
   for (const [name, raw] of Object.entries(env)) {
     if (!name.startsWith("PI_MSB_") || raw === undefined || name === "PI_MSB_DISABLE" || name === "PI_MSB_CONFIG_FILE") continue;
@@ -325,8 +376,9 @@ export function parseEnvConfig(env: NodeJS.ProcessEnv): ParsedConfigLayer {
 
 function mergeObject(target: Record<string, any>, source: Record<string, any>, prefix: string[], layer: ConfigLayerName, provenance: Record<string, ConfigLayerName>, warnings: string[]): void {
   for (const [key, value] of Object.entries(source)) {
-    if (CONTROL_KEYS.has(key) || value === undefined) continue;
     const path = [...prefix, key];
+    assertSafeConfigKey(key, path);
+    if (CONTROL_KEYS.has(key) || value === undefined) continue;
     if (key === "secrets" && Array.isArray(value)) { mergeIdentity(target, key, value, "env", layer, provenance); continue; }
     if (key === "mounts" && Array.isArray(value)) { mergeIdentity(target, key, value, "guestPath", layer, provenance); continue; }
     if (ALLOWLIST_PATHS.has(pathKey(path)) && Array.isArray(value)) {
@@ -389,6 +441,7 @@ export function mergeConfigLayers(layers: ParsedConfigLayer[]): MergeResult {
   const provenance: Record<string, ConfigLayerName> = {};
   const warnings: string[] = [];
   for (const layer of layers) {
+    assertSafeConfigValue(layer.value);
     warnings.push(...layer.warnings.map(warning));
     const source = withMountDefaults(clone(layer.value) as LayerValue);
     applyRemovals(result, source, layer.name, provenance);
@@ -630,18 +683,27 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
 }
 
 function setAt(base: any, parts: string[], value: unknown): any {
+  assertSafeConfigValue(base);
+  assertSafeConfigPath(parts);
+  assertSafeConfigValue(value, parts);
   const out: any = clone(base) ?? {};
   let current = out;
   for (const part of parts.slice(0, -1)) { if (!isPlainObject(current[part])) current[part] = {}; current = current[part]; }
-  current[parts[parts.length - 1]] = clone(value);
+  current[parts[parts.length - 1]!] = clone(value);
   return out;
 }
 export function applyOverride(base: DeepPartial<Config>, dottedSnakeKey: string, value: unknown): DeepPartial<Config> {
-  return setAt(base, dottedSnakeKey.split(".").filter(Boolean).map(camel), value) as DeepPartial<Config>;
+  const rawParts = dottedSnakeKey.split(".").filter(Boolean);
+  assertSafeConfigPath(rawParts);
+  return setAt(base, rawParts.map(camel), value) as DeepPartial<Config>;
 }
 export function removeOverride(base: DeepPartial<Config>, dottedSnakeKey: string): DeepPartial<Config> {
+  assertSafeConfigValue(base);
   const out: any = clone(base) ?? {};
-  const parts = dottedSnakeKey.split(".").filter(Boolean).map(camel);
+  const rawParts = dottedSnakeKey.split(".").filter(Boolean);
+  assertSafeConfigPath(rawParts);
+  const parts = rawParts.map(camel);
+  assertSafeConfigPath(parts);
   let current = out;
   for (const part of parts.slice(0, -1)) { if (!isPlainObject(current[part])) return out; current = current[part]; }
   delete current[parts[parts.length - 1]];
@@ -670,6 +732,7 @@ function serializeToml(value: Record<string, unknown>, prefix: string[] = []): s
   return lines;
 }
 export function overridesToToml(value: DeepPartial<Config>): string {
+  assertSafeConfigValue(value);
   return serializeToml(clone(value) as Record<string, unknown>).join("\n").replace(/^\n+/, "") + "\n";
 }
 export function toEffectiveToml(value: ResolvedConfig): string {

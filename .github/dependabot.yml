@@ -9,6 +9,8 @@ updates:
       time: "09:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       development-minor-patch:
         dependency-type: "development"
@@ -24,6 +26,8 @@ updates:
       time: "10:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     groups:
       actions-minor-patch:
         patterns:
