@@ -246,7 +246,7 @@ async function drainHandle(handle: ExecHandle): Promise<void> {
 }
 
 /**
- * Adapt a microsandbox v0.6.8 Sandbox without importing the native SDK at
+ * Adapt a microsandbox Sandbox without importing the native SDK at
  * extension load time. The caller supplies the connected Sandbox instance.
  */
 export function createSdkTransport(sandbox: unknown): SandboxTransport {

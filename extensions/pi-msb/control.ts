@@ -159,7 +159,7 @@ function inspectedFromHandle(handle: AnyRecord, config: AnyRecord = {}): Inspect
 }
 
 function volumeHostPath(value: AnyRecord): string | undefined {
-  // VolumeHandle in microsandbox 0.6.8 has no path getter. Only use a path
+  // VolumeHandle has no path getter. Only use a path
   // when the SDK object explicitly exposes one (the Volume returned by create)
   // or a future metadata object documents one; never manufacture a host path.
   const direct = typeof value.path === "string" ? value.path : typeof value.hostPath === "string" ? value.hostPath : undefined;
@@ -427,7 +427,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         if (!identity || !reusableVolumeIdentity(plan, identity)) throw new Error(`managed volume identity mismatch: ${plan.volumeName}`);
         const record = volumeFromHandle(handle);
         if (record && !validateReusableVolume(plan, record)) throw new Error(`managed volume identity mismatch: ${plan.volumeName}`);
-        // VolumeHandle has no supported host path in v0.6.8. Reuse is safe
+        // VolumeHandle has no supported host path. Reuse is safe
         // because mounting uses the name; status/export report no fabricated path.
         volume = record ?? undefined;
       } catch (error) {

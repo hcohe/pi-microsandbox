@@ -2,8 +2,8 @@
 
 `pi-microsandbox` runs Pi's file and shell tools in a microsandbox while keeping the
 host escape explicit. This release requires Node.js 22.19.0 or newer. The
-development toolchain pins Pi 0.83.0, and the runtime dependency is pinned
-exactly to `microsandbox` 0.6.8.
+development toolchain pins Pi 0.84.4, and the runtime dependency is pinned
+exactly to `microsandbox` 0.6.16.
 
 Security reports belong in [GitHub private vulnerability reporting](https://github.com/hcohe/pi-microsandbox/blob/main/SECURITY.md),
 not in public issues.
@@ -54,7 +54,7 @@ Installation must run lifecycle scripts and include optional dependencies:
 - `fs-ext@2.1.1` compiles a native node-gyp module. Install Python and a working
   C/C++ build toolchain (`xcode-select --install` on macOS, or a compiler,
   `make`, and Python 3 on Linux).
-- `microsandbox@0.6.8` installs its matching native addon and runtime binaries
+- `microsandbox@0.6.16` installs its matching native addon and runtime binaries
   through an optional platform package. Do not use `--ignore-scripts` or omit
   optional dependencies when installing pi-microsandbox.
 
@@ -108,8 +108,8 @@ when the complete session/schema/mode/cwd identity matches. A copied or forked
 session state is rejected by the full session ID and gets a different resource
 identity.
 
-The SDK's `VolumeHandle` returned by `Volume.get()` in 0.6.8 does not expose a
-host path. pi-microsandbox therefore refuses to fabricate one: a newly created volume
+The SDK's `VolumeHandle` returned by `Volume.get()` does not expose a host
+path. pi-microsandbox therefore refuses to fabricate one: a newly created volume
 may show its path, while a later retained-volume lookup may not support
 `/msb volumes ls` or volume enrichment. The volume remains mountable by name
 and is never automatically deleted. Use the path recorded at creation time or
