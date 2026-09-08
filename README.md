@@ -5,8 +5,11 @@
 Give an agent a task and get on with your day. Give a few agents different tasks
 and let them work in parallel. Come back to review the results.
 
-pi-microsandbox runs [Pi](https://github.com/badlogic/pi-mono)'s file and shell
-tools in a sandbox for a YOLO-style workflow with less hovering over the terminal.
+pi-microsandbox uses [Microsandbox](https://microsandbox.dev/) to run
+[Pi](https://github.com/badlogic/pi-mono)'s file and shell tools in lightweight
+microVMs. Microsandbox is an open-source, local-first runtime for isolating
+untrusted workloads, with a separate Linux kernel for each sandbox.
+
 In Git mode, each separate Pi session gets its own workspace instead of editing
 your host checkout. Each project can define its own environment and safety
 boundaries. Set them up once, then let the agents get to work.
@@ -46,6 +49,19 @@ You'll need Pi, **Node.js 22.19.0+**, and either an Apple Silicon Mac or Linux
 with accessible KVM. Installation also needs Python and a C/C++ build toolchain;
 keep lifecycle scripts and optional dependencies enabled.
 [Full requirements and installation help →](docs/getting-started.md)
+
+Install the Microsandbox CLI first:
+
+```sh
+curl -fsSL https://install.microsandbox.dev | sh
+```
+
+For alternate installation methods and any Microsandbox-specific setup,
+runtime, or troubleshooting details, use the official
+[Microsandbox documentation](https://docs.microsandbox.dev/). The documentation
+in this repository covers the Pi integration.
+
+Then install pi-microsandbox:
 
 ```sh
 pi install npm:pi-microsandbox
