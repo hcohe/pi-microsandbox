@@ -31,6 +31,7 @@
   ],
   "files": [
     "SECURITY.md",
+    "docs/*.md",
     "extensions/pi-msb/*.ts",
     "!extensions/pi-msb/*.test.ts"
   ],
