@@ -6,7 +6,7 @@ Give an agent a task and get on with your day. Give a few agents different tasks
 and let them work in parallel. Come back to review the results.
 
 pi-microsandbox uses [Microsandbox](https://microsandbox.dev/) to run
-[Pi](https://github.com/badlogic/pi-mono)'s file and shell tools in lightweight
+[Pi](https://github.com/earendil-works/pi)'s file and shell tools in lightweight
 microVMs. Microsandbox is an open-source, local-first runtime for isolating
 untrusted workloads, with a separate Linux kernel for each sandbox.
 
