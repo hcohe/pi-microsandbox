@@ -42,6 +42,13 @@ cat >"$MANIFEST" <<'EOF'
 LICENSE required
 README.md required
 SECURITY.md required
+docs/commands.md required
+docs/configuration.md required
+docs/development.md required
+docs/getting-started.md required
+docs/safety.md required
+docs/storage.md required
+docs/troubleshooting.md required
 extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
 extensions/pi-msb/control.ts required
