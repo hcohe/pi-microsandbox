@@ -23,7 +23,38 @@ npm pack --dry-run --json
 ```
 
 The smoke and unit tests do not require KVM, image pulls, or a live sandbox.
-The live matrix described below is the only opt-in VM test.
+The boot-speed check and live matrix below are explicit VM tests.
+
+## Boot speed regression test
+
+With [`just`](https://just.systems/) installed, measure the awaited sandbox boot
+path against its regression limit:
+
+```sh
+just test-boot-speed
+```
+
+The tool performs one unmeasured warm-up, then three fresh boots using the
+default prepared image. It forces direct mode, disables guest networking and
+stale-resource pruning, and sets `bootstrap_tools = false` so the result
+measures repeat boot and readiness rather than an image pull or package install.
+The p95 must be at most 2,000 ms. Every sandbox is shut down and removed. If
+lifecycle cleanup fails, the test fails and retains its reported `.tmp` directory
+for recovery instead of claiming success.
+
+Run the tool directly to change the image, sample count, warm-ups, or limit:
+
+```sh
+node --experimental-strip-types scripts/test-boot-speed.mjs \
+  --image ghcr.io/hcohe/pi-microsandbox:latest \
+  --warmups 1 \
+  --runs 5 \
+  --max-ms 2000
+```
+
+Use `--json` for machine-readable output and `--help` for the complete option
+list. This is a real VM test and requires the same host virtualization support
+as the live matrix.
 
 ## Live test matrix
 
