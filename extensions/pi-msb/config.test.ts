@@ -20,6 +20,8 @@ const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ nam
 
 test("defaults and precedence are deterministic", async () => {
   assert.equal(DEFAULT_CONFIG.mode, "direct");
+  assert.equal(DEFAULT_CONFIG.image, "ghcr.io/hcohe/pi-microsandbox:latest");
+  assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
   const files = new Map([
     ["/cfg/pi-msb/config.toml", "memory_mib = 1024\nroute_tools = [\"read\", \"bash\"]"],
     ["/repo/.pi-msb.toml", "memory_mib = 2048\nnetwork.mode = \"deny\""],

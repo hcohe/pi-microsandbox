@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: Optional OCI image reference (default ubuntu:24.04)
+        description: Optional OCI image reference (default GHCR image)
         required: false
         type: string
   schedule:
@@ -63,7 +63,7 @@ jobs:
           import { appendFileSync } from "node:fs";
 
           const requested = process.env.REQUESTED_IMAGE ?? "";
-          const image = requested === "" ? "ubuntu:24.04" : requested;
+          const image = requested === "" ? "ghcr.io/hcohe/pi-microsandbox:latest" : requested;
           const component = String.raw`[a-z0-9]+(?:[._-][a-z0-9]+)*`;
           const registry = String.raw`(?:(?:localhost|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::([0-9]{1,5}))?/)`;
           const tag = String.raw`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`;

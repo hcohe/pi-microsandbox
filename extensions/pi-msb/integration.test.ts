@@ -104,6 +104,7 @@ test("extension integration keeps native SDK lazy and boots through the real ada
     });
     assert.equal(loads, 1);
     assert.equal(state.status, "active");
+    assert.ok(calls.includes(`image:${DEFAULT_CONFIG.image}`));
     assert.ok(calls.includes("memory:512"));
     assert.ok(calls.includes(`bind:${canonicalRoot}`));
     assert.ok(calls.includes(`volume:${root}`));
