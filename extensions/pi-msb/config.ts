@@ -20,7 +20,7 @@ const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"])
 
 /** Defaults from PLAN §11.2. Values containing credentials are deliberately absent. */
 export const DEFAULT_CONFIG: Config = {
-  image: "ubuntu:24.04",
+  image: "ghcr.io/hcohe/pi-microsandbox:latest",
   bootstrapTools: "auto",
   cpus: 1,
   memoryMiB: 512,

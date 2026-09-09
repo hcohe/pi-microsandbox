@@ -15,7 +15,7 @@ The following is a small project example:
 ```toml
 # .pi-msb.toml
 mode = "git"
-image = "ubuntu:24.04"
+image = "ghcr.io/hcohe/pi-microsandbox:latest"
 bootstrap_tools = "auto"
 idle_timeout_sec = 600
 fallback_mode = "block"
@@ -33,10 +33,13 @@ allow_hosts = ["registry.npmjs.org"]
 
 Important configuration behavior:
 
-- The default image is `ubuntu:24.04`; `bootstrap_tools = "auto"` probes for
-  `bash`, `git`, `rg`, `file`, `cat`, `mkdir`, and `rm`, then uses noninteractive
-  `apt-get` under the configured network policy. `false` blocks with the missing
-  command list. A custom image with those tools can use `bootstrap_tools = false`.
+- The default image is `ghcr.io/hcohe/pi-microsandbox:latest`. It is built from
+  [`default-image/Dockerfile`](../default-image/Dockerfile) for AMD64 and ARM64.
+  It adds the `git`, `ripgrep` (`rg`), and `file` packages to Ubuntu 24.04; the
+  base image supplies `bash`, `cat`, `mkdir`, and `rm`. `bootstrap_tools =
+  "auto"` still probes those commands and uses noninteractive
+  `apt-get` under the configured network policy if a custom image is missing
+  them. `false` blocks with the missing command list instead.
 - `network.mode = "default"` leaves the SDK's default policy in place. `open`
   allows all network traffic, including private/host access; `allowlist` is
   default-deny with configured host/DNS rules; `deny` disables networking.

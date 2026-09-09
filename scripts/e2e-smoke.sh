@@ -85,7 +85,9 @@ import { sandboxNameFor, volumeNameFor } from "__ROOT__/extensions/pi-msb/types.
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateLine, formatSize } from "@earendil-works/pi-coding-agent";
 
 const execFile = promisify(execFileCallback);
-const IMAGE = process.env.PI_MSB_LIVE_IMAGE || "ubuntu:24.04";
+const DEFAULT_IMAGE = "ghcr.io/hcohe/pi-microsandbox:latest";
+const IMAGE = process.env.PI_MSB_LIVE_IMAGE || DEFAULT_IMAGE;
+const PREPARED_IMAGE = process.env.PI_MSB_LIVE_PREPARED_IMAGE || DEFAULT_IMAGE;
 const ROOT = "__ROOT__";
 const names = [
   "Git bundle excludes untracked files",
@@ -414,15 +416,16 @@ async function scenario13() {
 async function scenario14() {
   const root = await repo(); let value; let prepared; const denySession = `deny-${Date.now()}`; let preparedSession;
   try {
-    value = integration(root, denySession, "git", { network: { mode: "deny", allowDns: false }, bootstrapTools: "auto" }, []);
-    const state = await value.configureSession({ sessionId: denySession, cwd: root, projectTrusted: true, config: { config: config(root, "git", { network: { mode: "deny", allowDns: false }, bootstrapTools: "auto" }), provenance: {}, warnings: [] } });
+    const unprepared = { image: "ubuntu:24.04", network: { mode: "deny", allowDns: false }, bootstrapTools: "auto" };
+    value = integration(root, denySession, "git", unprepared, []);
+    const state = await value.configureSession({ sessionId: denySession, cwd: root, projectTrusted: true, config: { config: config(root, "git", unprepared), provenance: {}, warnings: [] } });
     assert.equal(state.status, "unavailable", "deny mode should not silently widen networking to bootstrap");
-    if (process.env.PI_MSB_LIVE_PREPARED_IMAGE) {
-      preparedSession = `prepared-${Date.now()}`;
-      prepared = integration(root, preparedSession, "git", { image: process.env.PI_MSB_LIVE_PREPARED_IMAGE, bootstrapTools: false, network: { mode: "deny", allowDns: false } }, []);
-      const ps = await prepared.configureSession({ sessionId: preparedSession, cwd: root, projectTrusted: true, config: { config: config(root, "git", { image: process.env.PI_MSB_LIVE_PREPARED_IMAGE, bootstrapTools: false, network: { mode: "deny", allowDns: false } }), provenance: {}, warnings: [] } });
-      assert.equal(ps.status, "active");
-    }
+
+    preparedSession = `prepared-${Date.now()}`;
+    const preparedConfig = { image: PREPARED_IMAGE, bootstrapTools: false, network: { mode: "deny", allowDns: false } };
+    prepared = integration(root, preparedSession, "git", preparedConfig, []);
+    const ps = await prepared.configureSession({ sessionId: preparedSession, cwd: root, projectTrusted: true, config: { config: config(root, "git", preparedConfig), provenance: {}, warnings: [] } });
+    assert.equal(ps.status, "active");
   } finally {
     if (prepared) await close(prepared, preparedSession ? volumeNameFor(preparedSession) : undefined);
     if (value) { try { await value.manager.shutdown(); } finally { await removeVolumeIfPresent(value, volumeNameFor(denySession)); } }

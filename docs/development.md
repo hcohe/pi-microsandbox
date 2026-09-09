@@ -39,11 +39,12 @@ PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh
 Without that variable the script prints a `SKIP` line for every scenario and
 exits successfully; this skip path does not validate virtualization. If
 virtualization is unavailable, it prints the reason and skips the matrix rather
-than reporting false failures. Set `PI_MSB_LIVE_IMAGE` to select the live test
-image; the default is `ubuntu:24.04`. Set `PI_MSB_LIVE_PREPARED_IMAGE` to
-additionally exercise a prepared image under `network.mode = "deny"` without
-bootstrap. Review the output to confirm that all 16 scenarios report `PASS`,
-not `SKIP`.
+than reporting false failures. Set `PI_MSB_LIVE_IMAGE` to select the main live
+test image; the default is `ghcr.io/hcohe/pi-microsandbox:latest`.
+`PI_MSB_LIVE_PREPARED_IMAGE` can override the prepared image exercised under
+`network.mode = "deny"` without bootstrap; it defaults to the repository's
+published image. Review the output to confirm that all 16 scenarios report
+`PASS`, not `SKIP`.
 
 ## Releases
 
@@ -53,3 +54,8 @@ the reviewed tarball with interactive npm 2FA. Subsequent releases publish
 directly to npm with OIDC only after a maintainer publishes the matching GitHub
 Release and approves the protected `npm` GitHub Environment. Release automation
 must not use a long-lived npm token.
+
+The default sandbox image workflow publishes AMD64 and ARM64 images to
+`ghcr.io/hcohe/pi-microsandbox` from `main`, version tags, and manual runs. After
+the first publication, a package administrator must make the GHCR package
+public so Microsandbox can pull the default image without registry credentials.
