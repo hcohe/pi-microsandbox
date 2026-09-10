@@ -8,8 +8,16 @@ source "${verify_dir}/_common.sh"
 
 require_commands cc pip pip3 python python3 python3-config uv uvx
 
-[[ "$(uv --version)" == "uv 0.12.12" ]]
-[[ "$(python -c 'print(6 * 7)')" == "42" ]]
+uv_output="$(uv --version)"
+if [[ "${uv_output}" != "uv 0.12.12" ]]; then
+    printf 'Unexpected uv version: %s\n' "${uv_output}" >&2
+    exit 1
+fi
+python_output="$(python -c 'print(6 * 7)')"
+if [[ "${python_output}" != "42" ]]; then
+    printf 'Python execution probe returned: %s\n' "${python_output}" >&2
+    exit 1
+fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
