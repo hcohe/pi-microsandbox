@@ -20,6 +20,9 @@ FROM golang:${GO_VERSION}-bookworm AS go-toolchain
 ARG TARGETARCH
 ARG WATCHEXEC_VERSION
 RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends xz-utils; \
+    rm -rf /var/lib/apt/lists/*; \
     case "${TARGETARCH}" in \
         amd64) watchexec_arch=x86_64; watchexec_sha256=a2c01f82fb4cdafca1fa12cb88e4a1145dec63364dbdf92664efbaac3bb44dd2 ;; \
         arm64) watchexec_arch=aarch64; watchexec_sha256=83cbce2ffc85adaab14d6ded09b292f4383358ac6d9a51b4e4e083df0cb7c831 ;; \
