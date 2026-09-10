@@ -8,9 +8,18 @@ source "${verify_dir}/_common.sh"
 
 require_commands cc pip pip3 python python3 python3-config uv uvx
 
+case "$(uname -m)" in
+    x86_64) uv_arch="x86_64" ;;
+    aarch64) uv_arch="aarch64" ;;
+    *)
+        printf 'Unexpected Python image architecture: %s\n' "$(uname -m)" >&2
+        exit 1
+        ;;
+esac
 uv_output="$(uv --version)"
-if [[ "${uv_output}" != "uv 0.12.12" ]]; then
-    printf 'Unexpected uv version: %s\n' "${uv_output}" >&2
+expected_uv="uv 0.12.12 (${uv_arch}-unknown-linux-gnu)"
+if [[ "${uv_output}" != "${expected_uv}" ]]; then
+    printf 'Unexpected uv version: %s (expected %s)\n' "${uv_output}" "${expected_uv}" >&2
     exit 1
 fi
 python_output="$(python -c 'print(6 * 7)')"

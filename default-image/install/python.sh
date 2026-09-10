@@ -12,7 +12,7 @@ if command -v python >/dev/null 2>&1 \
     && command -v python3-config >/dev/null 2>&1 \
     && command -v pip >/dev/null 2>&1 \
     && command -v uv >/dev/null 2>&1 \
-    && [[ "$(uv --version)" == "uv ${uv_version}" ]] \
+    && [[ "$(uv --version)" == "uv ${uv_version} ("*"-unknown-linux-gnu)" ]] \
     && command -v uvx >/dev/null 2>&1 \
     && command -v cc >/dev/null 2>&1; then
     exit 0
