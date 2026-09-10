@@ -16,7 +16,7 @@ const active: RuntimeState = {
   },
 };
 
-test("footer status is hidden unless explicitly enabled", () => {
+test("footer status follows the visibility setting", () => {
   assert.equal(footerStatus(active, false), undefined);
-  assert.equal(footerStatus(active, true), "(msb) running on sandbox - bf9379");
+  assert.equal(footerStatus(active, true), "msb-bf9379");
 });

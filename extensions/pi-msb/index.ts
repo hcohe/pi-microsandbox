@@ -12,13 +12,14 @@ import { createHostReadAccess } from "./skill-access.ts";
 import { createSandboxGrepExecute } from "./operations-exec.ts";
 import { registerMsbCommand, systemPromptNote } from "./command.ts";
 import { createMsbIntegration } from "./control.ts";
+import { createMsbFooter } from "./footer.ts";
 import { registerSandboxTools } from "./tools.ts";
 import type { ResolvedConfig, RuntimeState } from "./types.ts";
 
 export function footerStatus(state: RuntimeState, visible: boolean): string | undefined {
   if (!visible) return undefined;
   switch (state.status) {
-    case "active": return `(msb) running on sandbox - ${state.info?.displayId ?? "active"}`;
+    case "active": return `msb-${state.info?.displayId ?? "active"}`;
     case "off": return "MSB host";
     case "host-fallback": return "MSB host fallback";
     case "unavailable": return "MSB blocked";
@@ -50,6 +51,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   let currentContext: ExtensionContext | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
+  let customFooterInstalled = false;
 
   const styleFooterStatus = (ctx: ExtensionContext, text: string): string =>
     `\x1b[22m${ctx.ui.theme.fg("dim", text)}\x1b[22m`;
@@ -77,8 +79,15 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     bootAnimation = setInterval(render, 400);
   };
 
+  const ensureCustomFooter = (ctx: ExtensionContext): void => {
+    if (customFooterInstalled) return;
+    ctx.ui.setFooter((tui, theme, footerData) => createMsbFooter(tui, theme, ctx, footerData));
+    customFooterInstalled = true;
+  };
+
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
     const text = footerStatus(state, integration.configRef.value.showFooter);
+    if (text !== undefined) ensureCustomFooter(ctx);
     if (text === undefined) {
       stopBootAnimation();
       ctx.ui.setStatus("pi-msb", undefined);
@@ -132,6 +141,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     await integration.manager.shutdown();
     hostReads.clear();
     ctx.ui.setStatus("pi-msb", undefined);
+    // Pi tears down extension-owned UI after this hook. Do not call
+    // setFooter(undefined): another extension may have replaced our footer.
     currentContext = undefined;
   });
 
