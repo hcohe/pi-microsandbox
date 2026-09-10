@@ -19,7 +19,7 @@ image = "ghcr.io/hcohe/pi-microsandbox:latest"
 bootstrap_tools = "auto"
 idle_timeout_sec = 600
 fallback_mode = "block"
-show_footer = false # Set true to show the MSB status in Pi's footer.
+show_footer = true # Default; set false to hide the MSB footer status.
 
 [network]
 mode = "default" # default | open | allowlist | deny
@@ -34,6 +34,11 @@ allow_hosts = ["registry.npmjs.org"]
 
 Important configuration behavior:
 
+- `show_footer = true` uses Pi's single custom-footer slot so the MSB status can
+  appear in the upper-right corner. It replaces Pi's built-in footer (or another
+  extension's custom footer), preserves the standard location, usage, model,
+  and shared status fields, but cannot show Pi-only indicators such as the
+  auto-compaction and experimental-feature markers.
 - The default image is `ghcr.io/hcohe/pi-microsandbox:latest`. It is built from
   [`default-image/Dockerfile`](../default-image/Dockerfile) for AMD64 and ARM64.
   It adds the `git`, `ripgrep` (`rg`), and `file` packages to Ubuntu 24.04; the
@@ -61,7 +66,7 @@ PI_MSB_DISABLE=1                 # explicit host/off mode
 PI_MSB_MODE=none                 # nested scalar example
 PI_MSB_NETWORK__MODE=deny        # nested environment key
 PI_MSB_FALLBACK_MODE=host        # opt into automatic host fallback
-PI_MSB_SHOW_FOOTER=true          # show the MSB status in Pi's footer
+PI_MSB_SHOW_FOOTER=false         # hide the MSB status from Pi's footer
 PI_MSB_ROUTE_TOOLS='read,write'  # POSIX delimiter for simple arrays
 ```
 

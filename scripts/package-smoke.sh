@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/pi-msb-package-smoke.XXXXXX")
+mkdir -p -- "$ROOT/.tmp"
+TMP_ROOT=$(mktemp -d "$ROOT/.tmp/pi-msb-package-smoke.XXXXXX")
 # Keep Node/Pi helper caches (including jiti output) inside the directory owned
 # by this script so the EXIT trap removes every temporary artifact.
 export TMPDIR="$TMP_ROOT"
@@ -52,6 +53,7 @@ docs/troubleshooting.md required
 extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
 extensions/pi-msb/control.ts required
+extensions/pi-msb/footer.ts required
 extensions/pi-msb/git.ts required
 extensions/pi-msb/index.ts required
 extensions/pi-msb/labels.ts required
@@ -104,9 +106,10 @@ else
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
-const data = JSON.parse(readFileSync(process.argv[2], "utf8"));
-if (!Array.isArray(data) || data.length !== 1) {
-  throw new Error(`expected one npm pack result, received ${Array.isArray(data) ? data.length : "non-array JSON"}`);
+const result = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const data = Array.isArray(result) ? result : Object.values(result);
+if (data.length !== 1) {
+  throw new Error(`expected one npm pack result, received ${data.length}`);
 }
 const filename = data[0]?.filename;
 if (typeof filename !== "string" || filename.length === 0 || basename(filename) !== filename || !filename.endsWith(".tgz")) {
@@ -155,9 +158,10 @@ cat >"$CONSUMER_DIR/package.json" <<'EOF'
 EOF
 
 PI_PEER_VERSION=$(tar -xOzf "$TARBALL" package/package.json | node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(JSON.parse(s).devDependencies["@earendil-works/pi-coding-agent"] ?? ""))')
+PI_TUI_PEER_VERSION=$(tar -xOzf "$TARBALL" package/package.json | node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(JSON.parse(s).devDependencies["@earendil-works/pi-tui"] ?? ""))')
 TYPEBOX_PEER_VERSION=$(tar -xOzf "$TARBALL" package/package.json | node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(JSON.parse(s).devDependencies.typebox ?? ""))')
-if [[ -z "$PI_PEER_VERSION" || -z "$TYPEBOX_PEER_VERSION" ]]; then
-  printf 'package smoke: package.json must pin development fixtures for both peer dependencies\n' >&2
+if [[ -z "$PI_PEER_VERSION" || -z "$PI_TUI_PEER_VERSION" || -z "$TYPEBOX_PEER_VERSION" ]]; then
+  printf 'package smoke: package.json must pin development fixtures for all peer dependencies\n' >&2
   exit 1
 fi
 
@@ -175,6 +179,7 @@ npm install \
   --registry=https://registry.npmjs.org/ \
   "$TARBALL" \
   "@earendil-works/pi-coding-agent@$PI_PEER_VERSION" \
+  "@earendil-works/pi-tui@$PI_TUI_PEER_VERSION" \
   "typebox@$TYPEBOX_PEER_VERSION"
 
 INSTALLED_PACKAGE="$CONSUMER_DIR/node_modules/pi-microsandbox"
