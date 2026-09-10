@@ -84,6 +84,7 @@ export interface Config {
   hostEnv: string[];
   autoStart: boolean;
   pruneOnStart: boolean;
+  showFooter: boolean;
   lockDir: string;
   hostRoAllowlist: string[];
 }

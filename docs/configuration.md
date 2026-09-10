@@ -19,6 +19,7 @@ image = "ghcr.io/hcohe/pi-microsandbox:latest"
 bootstrap_tools = "auto"
 idle_timeout_sec = 600
 fallback_mode = "block"
+show_footer = false # Set true to show the MSB status in Pi's footer.
 
 [network]
 mode = "default" # default | open | allowlist | deny
@@ -60,6 +61,7 @@ PI_MSB_DISABLE=1                 # explicit host/off mode
 PI_MSB_MODE=none                 # nested scalar example
 PI_MSB_NETWORK__MODE=deny        # nested environment key
 PI_MSB_FALLBACK_MODE=host        # opt into automatic host fallback
+PI_MSB_SHOW_FOOTER=true          # show the MSB status in Pi's footer
 PI_MSB_ROUTE_TOOLS='read,write'  # POSIX delimiter for simple arrays
 ```
 

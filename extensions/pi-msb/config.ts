@@ -48,6 +48,7 @@ export const DEFAULT_CONFIG: Config = {
   hostEnv: [],
   autoStart: true,
   pruneOnStart: true,
+  showFooter: false,
   lockDir: "~/.pi-msb/locks",
   hostRoAllowlist: [],
 };
@@ -289,7 +290,7 @@ function knownPath(path: string): boolean {
   if (parts[0] === "network") return parts.length === 1 || (parts.length === 2 && ["mode", "allowHosts", "allowDns", "publishPorts", "removeAllowHosts", "removePublishPorts"].includes(parts[1]));
   if (parts[0] === "secrets") return parts.length === 1 || (parts.length === 2 && SECRET_FIELDS.has(parts[1]));
   if (parts[0] === "mounts") return parts.length === 1 || (parts.length === 2 && MOUNT_FIELDS.has(parts[1]));
-  return ["image", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "lockDir", "hostRoAllowlist"].includes(parts[0]);
+  return ["image", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
 }
 function collectUnknown(value: unknown, base: string[], warnings: string[]): void {
   if (!isPlainObject(value)) return;
@@ -484,7 +485,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (!["auto", "git", "direct", "none"].includes(config.mode)) issues.push(issueForPath("mode", "unknown storage mode"));
   if (!["auto", true, false].includes(config.bootstrapTools)) issues.push(issueForPath("bootstrapTools", "must be auto, true, or false"));
   if (!["block", "host"].includes(config.fallbackMode)) issues.push(issueForPath("fallbackMode", "must be block or host"));
-  const booleanFields = ["detached", "replace", "shallowArchive", "blockThirdParty", "allowHostExecution", "allowSkillReads", "exposeSessionEnvironment", "autoStart", "pruneOnStart"] as const;
+  const booleanFields = ["detached", "replace", "shallowArchive", "blockThirdParty", "allowHostExecution", "allowSkillReads", "exposeSessionEnvironment", "autoStart", "pruneOnStart", "showFooter"] as const;
   for (const field of booleanFields) if (typeof config[field] !== "boolean") issues.push(issueForPath(field, "must be boolean"));
   if (config.sandboxName !== null && typeof config.sandboxName !== "string") issues.push(issueForPath("sandboxName", "must be a string or null"));
   if (typeof config.cloneBranch !== "string" || !config.cloneBranch) issues.push(issueForPath("cloneBranch", "must be a non-empty string"));

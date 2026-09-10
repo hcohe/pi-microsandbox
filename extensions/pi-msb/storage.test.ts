@@ -59,6 +59,7 @@ const config = (mode: Config["mode"]): Config => ({
   hostEnv: [],
   autoStart: true,
   pruneOnStart: true,
+  showFooter: false,
   lockDir: "/tmp/pi-msb-locks",
   hostRoAllowlist: [],
 });
