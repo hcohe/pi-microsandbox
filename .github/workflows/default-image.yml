@@ -4,15 +4,11 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
     paths:
-      - default-image/**
-      - .github/workflows/default-image.yml
+      - default-image/Dockerfile
   pull_request:
     paths:
-      - default-image/**
-      - .github/workflows/default-image.yml
+      - default-image/Dockerfile
   workflow_dispatch:
 
 permissions:
