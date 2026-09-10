@@ -36,11 +36,12 @@ Important configuration behavior:
 
 - The default image is `ghcr.io/hcohe/pi-microsandbox:latest`. It is built from
   [`default-image/Dockerfile`](../default-image/Dockerfile) for AMD64 and ARM64.
-  It adds the `git`, `ripgrep` (`rg`), and `file` packages to Ubuntu 24.04; the
-  base image supplies `bash`, `cat`, `mkdir`, and `rm`. `bootstrap_tools =
-  "auto"` still probes those commands and uses noninteractive
-  `apt-get` under the configured network policy if a custom image is missing
-  them. `false` blocks with the missing command list instead.
+  It includes Node.js, Python, Go, Rust, Java, Ruby, PHP, Lua, C/C++ build tools,
+  and commonly used coding-agent utilities such as Git, ripgrep, GitHub CLI,
+  debuggers, linters, and archive/network tools. `bootstrap_tools = "auto"`
+  still probes the required commands and uses noninteractive `apt-get` under
+  the configured network policy if a custom image is missing them. `false`
+  blocks with the missing command list instead.
 - `network.mode = "default"` leaves the SDK's default policy in place. `open`
   allows all network traffic, including private/host access; `allowlist` is
   default-deny with configured host/DNS rules; `deny` disables networking.
