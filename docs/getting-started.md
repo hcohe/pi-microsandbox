@@ -40,6 +40,10 @@ Install the package for the current user with Pi:
 pi install npm:pi-microsandbox
 ```
 
+Before starting a sandbox, review [configuration](configuration.md) and choose a
+[published variant or custom image](images.md) if the versioned default image
+does not fit the project.
+
 For a first load, explicit off mode lets you inspect the installation without
 starting virtualization:
 

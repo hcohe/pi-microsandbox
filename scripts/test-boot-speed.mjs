@@ -191,6 +191,7 @@ async function main() {
     const config = {
       ...DEFAULT_CONFIG,
       image: options.image,
+      pullPolicy: "if-missing",
       mode: "direct",
       bootstrapTools: false,
       autoStart: true,

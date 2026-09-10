@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   DEFAULT_CONFIG,
@@ -20,7 +21,9 @@ const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ nam
 
 test("defaults and precedence are deterministic", async () => {
   assert.equal(DEFAULT_CONFIG.mode, "direct");
-  assert.equal(DEFAULT_CONFIG.image, "ghcr.io/hcohe/pi-microsandbox:latest");
+  const packageVersion = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
+  assert.equal(DEFAULT_CONFIG.image, `ghcr.io/hcohe/pi-microsandbox:${packageVersion}`);
+  assert.equal(DEFAULT_CONFIG.pullPolicy, "if-missing");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
   assert.equal(DEFAULT_CONFIG.showFooter, true);
   const files = new Map([
@@ -211,6 +214,17 @@ test("validation reports all hard issues and mount overlap", () => {
       { type: "dir", hostPath: "/b", guestPath: "/mnt/sub", readonly: true, options: [] },
     ],
   }), (error: unknown) => error instanceof ConfigError && error.issues.length >= 3);
+});
+
+test("image pull policy is configurable and validated", () => {
+  const toml = parseTomlConfig('pull_policy = "if-missing"', "global");
+  assert.equal(toml.value.pullPolicy, "if-missing");
+  assert.deepEqual(toml.warnings, []);
+
+  const env = parseEnvConfig({ PI_MSB_PULL_POLICY: "never" });
+  assert.equal(env.value.pullPolicy, "never");
+  assert.deepEqual(env.warnings, []);
+  assert.throws(() => validateConfig({ pullPolicy: "sometimes" as any }), /pullPolicy: must be always, if-missing, or never/);
 });
 
 test("footer visibility is configurable and shown by default", () => {

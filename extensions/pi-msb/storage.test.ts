@@ -32,6 +32,7 @@ const repo = (overrides: Partial<GitRepoInfo> = {}): GitRepoInfo => ({
 
 const config = (mode: Config["mode"]): Config => ({
   image: "ubuntu:24.04",
+  pullPolicy: "if-missing",
   bootstrapTools: "auto",
   cpus: 1,
   memoryMiB: 512,

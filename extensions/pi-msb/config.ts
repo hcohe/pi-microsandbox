@@ -20,7 +20,8 @@ const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"])
 
 /** Defaults from PLAN §11.2. Values containing credentials are deliberately absent. */
 export const DEFAULT_CONFIG: Config = {
-  image: "ghcr.io/hcohe/pi-microsandbox:latest",
+  image: "ghcr.io/hcohe/pi-microsandbox:0.1.0",
+  pullPolicy: "if-missing",
   bootstrapTools: "auto",
   cpus: 1,
   memoryMiB: 512,
@@ -290,7 +291,7 @@ function knownPath(path: string): boolean {
   if (parts[0] === "network") return parts.length === 1 || (parts.length === 2 && ["mode", "allowHosts", "allowDns", "publishPorts", "removeAllowHosts", "removePublishPorts"].includes(parts[1]));
   if (parts[0] === "secrets") return parts.length === 1 || (parts.length === 2 && SECRET_FIELDS.has(parts[1]));
   if (parts[0] === "mounts") return parts.length === 1 || (parts.length === 2 && MOUNT_FIELDS.has(parts[1]));
-  return ["image", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
+  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
 }
 function collectUnknown(value: unknown, base: string[], warnings: string[]): void {
   if (!isPlainObject(value)) return;
@@ -476,6 +477,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   const issues: string[] = [];
   const n = (value: unknown) => typeof value === "number" && Number.isFinite(value);
   if (!config.image || typeof config.image !== "string") issues.push(issueForPath("image", "must be a non-empty string"));
+  if (!["always", "if-missing", "never"].includes(config.pullPolicy)) issues.push(issueForPath("pullPolicy", "must be always, if-missing, or never"));
   if (!n(config.cpus) || config.cpus < 1 || config.cpus > 64) issues.push(issueForPath("cpus", "must be between 1 and 64"));
   if (!n(config.memoryMiB) || config.memoryMiB < 128) issues.push(issueForPath("memoryMiB", "must be at least 128 MiB"));
   if (!n(config.idleTimeoutSec) || config.idleTimeoutSec < 0) issues.push(issueForPath("idleTimeoutSec", "must be non-negative"));

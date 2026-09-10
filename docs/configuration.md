@@ -15,7 +15,8 @@ The following is a small project example:
 ```toml
 # .pi-msb.toml
 mode = "git"
-image = "ghcr.io/hcohe/pi-microsandbox:latest"
+image = "ghcr.io/hcohe/pi-microsandbox:0.1.0"
+pull_policy = "if-missing"
 bootstrap_tools = "auto"
 idle_timeout_sec = 600
 fallback_mode = "block"
@@ -39,14 +40,15 @@ Important configuration behavior:
   extension's custom footer), preserves the standard location, usage, model,
   and shared status fields, but cannot show Pi-only indicators such as the
   auto-compaction and experimental-feature markers.
-- The default image is `ghcr.io/hcohe/pi-microsandbox:latest`. It is built on
-  Ubuntu 26.04 from [`default-image/Dockerfile`](../default-image/Dockerfile) for
-  AMD64 and ARM64. It includes Node.js, Python, Go, Rust, Java, Ruby, PHP, Lua,
-  C/C++ build tools, Chromium with Playwright and `agent-browser`, database and
-  OCI clients, and commonly used coding-agent utilities. `bootstrap_tools =
-  "auto"` still probes the required commands and uses noninteractive `apt-get`
-  under the configured network policy if a custom image is missing them.
-  `false` blocks with the missing command list instead.
+- The default image is the complete Node.js, Python, Rust, and Go variant at
+  `ghcr.io/hcohe/pi-microsandbox:0.1.0`, matching the package version. The
+  default `pull_policy = "if-missing"` pulls only when that reference is absent
+  from the Microsandbox cache. `"always"` and `"never"` are also supported.
+  See [Images](images.md) for all published variants, exact tag patterns,
+  contents, custom image workflows, and the required guest commands.
+  `bootstrap_tools = "auto"` probes those commands and uses noninteractive
+  `apt-get` under the configured network policy when a custom image is missing
+  them. `false` blocks with the missing command list instead.
 - `network.mode = "default"` leaves the SDK's default policy in place. `open`
   allows all network traffic, including private/host access; `allowlist` is
   default-deny with configured host/DNS rules; `deny` disables networking.
@@ -65,6 +67,7 @@ Useful environment controls include:
 ```sh
 PI_MSB_DISABLE=1                 # explicit host/off mode
 PI_MSB_MODE=none                 # nested scalar example
+PI_MSB_PULL_POLICY=always        # recheck mutable custom image tags on creation
 PI_MSB_NETWORK__MODE=deny        # nested environment key
 PI_MSB_FALLBACK_MODE=host        # opt into automatic host fallback
 PI_MSB_SHOW_FOOTER=false         # hide the MSB status from Pi's footer

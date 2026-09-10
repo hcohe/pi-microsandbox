@@ -27,6 +27,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      packages: read
+      attestations: read
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
@@ -95,11 +97,11 @@ jobs:
           const fs = require("node:fs");
           const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
           const expectedName = "pi-microsandbox";
-          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+          const stableVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
           if (pkg.name !== expectedName) {
             throw new Error(`Expected package ${expectedName}, got ${pkg.name}`);
           }
-          if (typeof pkg.version !== "string" || !semver.test(pkg.version)) {
+          if (typeof pkg.version !== "string" || !stableVersion.test(pkg.version)) {
             throw new Error(`Invalid package version: ${pkg.version}`);
           }
           if (process.env.RELEASE_TAG !== `v${pkg.version}`) {
@@ -114,14 +116,68 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Verify the default sandbox image is publicly available
+      - name: Verify the complete versioned image cohort is public
         shell: bash
+        env:
+          IMAGE_VERSION: ${{ steps.package.outputs.version }}
+          EXPECTED_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if ! docker buildx imagetools inspect ghcr.io/hcohe/pi-microsandbox:latest >/dev/null; then
-            echo "The default sandbox image must be published and public before the npm release." >&2
-            exit 1
-          fi
+          refs="$RUNNER_TEMP/release-image-refs.tsv"
+          node scripts/image-variants.mjs refs release \
+            ghcr.io/hcohe/pi-microsandbox "$IMAGE_VERSION" > "$refs"
+          [[ -s "$refs" ]]
+
+          while IFS=$'\t' read -r variant image_reference; do
+            manifest="$RUNNER_TEMP/release-${variant}-manifest.json"
+            if ! docker buildx imagetools inspect --raw "$image_reference" > "$manifest"; then
+              echo "The versioned sandbox image ${image_reference} must be published and public before the npm release." >&2
+              exit 1
+            fi
+            node scripts/image-variants.mjs verify-manifest "$manifest" "$image_reference"
+
+            for platform in linux/amd64 linux/arm64; do
+              config="$RUNNER_TEMP/release-${variant}-${platform//\//-}.json"
+              docker buildx imagetools inspect "$image_reference" \
+                --format "{{json (index .Image \"$platform\")}}" > "$config"
+              node scripts/image-variants.mjs verify-config \
+                "$config" "$variant" "$IMAGE_VERSION" "$EXPECTED_REVISION" "$platform"
+            done
+          done < "$refs"
+
+      - name: Log in to GitHub Container Registry for provenance lookup
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify provenance for the complete versioned image cohort
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_VERSION: ${{ steps.package.outputs.version }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          refs="$RUNNER_TEMP/release-image-refs.tsv"
+          node scripts/image-variants.mjs refs release \
+            ghcr.io/hcohe/pi-microsandbox "$IMAGE_VERSION" > "$refs"
+          [[ -s "$refs" ]]
+
+          while IFS=$'\t' read -r variant image_reference; do
+            gh attestation verify "oci://${image_reference}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/default-image.yml" \
+              --signer-digest "$EXPECTED_REVISION" \
+              --source-ref "refs/tags/v${IMAGE_VERSION}" \
+              --source-digest "$EXPECTED_REVISION" \
+              --deny-self-hosted-runners
+          done < "$refs"
+
+      - name: Log out of GitHub Container Registry
+        if: always()
+        run: docker logout ghcr.io
 
       # Install scripts must remain enabled because fs-ext is a native dependency.
       - name: Install dependencies

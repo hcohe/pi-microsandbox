@@ -4,11 +4,17 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
     paths:
-      - default-image/Dockerfile
+      - default-image/**
+      - scripts/image-variants.mjs
+      - .github/workflows/default-image.yml
   pull_request:
     paths:
-      - default-image/Dockerfile
+      - default-image/**
+      - scripts/image-variants.mjs
+      - .github/workflows/default-image.yml
   workflow_dispatch:
 
 permissions:
@@ -22,13 +28,77 @@ env:
   IMAGE_NAME: ghcr.io/hcohe/pi-microsandbox
 
 jobs:
-  validate:
-    name: Validate image build
-    if: github.event_name == 'pull_request'
+  variants:
+    name: Load image variants
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      matrix: ${{ steps.configure.outputs.matrix }}
+      channel: ${{ steps.configure.outputs.channel }}
+      version: ${{ steps.configure.outputs.version }}
+      cache_suffix: ${{ steps.configure.outputs.cache_suffix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate variants and publication context
+        id: configure
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          node scripts/image-variants.mjs self-test
+          matrix="$(node scripts/image-variants.mjs matrix)"
+          node scripts/image-variants.mjs refs latest "$IMAGE_NAME" >/dev/null
+          channel=validate
+          version="$GITHUB_SHA"
+          cache_suffix="$GITHUB_SHA"
+
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            package_version="$(node -p "require('./package.json').version")"
+            if [[ ! "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Release image tags must have the exact form vX.Y.Z: $REF_NAME" >&2
+              exit 1
+            fi
+            version="${REF_NAME#v}"
+            if [[ "$version" != "$package_version" ]]; then
+              echo "Image tag $REF_NAME must equal package version tag v${package_version}" >&2
+              exit 1
+            fi
+            # Materialize the complete cohort now so concrete cross-variant tag
+            # collisions fail before any matrix job can publish.
+            node scripts/image-variants.mjs refs release "$IMAGE_NAME" "$version" >/dev/null
+            channel=release
+            cache_suffix="$version"
+          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            channel=main
+            cache_suffix=main
+          fi
+
+          {
+            echo "matrix=$matrix"
+            echo "channel=$channel"
+            echo "version=$version"
+            echo "cache_suffix=$cache_suffix"
+          } >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate ${{ matrix.variant }} image
+    if: needs.variants.outputs.channel == 'validate'
+    needs: variants
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.variants.outputs.matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,26 +111,40 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Build the image
+      - name: Build and verify the image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ./default-image
           platforms: linux/amd64,linux/arm64
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            IMAGE_VARIANT=${{ matrix.variant }}
+            TOOLCHAINS=${{ matrix.toolchains }}
+            IMAGE_VERSION=${{ needs.variants.outputs.version }}
+          labels: |
+            org.opencontainers.image.variant=${{ matrix.variant }}
+            org.opencontainers.image.version=${{ needs.variants.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=default-image-${{ matrix.variant }}-main
+            type=gha,scope=default-image-${{ matrix.variant }}-${{ needs.variants.outputs.cache_suffix }}
+          cache-to: type=gha,mode=max,scope=default-image-${{ matrix.variant }}-${{ needs.variants.outputs.cache_suffix }}
 
   publish:
-    name: Publish image
-    if: github.event_name != 'pull_request'
+    name: Publish ${{ matrix.variant }} image
+    if: needs.variants.outputs.channel == 'main' || needs.variants.outputs.channel == 'release'
+    needs: variants
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
       artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.variants.outputs.matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,64 +164,223 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,format=long,prefix=sha-
+      - name: Select publication tags
+        id: tags
+        shell: bash
+        env:
+          CHANNEL: ${{ needs.variants.outputs.channel }}
+          IMAGE_VERSION: ${{ needs.variants.outputs.version }}
+          LATEST_TAG: ${{ matrix.latestTag }}
+          RELEASE_TEMPLATE: ${{ matrix.releaseTemplate }}
+          SHA_PREFIX: ${{ matrix.shaPrefix }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" == "release" ]]; then
+            release_tag="${RELEASE_TEMPLATE//\{version\}/$IMAGE_VERSION}"
+            final_tags="${IMAGE_NAME}:${release_tag}"
+            candidate="${IMAGE_NAME}:candidate-${VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            build_tags="$candidate"
+          else
+            final_tags="${IMAGE_NAME}:${LATEST_TAG}"$'\n'"${IMAGE_NAME}:${SHA_PREFIX}${GITHUB_SHA}"
+            candidate=""
+            build_tags="$final_tags"
+          fi
+          {
+            echo 'final_tags<<EOF'
+            echo "$final_tags"
+            echo EOF
+            echo "candidate=$candidate"
+            echo 'build_tags<<EOF'
+            echo "$build_tags"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check write-once release tag
+        id: existing
+        if: needs.variants.outputs.channel == 'release'
+        shell: bash
+        env:
+          IMAGE_REFERENCE: ${{ steps.tags.outputs.final_tags }}
+        run: |
+          set -euo pipefail
+          error_file="$RUNNER_TEMP/version-tag-inspect.err"
+          if docker buildx imagetools inspect "$IMAGE_REFERENCE" >/dev/null 2>"$error_file"; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Release tag already exists; it must pass the identity checks before it can be accepted."
+          elif grep -Eiq 'manifest unknown|name unknown|unexpected status[^[:cntrl:]]*404 Not Found|response status[^[:cntrl:]]*404' "$error_file"; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Release tag is absent; a unique candidate will be built and verified first."
+          else
+            echo "Could not safely determine registry state for ${IMAGE_REFERENCE}:" >&2
+            cat "$error_file" >&2
+            exit 1
+          fi
 
       - name: Build and publish the image
         id: build
+        if: needs.variants.outputs.channel == 'main' || steps.existing.outputs.build == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ./default-image
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.build_tags }}
+          build-args: |
+            IMAGE_VARIANT=${{ matrix.variant }}
+            TOOLCHAINS=${{ matrix.toolchains }}
+            IMAGE_VERSION=${{ needs.variants.outputs.version }}
+          labels: |
+            org.opencontainers.image.variant=${{ matrix.variant }}
+            org.opencontainers.image.version=${{ needs.variants.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=default-image-${{ matrix.variant }}-main
+            type=gha,scope=default-image-${{ matrix.variant }}-${{ needs.variants.outputs.cache_suffix }}
+          cache-to: type=gha,mode=max,scope=default-image-${{ matrix.variant }}-${{ needs.variants.outputs.cache_suffix }}
           sbom: true
           provenance: false
 
       - name: Attest build provenance
+        if: needs.variants.outputs.channel == 'main' || steps.existing.outputs.build == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      - name: Log out of GitHub Container Registry
-        run: docker logout ghcr.io
-
-      - name: Verify the image is publicly available for both architectures
+      - name: Verify release candidate before promotion
+        if: needs.variants.outputs.channel == 'release' && steps.existing.outputs.build == 'true'
         shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          CANDIDATE_REFERENCE: ${{ steps.tags.outputs.candidate }}
+          EXPECTED_VERSION: ${{ needs.variants.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
-          manifest="$RUNNER_TEMP/default-image-manifest.json"
-          if ! docker buildx imagetools inspect --raw "${IMAGE_NAME}@${IMAGE_DIGEST}" > "$manifest"; then
-            echo "Anonymous image pull failed. Make the GHCR package public, then rerun this workflow." >&2
+          digest_file="$RUNNER_TEMP/${VARIANT}-candidate-digest.json"
+          docker buildx imagetools inspect "$CANDIDATE_REFERENCE" \
+            --format '{{json .Manifest.Digest}}' > "$digest_file"
+          candidate_digest="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$digest_file")"
+          if [[ "$candidate_digest" != "$BUILD_DIGEST" ]]; then
+            echo "Candidate ${CANDIDATE_REFERENCE} resolved to ${candidate_digest}, expected ${BUILD_DIGEST}." >&2
             exit 1
           fi
 
-          MANIFEST_PATH="$manifest" node <<'NODE'
-          const fs = require("node:fs");
-          const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH, "utf8"));
-          const platforms = new Set(
-            (manifest.manifests ?? []).map((item) =>
-              `${item.platform?.os ?? ""}/${item.platform?.architecture ?? ""}`,
-            ),
-          );
-          for (const required of ["linux/amd64", "linux/arm64"]) {
-            if (!platforms.has(required)) throw new Error(`Published image is missing ${required}`);
-          }
-          NODE
+          manifest="$RUNNER_TEMP/${VARIANT}-candidate-manifest.json"
+          docker buildx imagetools inspect --raw "$CANDIDATE_REFERENCE" > "$manifest"
+          node scripts/image-variants.mjs verify-manifest "$manifest" "$CANDIDATE_REFERENCE"
+          for platform in linux/amd64 linux/arm64; do
+            config="$RUNNER_TEMP/${VARIANT}-candidate-${platform//\//-}.json"
+            docker buildx imagetools inspect "$CANDIDATE_REFERENCE" \
+              --format "{{json (index .Image \"$platform\")}}" > "$config"
+            node scripts/image-variants.mjs verify-config \
+              "$config" "$VARIANT" "$EXPECTED_VERSION" "$GITHUB_SHA" "$platform"
+          done
+
+          verified=false
+          for attempt in 1 2 3 4 5 6; do
+            if gh attestation verify "oci://${CANDIDATE_REFERENCE}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/default-image.yml" \
+              --signer-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners; then
+              verified=true
+              break
+            fi
+            [[ $attempt -eq 6 ]] || sleep $((attempt * 2))
+          done
+          if [[ "$verified" != true ]]; then
+            echo "No matching GitHub provenance was found for ${CANDIDATE_REFERENCE}." >&2
+            exit 1
+          fi
+
+      - name: Promote verified release candidate
+        if: needs.variants.outputs.channel == 'release' && steps.existing.outputs.build == 'true'
+        shell: bash
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          FINAL_REFERENCE: ${{ steps.tags.outputs.final_tags }}
+        run: |
+          set -euo pipefail
+          error_file="$RUNNER_TEMP/version-tag-promote-inspect.err"
+          if docker buildx imagetools inspect "$FINAL_REFERENCE" >/dev/null 2>"$error_file"; then
+            echo "Refusing to overwrite release tag that appeared during candidate verification: ${FINAL_REFERENCE}" >&2
+            exit 1
+          elif ! grep -Eiq 'manifest unknown|name unknown|unexpected status[^[:cntrl:]]*404 Not Found|response status[^[:cntrl:]]*404' "$error_file"; then
+            echo "Could not safely re-check registry state for ${FINAL_REFERENCE}:" >&2
+            cat "$error_file" >&2
+            exit 1
+          fi
+
+          # Assigning the final tag is intentionally the last registry write.
+          docker buildx imagetools create --prefer-index=false \
+            --tag "$FINAL_REFERENCE" "${IMAGE_NAME}@${BUILD_DIGEST}"
+
+      - name: Verify final image identity and provenance
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.variants.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHED_TAGS: ${{ steps.tags.outputs.final_tags }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r image_reference; do
+            [[ -n "$image_reference" ]] || continue
+            manifest="$RUNNER_TEMP/${VARIANT}-final-manifest.json"
+            docker buildx imagetools inspect --raw "$image_reference" > "$manifest"
+            node scripts/image-variants.mjs verify-manifest "$manifest" "$image_reference"
+
+            for platform in linux/amd64 linux/arm64; do
+              config="$RUNNER_TEMP/${VARIANT}-final-${platform//\//-}.json"
+              docker buildx imagetools inspect "$image_reference" \
+                --format "{{json (index .Image \"$platform\")}}" > "$config"
+              node scripts/image-variants.mjs verify-config \
+                "$config" "$VARIANT" "$EXPECTED_VERSION" "$GITHUB_SHA" "$platform"
+            done
+
+            verified=false
+            for attempt in 1 2 3 4 5 6; do
+              if gh attestation verify "oci://${image_reference}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/default-image.yml" \
+                --signer-digest "$GITHUB_SHA" \
+                --source-ref "$GITHUB_REF" \
+                --source-digest "$GITHUB_SHA" \
+                --deny-self-hosted-runners; then
+                verified=true
+                break
+              fi
+              [[ $attempt -eq 6 ]] || sleep $((attempt * 2))
+            done
+            if [[ "$verified" != true ]]; then
+              echo "No matching GitHub provenance was found for ${image_reference}." >&2
+              exit 1
+            fi
+          done <<< "$PUBLISHED_TAGS"
+
+      - name: Log out of GitHub Container Registry
+        if: always()
+        run: docker logout ghcr.io
+
+      - name: Verify every tag is anonymously available
+        shell: bash
+        env:
+          PUBLISHED_TAGS: ${{ steps.tags.outputs.final_tags }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r image_reference; do
+            [[ -n "$image_reference" ]] || continue
+            manifest="$RUNNER_TEMP/${VARIANT}-anonymous-manifest.json"
+            if ! docker buildx imagetools inspect --raw "$image_reference" > "$manifest"; then
+              echo "Anonymous image pull failed for ${image_reference}. Make the GHCR package public, then rerun this workflow." >&2
+              exit 1
+            fi
+            node scripts/image-variants.mjs verify-manifest "$manifest" "$image_reference"
+          done <<< "$PUBLISHED_TAGS"

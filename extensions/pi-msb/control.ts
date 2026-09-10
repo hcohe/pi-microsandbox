@@ -473,7 +473,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const plan = prepared.plan;
       const mode = plan.kind === "git-volume" ? "git" : plan.kind === "direct-mount" ? "direct" : "none";
       const labels = buildSandboxLabels({ sessionId: request.sessionId, mode, cwd: request.cwd, pid: process.pid, image: request.config.image, volumeName: plan.kind === "git-volume" ? plan.volumeName : undefined, seedBranch: plan.kind === "git-volume" ? plan.branch : null, seedSha: plan.kind === "git-volume" ? plan.headSha : null });
-      let builder = msb.Sandbox.builder(name).image(request.config.image).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeout(request.config.idleTimeoutSec).detached(request.config.detached).workdir(plan.kind === "git-volume" ? plan.workdir : request.cwd).labels(labels);
+      let builder = msb.Sandbox.builder(name).image(request.config.image).pullPolicy(request.config.pullPolicy).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeout(request.config.idleTimeoutSec).detached(request.config.detached).workdir(plan.kind === "git-volume" ? plan.workdir : request.cwd).labels(labels);
       if (plan.kind === "git-volume") builder.volume(plan.mountGuestPath, (m: AnyRecord) => m.named(plan.volumeName));
       else if (plan.kind === "direct-mount") builder.volume(plan.guestPath, (m: AnyRecord) => m.bind(plan.hostPath));
       else builder.volume(plan.guestPath, (m: AnyRecord) => m.tmpfs());

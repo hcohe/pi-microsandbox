@@ -24,6 +24,7 @@ const sessionId = "session-manager-test";
 function config(overrides: Partial<Config> = {}): Config {
   return {
     image: "ubuntu:24.04",
+    pullPolicy: "if-missing",
     bootstrapTools: false,
     cpus: 1,
     memoryMiB: 512,
