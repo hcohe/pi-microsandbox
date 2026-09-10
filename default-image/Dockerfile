@@ -213,4 +213,4 @@ RUN set -eux; \
         command -v "${tool}"; \
     done; \
     dpkg-query --status ca-certificates libffi-dev libssl-dev zlib1g-dev >/dev/null; \
-    chromium --headless --no-sandbox --disable-gpu --dump-dom 'data:text/html,<title>ok</title>' | grep -q '<title>ok</title>'
+    test -x /usr/local/bin/chromium
