@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   DEFAULT_CONFIG,
@@ -21,8 +20,7 @@ const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ nam
 
 test("defaults and precedence are deterministic", async () => {
   assert.equal(DEFAULT_CONFIG.mode, "direct");
-  const packageVersion = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
-  assert.equal(DEFAULT_CONFIG.image, `ghcr.io/hcohe/pi-microsandbox:${packageVersion}`);
+  assert.equal(DEFAULT_CONFIG.image, "ghcr.io/hcohe/pi-microsandbox:1.0.0");
   assert.equal(DEFAULT_CONFIG.pullPolicy, "if-missing");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
   assert.equal(DEFAULT_CONFIG.showFooter, true);

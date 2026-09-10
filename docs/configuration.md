@@ -15,7 +15,7 @@ The following is a small project example:
 ```toml
 # .pi-msb.toml
 mode = "git"
-image = "ghcr.io/hcohe/pi-microsandbox:0.1.0"
+image = "ghcr.io/hcohe/pi-microsandbox:1.0.0"
 pull_policy = "if-missing"
 bootstrap_tools = "auto"
 idle_timeout_sec = 600
@@ -41,7 +41,8 @@ Important configuration behavior:
   and shared status fields, but cannot show Pi-only indicators such as the
   auto-compaction and experimental-feature markers.
 - The default image is the complete Node.js, Python, Rust, and Go variant at
-  `ghcr.io/hcohe/pi-microsandbox:0.1.0`, matching the package version. The
+  `ghcr.io/hcohe/pi-microsandbox:1.0.0`. Image releases have an independent
+  version stream; the initial package remains `0.1.0`. The
   default `pull_policy = "if-missing"` pulls only when that reference is absent
   from the Microsandbox cache. `"always"` and `"never"` are also supported.
   See [Images](images.md) for all published variants, exact tag patterns,

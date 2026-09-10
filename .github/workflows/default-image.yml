@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "v*"
+      - "image-v*"
     paths:
       - default-image/**
       - scripts/image-variants.mjs
@@ -60,17 +60,16 @@ jobs:
           version="$GITHUB_SHA"
           cache_suffix="$GITHUB_SHA"
 
-          if [[ "$REF_TYPE" == "tag" ]]; then
-            package_version="$(node -p "require('./package.json').version")"
-            if [[ ! "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-              echo "Release image tags must have the exact form vX.Y.Z: $REF_NAME" >&2
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # Manual runs are validation-only, even when dispatched from main or
+            # an image release tag.
+            channel=validate
+          elif [[ "$REF_TYPE" == "tag" ]]; then
+            if [[ ! "$REF_NAME" =~ ^image-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Release image tags must have the exact form image-vX.Y.Z: $REF_NAME" >&2
               exit 1
             fi
-            version="${REF_NAME#v}"
-            if [[ "$version" != "$package_version" ]]; then
-              echo "Image tag $REF_NAME must equal package version tag v${package_version}" >&2
-              exit 1
-            fi
+            version="${REF_NAME#image-v}"
             # Materialize the complete cohort now so concrete cross-variant tag
             # collisions fail before any matrix job can publish.
             node scripts/image-variants.mjs refs release "$IMAGE_NAME" "$version" >/dev/null
@@ -320,6 +319,15 @@ jobs:
           # Assigning the final tag is intentionally the last registry write.
           docker buildx imagetools create --prefer-index=false \
             --tag "$FINAL_REFERENCE" "${IMAGE_NAME}@${BUILD_DIGEST}"
+
+          digest_file="$RUNNER_TEMP/final-promoted-digest.json"
+          docker buildx imagetools inspect "$FINAL_REFERENCE" \
+            --format '{{json .Manifest.Digest}}' > "$digest_file"
+          promoted_digest="$(node scripts/image-variants.mjs read-digest "$digest_file")"
+          if [[ "$promoted_digest" != "$BUILD_DIGEST" ]]; then
+            echo "Promoted ${FINAL_REFERENCE} resolved to ${promoted_digest}, expected ${BUILD_DIGEST}." >&2
+            exit 1
+          fi
 
       - name: Verify final image identity and provenance
         shell: bash

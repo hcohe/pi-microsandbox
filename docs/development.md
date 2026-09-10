@@ -101,15 +101,17 @@ Release and approves the protected `npm` GitHub Environment. Release automation
 must not use a long-lived npm token.
 
 The sandbox image workflow publishes all six AMD64 and ARM64 variants to
-`ghcr.io/hcohe/pi-microsandbox`. A `vX.Y.Z` Git tag publishes the write-once
-versioned cohort: `base-X.Y.Z`, `node-X.Y.Z`, `python-X.Y.Z`, `rust-X.Y.Z`,
-`go-X.Y.Z`, and `X.Y.Z` for the default variant. The workflow refuses to
-overwrite an existing version tag.
+`ghcr.io/hcohe/pi-microsandbox`. An `image-vX.Y.Z` Git tag publishes the
+write-once image cohort: `base-X.Y.Z`, `node-X.Y.Z`, `python-X.Y.Z`,
+`rust-X.Y.Z`, `go-X.Y.Z`, and `X.Y.Z` for the default variant. Package tags
+remain `vX.Y.Z` and never start image builds. Manual image workflow runs validate
+only. The workflow refuses to overwrite an existing version tag.
 
-Release in this order: push the reviewed `vX.Y.Z` tag; wait for the image
-workflow to publish and verify the complete six-variant cohort; then publish the
-GitHub Release that starts npm publication. The npm workflow checks every
-variant and both platforms for the release commit and package version labels
-before publishing. After the first publication, a package administrator must
-make the GHCR package public so Microsandbox can pull images without registry
+Image and package releases are independent. Publish and verify an image cohort
+before changing the extension default to it. For the initial release, publish
+`image-v1.0.0`, then release package `v0.1.0`. The npm workflow parses the
+configured default image, checks every variant and both platforms against the
+image tag commit, and verifies image provenance before publishing. A package
+administrator must make the GHCR package public before the package release so
+both release verification and Microsandbox can pull it without registry
 credentials.

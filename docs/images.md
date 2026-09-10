@@ -8,8 +8,10 @@ AMD64 and ARM64.
 
 ## Published variants
 
-`VERSION` below is the full package version, such as `0.1.0`. Release tags are
-write-once. Latest tags are mutable development tags built from `main`.
+`VERSION` below is the independent image version, such as `1.0.0`. Release
+tags are write-once. Latest tags are mutable development tags built from `main`.
+Push an exact `image-vVERSION` Git tag to publish a release cohort. Package
+`vX.Y.Z` tags do not invoke image builds, and manual workflow runs validate only.
 
 | Variant | Contents | Release tag | Latest tag |
 | --- | --- | --- | --- |
@@ -28,12 +30,13 @@ Select a variant in trusted project configuration:
 
 ```toml
 # .pi-msb.toml
-image = "ghcr.io/hcohe/pi-microsandbox:python-0.1.0"
+image = "ghcr.io/hcohe/pi-microsandbox:python-1.0.0"
 pull_policy = "if-missing"
 ```
 
-If `image` is omitted, pi-microsandbox uses the `default` variant whose release
-tag matches the installed package version. If `pull_policy` is omitted,
+If `image` is omitted, pi-microsandbox uses the configured `default` variant
+release. Image versions are independent of the installed package version. If
+`pull_policy` is omitted,
 `"if-missing"` is used: Microsandbox pulls the image only when that reference
 is absent from its cache. Use `"always"` to check a registry for an updated
 mutable tag, or `"never"` to require a cached local image.
@@ -75,7 +78,7 @@ Start from a versioned base tag so the guest contract does not change when
 `main` is rebuilt:
 
 ```dockerfile
-FROM ghcr.io/hcohe/pi-microsandbox:base-0.1.0
+FROM ghcr.io/hcohe/pi-microsandbox:base-1.0.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends jq \

@@ -20,7 +20,7 @@ const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"])
 
 /** Defaults from PLAN §11.2. Values containing credentials are deliberately absent. */
 export const DEFAULT_CONFIG: Config = {
-  image: "ghcr.io/hcohe/pi-microsandbox:0.1.0",
+  image: "ghcr.io/hcohe/pi-microsandbox:1.0.0",
   pullPolicy: "if-missing",
   bootstrapTools: "auto",
   cpus: 1,

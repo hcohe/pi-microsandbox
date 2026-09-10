@@ -113,37 +113,101 @@ jobs:
           );
           NODE
 
+      - name: Resolve the configured default image release
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_reference="$(node --experimental-strip-types --input-type=module <<'NODE'
+          import { DEFAULT_CONFIG } from "./extensions/pi-msb/config.ts";
+
+          const pattern = /^ghcr\.io\/hcohe\/pi-microsandbox:((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
+          const match = typeof DEFAULT_CONFIG.image === "string" && pattern.exec(DEFAULT_CONFIG.image);
+          if (!match) throw new Error("DEFAULT_CONFIG.image must be an exact stable pi-microsandbox release reference");
+          process.stdout.write(DEFAULT_CONFIG.image);
+          NODE
+          )"
+          image_version="${image_reference#ghcr.io/hcohe/pi-microsandbox:}"
+          image_tag="image-v${image_version}"
+          node scripts/image-variants.mjs refs release \
+            ghcr.io/hcohe/pi-microsandbox "$image_version" >/dev/null
+
+          # Fetch only the configured image tag and peel annotated tags to the
+          # commit that the image workflow checked out and attested.
+          git fetch --no-tags --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${image_tag}"
+          image_revision="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+          if [[ ! "$image_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Image tag ${image_tag} did not resolve to a full commit SHA." >&2
+            exit 1
+          fi
+
+          {
+            echo "reference=$image_reference"
+            echo "version=$image_version"
+            echo "tag=$image_tag"
+            echo "revision=$image_revision"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Verify the complete versioned image cohort is public
+      - name: Resolve and verify the public configured image cohort
         shell: bash
         env:
-          IMAGE_VERSION: ${{ steps.package.outputs.version }}
-          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_DEFAULT_REFERENCE: ${{ steps.image.outputs.reference }}
+          IMAGE_REVISION: ${{ steps.image.outputs.revision }}
+          IMAGE_VERSION: ${{ steps.image.outputs.version }}
         run: |
           set -euo pipefail
           refs="$RUNNER_TEMP/release-image-refs.tsv"
+          resolved="$RUNNER_TEMP/release-image-resolved.tsv"
+          : > "$resolved"
           node scripts/image-variants.mjs refs release \
             ghcr.io/hcohe/pi-microsandbox "$IMAGE_VERSION" > "$refs"
           [[ -s "$refs" ]]
 
+          saw_default=false
           while IFS=$'\t' read -r variant image_reference; do
-            manifest="$RUNNER_TEMP/release-${variant}-manifest.json"
-            if ! docker buildx imagetools inspect --raw "$image_reference" > "$manifest"; then
-              echo "The versioned sandbox image ${image_reference} must be published and public before the npm release." >&2
+            if [[ "$variant" == "default" ]]; then
+              saw_default=true
+              if [[ "$image_reference" != "$EXPECTED_DEFAULT_REFERENCE" ]]; then
+                echo "Generated default cohort reference ${image_reference} does not match configured ${EXPECTED_DEFAULT_REFERENCE}." >&2
+                exit 1
+              fi
+            fi
+
+            digest_file="$RUNNER_TEMP/release-${variant}-digest.json"
+            if ! docker buildx imagetools inspect "$image_reference" \
+              --format '{{json .Manifest.Digest}}' > "$digest_file"; then
+              echo "The configured sandbox image ${image_reference} must be published and public before the npm release." >&2
               exit 1
             fi
-            node scripts/image-variants.mjs verify-manifest "$manifest" "$image_reference"
+            digest="$(node scripts/image-variants.mjs read-digest "$digest_file")"
+            immutable_reference="ghcr.io/hcohe/pi-microsandbox@${digest}"
+
+            manifest="$RUNNER_TEMP/release-${variant}-manifest.json"
+            docker buildx imagetools inspect --raw "$immutable_reference" > "$manifest"
+            node scripts/image-variants.mjs verify-manifest "$manifest" "$immutable_reference"
 
             for platform in linux/amd64 linux/arm64; do
               config="$RUNNER_TEMP/release-${variant}-${platform//\//-}.json"
-              docker buildx imagetools inspect "$image_reference" \
+              docker buildx imagetools inspect "$immutable_reference" \
                 --format "{{json (index .Image \"$platform\")}}" > "$config"
-              node scripts/image-variants.mjs verify-config \
-                "$config" "$variant" "$IMAGE_VERSION" "$EXPECTED_REVISION" "$platform"
+              actual_revision="$(node scripts/image-variants.mjs config-revision \
+                "$config" "$variant" "$IMAGE_VERSION" "$platform")"
+              if [[ "$actual_revision" != "$IMAGE_REVISION" ]]; then
+                echo "${immutable_reference} ${platform} revision ${actual_revision} does not match image tag commit ${IMAGE_REVISION}." >&2
+                exit 1
+              fi
             done
+
+            printf '%s\t%s\t%s\n' "$variant" "$image_reference" "$digest" >> "$resolved"
           done < "$refs"
+
+          if [[ "$saw_default" != true || ! -s "$resolved" ]]; then
+            echo "The generated image cohort did not contain the configured default variant." >&2
+            exit 1
+          fi
 
       - name: Log in to GitHub Container Registry for provenance lookup
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -152,32 +216,62 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Verify provenance for the complete versioned image cohort
+      - name: Verify provenance for the immutable image cohort
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGE_VERSION: ${{ steps.package.outputs.version }}
-          EXPECTED_REVISION: ${{ github.sha }}
+          IMAGE_REVISION: ${{ steps.image.outputs.revision }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
         run: |
           set -euo pipefail
-          refs="$RUNNER_TEMP/release-image-refs.tsv"
-          node scripts/image-variants.mjs refs release \
-            ghcr.io/hcohe/pi-microsandbox "$IMAGE_VERSION" > "$refs"
-          [[ -s "$refs" ]]
+          resolved="$RUNNER_TEMP/release-image-resolved.tsv"
+          [[ -s "$resolved" ]]
 
-          while IFS=$'\t' read -r variant image_reference; do
-            gh attestation verify "oci://${image_reference}" \
+          while IFS=$'\t' read -r variant image_reference digest; do
+            immutable_reference="ghcr.io/hcohe/pi-microsandbox@${digest}"
+            gh attestation verify "oci://${immutable_reference}" \
               --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/default-image.yml" \
-              --signer-digest "$EXPECTED_REVISION" \
-              --source-ref "refs/tags/v${IMAGE_VERSION}" \
-              --source-digest "$EXPECTED_REVISION" \
+              --signer-digest "$IMAGE_REVISION" \
+              --source-ref "refs/tags/${IMAGE_TAG}" \
+              --source-digest "$IMAGE_REVISION" \
               --deny-self-hosted-runners
-          done < "$refs"
+          done < "$resolved"
 
       - name: Log out of GitHub Container Registry
         if: always()
         run: docker logout ghcr.io
+
+      - name: Recheck public image tags are unchanged
+        shell: bash
+        env:
+          IMAGE_REVISION: ${{ steps.image.outputs.revision }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          resolved="$RUNNER_TEMP/release-image-resolved.tsv"
+          [[ -s "$resolved" ]]
+
+          git fetch --no-tags --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${IMAGE_TAG}"
+          current_revision="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+          if [[ "$current_revision" != "$IMAGE_REVISION" ]]; then
+            echo "Image source tag ${IMAGE_TAG} moved from ${IMAGE_REVISION} to ${current_revision} during verification." >&2
+            exit 1
+          fi
+
+          while IFS=$'\t' read -r variant image_reference expected_digest; do
+            digest_file="$RUNNER_TEMP/release-${variant}-recheck-digest.json"
+            if ! docker buildx imagetools inspect "$image_reference" \
+              --format '{{json .Manifest.Digest}}' > "$digest_file"; then
+              echo "Anonymous image lookup failed for ${image_reference}." >&2
+              exit 1
+            fi
+            actual_digest="$(node scripts/image-variants.mjs read-digest "$digest_file")"
+            if [[ "$actual_digest" != "$expected_digest" ]]; then
+              echo "Image tag ${image_reference} moved from ${expected_digest} to ${actual_digest} during verification." >&2
+              exit 1
+            fi
+          done < "$resolved"
 
       # Install scripts must remain enabled because fs-ext is a native dependency.
       - name: Install dependencies
