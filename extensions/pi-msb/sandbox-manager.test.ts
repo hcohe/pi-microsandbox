@@ -51,6 +51,7 @@ function config(overrides: Partial<Config> = {}): Config {
     hostEnv: [],
     autoStart: true,
     pruneOnStart: true,
+    showFooter: false,
     lockDir: "/tmp",
     hostRoAllowlist: [],
     ...overrides,

@@ -15,6 +15,19 @@ import { createMsbIntegration } from "./control.ts";
 import { registerSandboxTools } from "./tools.ts";
 import type { ResolvedConfig, RuntimeState } from "./types.ts";
 
+export function footerStatus(state: RuntimeState, visible: boolean): string | undefined {
+  if (!visible) return undefined;
+  switch (state.status) {
+    case "active": return `(msb) running on sandbox - ${state.info?.displayId ?? "active"}`;
+    case "off": return "MSB host";
+    case "host-fallback": return "MSB host fallback";
+    case "unavailable": return "MSB blocked";
+    case "booting": return "(msb) preparing sandbox...";
+    case "stopping": return "MSB stopping";
+    default: return "MSB disabled";
+  }
+}
+
 /**
  * The extension entry point intentionally imports no native SDK. Loading this
  * module must remain safe on hosts without KVM or the microsandbox binary;
@@ -65,23 +78,18 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   };
 
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
+    const text = footerStatus(state, integration.configRef.value.showFooter);
+    if (text === undefined) {
+      stopBootAnimation();
+      ctx.ui.setStatus("pi-msb", undefined);
+      return;
+    }
     if (state.status === "booting") {
       startBootAnimation(ctx);
       return;
     }
     stopBootAnimation();
-    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, statusFooter(state)));
-  };
-  const statusFooter = (state: RuntimeState): string => {
-    switch (state.status) {
-      case "active": return `(msb) running on sandbox - ${state.info?.displayId ?? "active"}`;
-      case "off": return "MSB host";
-      case "host-fallback": return "MSB host fallback";
-      case "unavailable": return "MSB blocked";
-      case "booting": return "(msb) preparing sandbox...";
-      case "stopping": return "MSB stopping";
-      default: return "MSB disabled";
-    }
+    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, text));
   };
 
   registerSandboxTools(pi, {
@@ -98,7 +106,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     currentContext = ctx;
-    startBootAnimation(ctx);
+    updateStatus(ctx, { status: "booting", info: null });
     try {
       // configureSession performs Git discovery before project config resolution,
       // so trust and the nearest project file are evaluated against the real root.
@@ -114,8 +122,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     } catch (error) {
       // Invalid config and native boot failures are fail-closed. Do not throw from
       // the lifecycle hook: Pi remains usable and routed tools remain blocked.
-      stopBootAnimation();
-      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, "MSB blocked"));
+      updateStatus(ctx, { status: "unavailable", info: null });
       ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   });
