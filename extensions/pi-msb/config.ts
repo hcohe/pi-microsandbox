@@ -48,7 +48,7 @@ export const DEFAULT_CONFIG: Config = {
   hostEnv: [],
   autoStart: true,
   pruneOnStart: true,
-  showFooter: false,
+  showFooter: true,
   lockDir: "~/.pi-msb/locks",
   hostRoAllowlist: [],
 };

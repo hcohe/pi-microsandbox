@@ -22,7 +22,7 @@ test("defaults and precedence are deterministic", async () => {
   assert.equal(DEFAULT_CONFIG.mode, "direct");
   assert.equal(DEFAULT_CONFIG.image, "ghcr.io/hcohe/pi-microsandbox:latest");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
-  assert.equal(DEFAULT_CONFIG.showFooter, false);
+  assert.equal(DEFAULT_CONFIG.showFooter, true);
   const files = new Map([
     ["/cfg/pi-msb/config.toml", "memory_mib = 1024\nroute_tools = [\"read\", \"bash\"]"],
     ["/repo/.pi-msb.toml", "memory_mib = 2048\nnetwork.mode = \"deny\""],
@@ -213,13 +213,13 @@ test("validation reports all hard issues and mount overlap", () => {
   }), (error: unknown) => error instanceof ConfigError && error.issues.length >= 3);
 });
 
-test("footer visibility is configurable and hidden by default", () => {
-  const toml = parseTomlConfig("show_footer = true", "global");
-  assert.equal(toml.value.showFooter, true);
+test("footer visibility is configurable and shown by default", () => {
+  const toml = parseTomlConfig("show_footer = false", "global");
+  assert.equal(toml.value.showFooter, false);
   assert.deepEqual(toml.warnings, []);
 
-  const env = parseEnvConfig({ PI_MSB_SHOW_FOOTER: "true" });
-  assert.equal(env.value.showFooter, true);
+  const env = parseEnvConfig({ PI_MSB_SHOW_FOOTER: "false" });
+  assert.equal(env.value.showFooter, false);
   assert.deepEqual(env.warnings, []);
   assert.throws(() => validateConfig({ showFooter: "yes" as any }), /showFooter: must be boolean/);
 });
