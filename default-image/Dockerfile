@@ -204,7 +204,7 @@ RUN set -eux; \
     for tool in \
         agent-browser awk autoconf automake bash bzip2 cargo chromium clang cmake \
         composer corepack crane curl diff dig fd file find fzf g++ gcc gdb gh git \
-        git-lfs go grep gzip http ip jq killall less lsof lua make maven mysql nc \
+        git-lfs go grep gzip http ip jq killall less lsof lua make mvn mysql nc \
         ninja node npm nslookup openssl patch ping pip pipx pkg-config playwright \
         pnpm ps psql python python3 redis-cli rg rsync rustc sed shellcheck shfmt \
         skopeo sqlite3 ssh strace tar time traceroute tree unzip update-ca-certificates \
