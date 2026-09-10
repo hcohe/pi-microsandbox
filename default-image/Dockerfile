@@ -28,19 +28,35 @@ ENV CARGO_HOME=/usr/local/cargo \
 # anchor bootstraps authenticated snapshot HTTPS until ca-certificates installs.
 COPY install/ubuntu-snapshot-ca.pem /opt/pi-image-bootstrap/ubuntu-snapshot-ca.pem
 
-# Resolute's apt understands deb822 Snapshot fields. Keep this pin active until
-# every installer has completed, then restore the original runtime sources.
+# Use the explicit snapshot URL for both primary and ports architectures. Apt's
+# Snapshot field is not supported by ports.ubuntu.com. Preserve and later
+# restore the base image's normal runtime sources.
 RUN set -eux; \
     test "${UBUNTU_SNAPSHOT}" = "20260910T000000Z"; \
     sources=/etc/apt/sources.list.d/ubuntu.sources; \
+    runtime_sources=/etc/apt/ubuntu.sources.runtime; \
     test -f "${sources}"; \
+    test ! -e "${runtime_sources}"; \
     signed_by_count="$(grep -c '^Signed-By:' "${sources}")"; \
-    snapshot_count="$(grep -c '^Snapshot:' "${sources}" || true)"; \
+    uri_count="$(grep -c '^URIs:' "${sources}")"; \
     test "${signed_by_count}" = 2; \
-    test "${snapshot_count}" = 0; \
-    sed -i "/^Signed-By:/a Snapshot: ${UBUNTU_SNAPSHOT}" "${sources}"; \
-    snapshot_count="$(grep -c "^Snapshot: ${UBUNTU_SNAPSHOT}\$" "${sources}")"; \
-    test "${snapshot_count}" = 2; \
+    test "${uri_count}" = 2; \
+    case "${TARGETARCH}" in \
+        amd64) \
+            test "$(grep -c '^URIs: http://archive.ubuntu.com/ubuntu/$' "${sources}")" = 1; \
+            test "$(grep -c '^URIs: http://security.ubuntu.com/ubuntu/$' "${sources}")" = 1; \
+            ;; \
+        arm64) \
+            test "$(grep -c '^URIs: http://ports.ubuntu.com/ubuntu-ports/$' "${sources}")" = 2; \
+            ;; \
+        *) \
+            printf 'Unsupported architecture: %s\n' "${TARGETARCH}" >&2; \
+            exit 1; \
+            ;; \
+    esac; \
+    cp "${sources}" "${runtime_sources}"; \
+    sed -i "s|^URIs: .*$|URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/|" "${sources}"; \
+    test "$(grep -c "^URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/\$" "${sources}")" = 2; \
     test -s /opt/pi-image-bootstrap/ubuntu-snapshot-ca.pem; \
     printf '%s\n' \
         'Acquire::https::snapshot.ubuntu.com::CaInfo "/opt/pi-image-bootstrap/ubuntu-snapshot-ca.pem";' \
@@ -77,9 +93,10 @@ RUN set -eux; \
         /var/cache/apt/archives/* \
         /var/lib/apt/lists/*; \
     sources=/etc/apt/sources.list.d/ubuntu.sources; \
-    sed -i "/^Snapshot: ${UBUNTU_SNAPSHOT}\$/d" "${sources}"; \
-    snapshot_count="$(grep -c '^Snapshot:' "${sources}" || true)"; \
-    test "${snapshot_count}" = 0; \
+    runtime_sources=/etc/apt/ubuntu.sources.runtime; \
+    test -f "${runtime_sources}"; \
+    mv "${runtime_sources}" "${sources}"; \
+    test "$(grep -c '^URIs: https://snapshot.ubuntu.com/' "${sources}" || true)" = 0; \
     test ! -e /opt/pi-image-install; \
     test ! -e /opt/pi-image-verify
 
