@@ -149,7 +149,6 @@ async function repo() {
 function config(root, mode = "git", extra = {}) {
   return {
     ...DEFAULT_CONFIG,
-    network: { ...DEFAULT_CONFIG.network, ...(extra.network || {}) },
     secrets: [], mounts: [],
     lockDir: join(root, ".locks"),
     image: IMAGE,
@@ -158,6 +157,7 @@ function config(root, mode = "git", extra = {}) {
     bootstrapTools: extra.bootstrapTools ?? "auto",
     idleTimeoutSec: extra.idleTimeoutSec ?? 600,
     ...extra,
+    network: { ...DEFAULT_CONFIG.network, ...(extra.network || {}) },
   };
 }
 function integration(root, sessionId, mode = "git", extra = {}, entries = []) {
