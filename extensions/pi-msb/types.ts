@@ -97,6 +97,13 @@ export type DeepPartial<T> = {
       ? DeepPartial<T[K]>
       : T[K];
 };
+export type DeepReadonly<T> = T extends (...args: any[]) => unknown
+  ? T
+  : T extends readonly (infer U)[]
+    ? readonly DeepReadonly<U>[]
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
 export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli";
 export interface ParsedConfigLayer {
   name: ConfigLayerName;
@@ -104,6 +111,9 @@ export interface ParsedConfigLayer {
   warnings: string[];
   source?: string;
 }
+export type ConfigLayerInput = Omit<ParsedConfigLayer, "value"> & {
+  value: DeepPartial<Config> | DeepReadonly<Config>;
+};
 export interface ResolvedConfig {
   config: Config;
   provenance: Record<string, ConfigLayerName>;

@@ -121,13 +121,17 @@ jobs:
           image_reference="$(node --experimental-strip-types --input-type=module <<'NODE'
           import { DEFAULT_CONFIG } from "./extensions/pi-msb/config.ts";
 
-          const pattern = /^ghcr\.io\/hcohe\/pi-microsandbox:((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
+          const pattern = /^ghcr\.io\/hcohe\/pi-microsandbox:((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))@(sha256:[0-9a-f]{64})$/;
           const match = typeof DEFAULT_CONFIG.image === "string" && pattern.exec(DEFAULT_CONFIG.image);
-          if (!match) throw new Error("DEFAULT_CONFIG.image must be an exact stable pi-microsandbox release reference");
+          if (!match) {
+            throw new Error("DEFAULT_CONFIG.image must be a digest-pinned stable pi-microsandbox release reference");
+          }
           process.stdout.write(DEFAULT_CONFIG.image);
           NODE
           )"
-          image_version="${image_reference#ghcr.io/hcohe/pi-microsandbox:}"
+          image_tag_reference="${image_reference%@*}"
+          image_digest="${image_reference##*@}"
+          image_version="${image_tag_reference#ghcr.io/hcohe/pi-microsandbox:}"
           image_tag="image-v${image_version}"
           node scripts/image-variants.mjs refs release \
             ghcr.io/hcohe/pi-microsandbox "$image_version" >/dev/null
@@ -143,6 +147,8 @@ jobs:
 
           {
             echo "reference=$image_reference"
+            echo "tag_reference=$image_tag_reference"
+            echo "digest=$image_digest"
             echo "version=$image_version"
             echo "tag=$image_tag"
             echo "revision=$image_revision"
@@ -154,7 +160,8 @@ jobs:
       - name: Resolve and verify the public configured image cohort
         shell: bash
         env:
-          EXPECTED_DEFAULT_REFERENCE: ${{ steps.image.outputs.reference }}
+          EXPECTED_DEFAULT_REFERENCE: ${{ steps.image.outputs.tag_reference }}
+          EXPECTED_DEFAULT_DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE_REVISION: ${{ steps.image.outputs.revision }}
           IMAGE_VERSION: ${{ steps.image.outputs.version }}
         run: |
@@ -183,6 +190,10 @@ jobs:
               exit 1
             fi
             digest="$(node scripts/image-variants.mjs read-digest "$digest_file")"
+            if [[ "$variant" == "default" && "$digest" != "$EXPECTED_DEFAULT_DIGEST" ]]; then
+              echo "Configured default digest ${EXPECTED_DEFAULT_DIGEST} does not match ${image_reference} digest ${digest}." >&2
+              exit 1
+            fi
             immutable_reference="ghcr.io/hcohe/pi-microsandbox@${digest}"
 
             manifest="$RUNNER_TEMP/release-${variant}-manifest.json"

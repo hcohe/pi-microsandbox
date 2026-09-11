@@ -108,10 +108,12 @@ remain `vX.Y.Z` and never start image builds. Manual image workflow runs validat
 only. The workflow refuses to overwrite an existing version tag.
 
 Image and package releases are independent. Publish and verify an image cohort
-before changing the extension default to it. For the initial release, publish
-`image-v1.0.0`, then release package `v0.1.0`. The npm workflow parses the
-configured default image, checks every variant and both platforms against the
-image tag commit, and verifies image provenance before publishing. A package
+before changing the extension default to its `VERSION@sha256:DIGEST` reference.
+For the initial release, publish `image-v1.0.0`, pin its default-image digest,
+then release package `v0.1.0`. The npm workflow requires that digest-qualified
+reference, checks it against the public default tag, checks every variant and
+both platforms against the image tag commit, and verifies image provenance
+before publishing. A package
 administrator must make the GHCR package public before the package release so
 both release verification and Microsandbox can pull it without registry
 credentials.
