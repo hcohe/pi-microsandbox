@@ -35,6 +35,7 @@ export type ConfigStorageMode = "auto" | StorageMode;
 export type NetworkMode = "default" | "open" | "allowlist" | "deny";
 export type FallbackMode = "block" | "host";
 export type BootstrapTools = "auto" | boolean;
+export type PullPolicy = "always" | "if-missing" | "never";
 export type MountType = "dir" | "file" | "named" | "tmpfs";
 
 export interface NetworkConfig {
@@ -57,6 +58,7 @@ export interface MountConfig {
 }
 export interface Config {
   image: string;
+  pullPolicy: PullPolicy;
   bootstrapTools: BootstrapTools;
   cpus: number;
   memoryMiB: number;

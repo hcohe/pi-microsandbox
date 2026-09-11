@@ -72,10 +72,24 @@ exits successfully; this skip path does not validate virtualization. If
 virtualization is unavailable, it prints the reason and skips the matrix rather
 than reporting false failures. Set `PI_MSB_LIVE_IMAGE` to select the main live
 test image; the default is `ghcr.io/hcohe/pi-microsandbox:latest`.
-`PI_MSB_LIVE_PREPARED_IMAGE` can override the prepared image exercised under
-`network.mode = "deny"` without bootstrap; it defaults to the repository's
-published image. Review the output to confirm that all 16 scenarios report
+The prepared-image scenario boots all six latest variant tags under
+`network.mode = "deny"` with bootstrap disabled. Set
+`PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated image cohort, or use the
+legacy singular `PI_MSB_LIVE_PREPARED_IMAGE` to test one image. The live matrix
+uses `pull_policy = "always"` intentionally so mutable development tags cannot
+remain stale on the self-hosted runner. Review the output to confirm that all 16 scenarios report
 `PASS`, not `SKIP`.
+
+## Image development
+
+The image workflow derives the `base`, `node`, `python`, `rust`, `go`, and
+`default` build matrix from `default-image/variants.json`. Pull requests build
+and verify all six variants for AMD64 and ARM64. Main-branch builds publish each
+variant's mutable latest tag and a commit-specific tag. Release builds pin the
+Ubuntu image digest and one dated apt snapshot for all variants, while published
+images restore normal apt sources for project use. See [Images](images.md#add-a-language-variant)
+for the modular installer and verifier architecture, contribution rules, and
+local validation commands.
 
 ## Releases
 
@@ -86,7 +100,18 @@ directly to npm with OIDC only after a maintainer publishes the matching GitHub
 Release and approves the protected `npm` GitHub Environment. Release automation
 must not use a long-lived npm token.
 
-The default sandbox image workflow publishes AMD64 and ARM64 images to
-`ghcr.io/hcohe/pi-microsandbox` from `main`, version tags, and manual runs. After
-the first publication, a package administrator must make the GHCR package
-public so Microsandbox can pull the default image without registry credentials.
+The sandbox image workflow publishes all six AMD64 and ARM64 variants to
+`ghcr.io/hcohe/pi-microsandbox`. An `image-vX.Y.Z` Git tag publishes the
+write-once image cohort: `base-X.Y.Z`, `node-X.Y.Z`, `python-X.Y.Z`,
+`rust-X.Y.Z`, `go-X.Y.Z`, and `X.Y.Z` for the default variant. Package tags
+remain `vX.Y.Z` and never start image builds. Manual image workflow runs validate
+only. The workflow refuses to overwrite an existing version tag.
+
+Image and package releases are independent. Publish and verify an image cohort
+before changing the extension default to it. For the initial release, publish
+`image-v1.0.0`, then release package `v0.1.0`. The npm workflow parses the
+configured default image, checks every variant and both platforms against the
+image tag commit, and verifies image provenance before publishing. A package
+administrator must make the GHCR package public before the package release so
+both release verification and Microsandbox can pull it without registry
+credentials.

@@ -47,6 +47,7 @@ docs/commands.md required
 docs/configuration.md required
 docs/development.md required
 docs/getting-started.md required
+docs/images.md required
 docs/safety.md required
 docs/storage.md required
 docs/troubleshooting.md required

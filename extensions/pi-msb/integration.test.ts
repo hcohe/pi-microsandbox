@@ -21,6 +21,7 @@ function fakeSdk(calls: string[], volumeHandle?: any): MicrosandboxModule {
     const config: any = { name, labels: {} };
     const b: any = {
       image(value: string) { calls.push(`image:${value}`); return b; },
+      pullPolicy(value: string) { calls.push(`pull-policy:${value}`); return b; },
       cpus(value: number) { calls.push(`cpus:${value}`); return b; },
       memory(value: number) { calls.push(`memory:${value}`); return b; },
       idleTimeout(value: number) { calls.push(`idle:${value}`); return b; },
@@ -105,6 +106,7 @@ test("extension integration keeps native SDK lazy and boots through the real ada
     assert.equal(loads, 1);
     assert.equal(state.status, "active");
     assert.ok(calls.includes(`image:${DEFAULT_CONFIG.image}`));
+    assert.ok(calls.includes("pull-policy:if-missing"));
     assert.ok(calls.includes("memory:512"));
     assert.ok(calls.includes(`bind:${canonicalRoot}`));
     assert.ok(calls.includes(`volume:${root}`));

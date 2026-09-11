@@ -29,9 +29,10 @@ on the results, rather than supervise every step along the way.
 ## Every project gets its own boundaries
 
 Your frontend app and your internal service don't need the same sandbox.
-Choose a custom image with the tools a project needs, allow only the network
-hosts it should reach, and configure its file mounts and secrets. Another
-project can have a completely different setup, including no network access.
+Choose a [published variant or custom image](docs/images.md) with the tools a
+project needs, allow only the network hosts it should reach, and configure its
+file mounts and secrets. Another project can have a completely different setup,
+including no network access.
 
 Keep your everyday defaults in global config and project-specific settings in
 `.pi-msb.toml`. Trusted project config layers over those defaults; environment
@@ -107,7 +108,8 @@ See [storage and retained work](docs/storage.md) for the details.
 | --- | --- |
 | Install or check host support | [Getting started](docs/getting-started.md) |
 | Choose a workspace mode or recover retained work | [Storage](docs/storage.md) |
-| Set up images, networking, secrets, or mounts | [Configuration](docs/configuration.md) |
+| Choose an image variant or build a custom image | [Images](docs/images.md) |
+| Set up networking, secrets, mounts, or other options | [Configuration](docs/configuration.md) |
 | Look up an `/msb` command | [Command reference](docs/commands.md) |
 | Understand the isolation boundary and host access | [Safety model](docs/safety.md) |
 | Fix a sandbox that won't start | [Troubleshooting](docs/troubleshooting.md) |

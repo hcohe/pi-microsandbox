@@ -87,8 +87,16 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateLine, forma
 const execFile = promisify(execFileCallback);
 const DEFAULT_IMAGE = "ghcr.io/hcohe/pi-microsandbox:latest";
 const IMAGE = process.env.PI_MSB_LIVE_IMAGE || DEFAULT_IMAGE;
-const PREPARED_IMAGE = process.env.PI_MSB_LIVE_PREPARED_IMAGE || DEFAULT_IMAGE;
 const ROOT = "__ROOT__";
+const variantDocument = JSON.parse(await readFile(join(ROOT, "default-image", "variants.json"), "utf8"));
+const declaredPreparedImages = variantDocument.variants.map(
+  (variant) => `ghcr.io/hcohe/pi-microsandbox:${variant.tags.latest}`,
+);
+const PREPARED_IMAGES = process.env.PI_MSB_LIVE_PREPARED_IMAGES
+  ? process.env.PI_MSB_LIVE_PREPARED_IMAGES.split(",").map((item) => item.trim()).filter(Boolean)
+  : process.env.PI_MSB_LIVE_PREPARED_IMAGE
+    ? [process.env.PI_MSB_LIVE_PREPARED_IMAGE]
+    : declaredPreparedImages;
 const names = [
   "Git bundle excludes untracked files",
   "Git volume is clean and host-readable",
@@ -146,6 +154,7 @@ function config(root, mode = "git", extra = {}) {
     lockDir: join(root, ".locks"),
     image: IMAGE,
     mode,
+    pullPolicy: extra.pullPolicy ?? "always",
     bootstrapTools: extra.bootstrapTools ?? "auto",
     idleTimeoutSec: extra.idleTimeoutSec ?? 600,
     ...extra,
@@ -414,20 +423,26 @@ async function scenario13() {
   try { direct = await boot(directRoot, "direct"); await guest(direct, "sh", ["-lc", "printf host > live-direct.txt"], directRoot); assert.equal((await readFile(join(directRoot, "live-direct.txt"), "utf8")), "host"); none = await boot(noneRoot, "none"); await guest(none, "sh", ["-lc", "printf guest > live-none.txt"], noneRoot); assert.equal(await fs.access(join(noneRoot, "live-none.txt")).then(() => false, () => true), true); } finally { if (direct) await close(direct); if (none) await close(none); await rm(directRoot, { recursive: true, force: true }); await rm(noneRoot, { recursive: true, force: true }); }
 }
 async function scenario14() {
-  const root = await repo(); let value; let prepared; const denySession = `deny-${Date.now()}`; let preparedSession;
+  const root = await repo(); let value; const denySession = `deny-${Date.now()}`;
   try {
     const unprepared = { image: "ubuntu:24.04", network: { mode: "deny", allowDns: false }, bootstrapTools: "auto" };
     value = integration(root, denySession, "git", unprepared, []);
     const state = await value.configureSession({ sessionId: denySession, cwd: root, projectTrusted: true, config: { config: config(root, "git", unprepared), provenance: {}, warnings: [] } });
     assert.equal(state.status, "unavailable", "deny mode should not silently widen networking to bootstrap");
 
-    preparedSession = `prepared-${Date.now()}`;
-    const preparedConfig = { image: PREPARED_IMAGE, bootstrapTools: false, network: { mode: "deny", allowDns: false } };
-    prepared = integration(root, preparedSession, "git", preparedConfig, []);
-    const ps = await prepared.configureSession({ sessionId: preparedSession, cwd: root, projectTrusted: true, config: { config: config(root, "git", preparedConfig), provenance: {}, warnings: [] } });
-    assert.equal(ps.status, "active");
+    for (const image of PREPARED_IMAGES) {
+      const preparedSession = `prepared-${Date.now()}`;
+      const preparedConfig = { image, pullPolicy: "always", bootstrapTools: false, network: { mode: "deny", allowDns: false } };
+      const prepared = await boot(root, "git", preparedConfig, [], preparedSession);
+      try {
+        const command = await guest(prepared, "sh", ["-lc", "printf pi-msb-prepared"], { timeoutMs: 30_000 });
+        assert.equal(command.exitCode, 0, `${image} command probe failed: ${command.stderr.toString()}`);
+        assert.equal(command.stdout.toString(), "pi-msb-prepared", `${image} command probe returned unexpected output`);
+      } finally {
+        await close(prepared, volumeNameFor(preparedSession));
+      }
+    }
   } finally {
-    if (prepared) await close(prepared, preparedSession ? volumeNameFor(preparedSession) : undefined);
     if (value) { try { await value.manager.shutdown(); } finally { await removeVolumeIfPresent(value, volumeNameFor(denySession)); } }
     await rm(root, { recursive: true, force: true });
   }

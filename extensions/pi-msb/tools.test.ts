@@ -24,6 +24,7 @@ const ROUTED = ["bash", "edit", "find", "grep", "ls", "read", "write"] as const;
 function config(overrides: Partial<Config> = {}): Config {
   return {
     image: "ubuntu:24.04",
+    pullPolicy: "if-missing",
     bootstrapTools: false,
     cpus: 1,
     memoryMiB: 512,

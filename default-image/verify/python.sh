@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+verify_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_common.sh
+source "${verify_dir}/_common.sh"
+
+require_commands cc pip pip3 python python3 python3-config uv uvx
+
+case "$(uname -m)" in
+    x86_64) uv_arch="x86_64" ;;
+    aarch64) uv_arch="aarch64" ;;
+    *)
+        printf 'Unexpected Python image architecture: %s\n' "$(uname -m)" >&2
+        exit 1
+        ;;
+esac
+uv_output="$(uv --version)"
+expected_uv="uv 0.12.12 (${uv_arch}-unknown-linux-gnu)"
+if [[ "${uv_output}" != "${expected_uv}" ]]; then
+    printf 'Unexpected uv version: %s (expected %s)\n' "${uv_output}" "${expected_uv}" >&2
+    exit 1
+fi
+python_output="$(python -c 'print(6 * 7)')"
+if [[ "${python_output}" != "42" ]]; then
+    printf 'Python execution probe returned: %s\n' "${python_output}" >&2
+    exit 1
+fi
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "${tmp_dir}"' EXIT
+cat > "${tmp_dir}/native_probe.c" <<'C'
+#include <Python.h>
+
+static PyObject *answer(PyObject *self, PyObject *args) {
+    return PyLong_FromLong(42);
+}
+
+static PyMethodDef methods[] = {
+    {"answer", answer, METH_NOARGS, "Return the answer."},
+    {NULL, NULL, 0, NULL}
+};
+
+static struct PyModuleDef module = {
+    PyModuleDef_HEAD_INIT, "native_probe", NULL, -1, methods
+};
+
+PyMODINIT_FUNC PyInit_native_probe(void) {
+    return PyModule_Create(&module);
+}
+C
+extension_suffix="$(python3-config --extension-suffix)"
+read -r -a python_includes <<< "$(python3-config --includes)"
+cc -shared -fPIC "${python_includes[@]}" \
+    "${tmp_dir}/native_probe.c" -o "${tmp_dir}/native_probe${extension_suffix}"
+PYTHONPATH="${tmp_dir}" python -c \
+    'import native_probe; assert native_probe.answer() == 42'
