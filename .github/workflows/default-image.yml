@@ -207,7 +207,7 @@ jobs:
           if docker buildx imagetools inspect "$IMAGE_REFERENCE" >/dev/null 2>"$error_file"; then
             echo "build=false" >> "$GITHUB_OUTPUT"
             echo "Release tag already exists; it must pass the identity checks before it can be accepted."
-          elif grep -Eiq 'manifest unknown|name unknown|unexpected status[^[:cntrl:]]*404 Not Found|response status[^[:cntrl:]]*404' "$error_file"; then
+          elif grep -Eiq 'manifest unknown|name unknown|unexpected status[^[:cntrl:]]*404 Not Found|response status[^[:cntrl:]]*404|(^|: )not found$' "$error_file"; then
             echo "build=true" >> "$GITHUB_OUTPUT"
             echo "Release tag is absent; a unique candidate will be built and verified first."
           else
@@ -310,7 +310,7 @@ jobs:
           if docker buildx imagetools inspect "$FINAL_REFERENCE" >/dev/null 2>"$error_file"; then
             echo "Refusing to overwrite release tag that appeared during candidate verification: ${FINAL_REFERENCE}" >&2
             exit 1
-          elif ! grep -Eiq 'manifest unknown|name unknown|unexpected status[^[:cntrl:]]*404 Not Found|response status[^[:cntrl:]]*404' "$error_file"; then
+          elif ! grep -Eiq 'manifest unknown|name unknown|unexpected status[^[:cntrl:]]*404 Not Found|response status[^[:cntrl:]]*404|(^|: )not found$' "$error_file"; then
             echo "Could not safely re-check registry state for ${FINAL_REFERENCE}:" >&2
             cat "$error_file" >&2
             exit 1
