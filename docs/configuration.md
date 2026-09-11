@@ -15,7 +15,7 @@ The following is a small project example:
 ```toml
 # .pi-msb.toml
 mode = "git"
-image = "ghcr.io/hcohe/pi-microsandbox:1.0.0"
+image = "ghcr.io/hcohe/pi-microsandbox:1.0.0@sha256:00ea1e0911189815614e8a8eee36d1fd64f0f1edb39492e0bda9f273c834e59f"
 pull_policy = "if-missing"
 bootstrap_tools = "auto"
 idle_timeout_sec = 600
@@ -40,11 +40,12 @@ Important configuration behavior:
   extension's custom footer), preserves the standard location, usage, model,
   and shared status fields, but cannot show Pi-only indicators such as the
   auto-compaction and experimental-feature markers.
-- The default image is the complete Node.js, Python, Rust, and Go variant at
-  `ghcr.io/hcohe/pi-microsandbox:1.0.0`. Image releases have an independent
-  version stream; the initial package remains `0.1.0`. The
-  default `pull_policy = "if-missing"` pulls only when that reference is absent
-  from the Microsandbox cache. `"always"` and `"never"` are also supported.
+- The default image is the complete Node.js, Python, Rust, and Go `1.0.0`
+  variant, pinned to its immutable multi-platform digest. Image releases have
+  an independent version stream; the initial package remains `0.1.0`. The
+  default `pull_policy = "if-missing"` pulls only when that exact reference is
+  absent from the Microsandbox cache. `"always"` and `"never"` are also
+  supported.
   See [Images](images.md) for all published variants, exact tag patterns,
   contents, custom image workflows, and the required guest commands.
   `bootstrap_tools = "auto"` probes those commands and uses noninteractive

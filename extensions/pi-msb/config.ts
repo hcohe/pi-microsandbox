@@ -3,8 +3,10 @@ import { homedir as osHomedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type {
   Config,
+  ConfigLayerInput,
   ConfigLayerName,
   DeepPartial,
+  DeepReadonly,
   MergeResult,
   ParsedConfigLayer,
   ResolvedConfig,
@@ -18,9 +20,17 @@ const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
+function deepFreeze<T>(value: T): DeepReadonly<T> {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value as DeepReadonly<T>;
+}
+
 /** Defaults from PLAN §11.2. Values containing credentials are deliberately absent. */
-export const DEFAULT_CONFIG: Config = {
-  image: "ghcr.io/hcohe/pi-microsandbox:1.0.0",
+export const DEFAULT_CONFIG = deepFreeze<Config>({
+  image: "ghcr.io/hcohe/pi-microsandbox:1.0.0@sha256:00ea1e0911189815614e8a8eee36d1fd64f0f1edb39492e0bda9f273c834e59f",
   pullPolicy: "if-missing",
   bootstrapTools: "auto",
   cpus: 1,
@@ -52,7 +62,7 @@ export const DEFAULT_CONFIG: Config = {
   showFooter: true,
   lockDir: "~/.pi-msb/locks",
   hostRoAllowlist: [],
-};
+});
 
 export interface ResolveConfigInput {
   cwd: string;
@@ -438,7 +448,7 @@ function applyRemovals(target: Record<string, any>, source: LayerValue, layer: C
   }
 }
 
-export function mergeConfigLayers(layers: ParsedConfigLayer[]): MergeResult {
+export function mergeConfigLayers(layers: readonly ConfigLayerInput[]): MergeResult {
   const result: Record<string, any> = {};
   const provenance: Record<string, ConfigLayerName> = {};
   const warnings: string[] = [];
@@ -579,7 +589,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   const exists = input.exists ?? defaultExists;
   const realpath = input.realpath ?? defaultRealpath;
   const warnings: string[] = [];
-  const layers: ParsedConfigLayer[] = [{ name: "defaults", value: clone(DEFAULT_CONFIG), warnings: [] }];
+  const layers: ConfigLayerInput[] = [{ name: "defaults", value: clone(DEFAULT_CONFIG), warnings: [] }];
   const globalPaths = [join(configDir(env, input), "pi-msb", "config.toml")];
   if (env.PI_MSB_CONFIG_FILE) globalPaths.push(isAbsolute(env.PI_MSB_CONFIG_FILE) ? env.PI_MSB_CONFIG_FILE : resolve(input.cwd, env.PI_MSB_CONFIG_FILE));
   for (const file of [...new Set(globalPaths)]) {

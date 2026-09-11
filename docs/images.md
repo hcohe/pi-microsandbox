@@ -35,11 +35,11 @@ pull_policy = "if-missing"
 ```
 
 If `image` is omitted, pi-microsandbox uses the configured `default` variant
-release. Image versions are independent of the installed package version. If
-`pull_policy` is omitted,
-`"if-missing"` is used: Microsandbox pulls the image only when that reference
-is absent from its cache. Use `"always"` to check a registry for an updated
-mutable tag, or `"never"` to require a cached local image.
+release, qualified by both its `VERSION` tag and immutable index digest. Image
+versions are independent of the installed package version. If `pull_policy` is
+omitted, `"if-missing"` is used: Microsandbox pulls the image only when that
+exact reference is absent from its cache. Use `"always"` to check a registry for
+an updated mutable tag, or `"never"` to require a cached local image.
 
 ## How the images are assembled
 

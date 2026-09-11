@@ -20,7 +20,10 @@ const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ nam
 
 test("defaults and precedence are deterministic", async () => {
   assert.equal(DEFAULT_CONFIG.mode, "direct");
-  assert.equal(DEFAULT_CONFIG.image, "ghcr.io/hcohe/pi-microsandbox:1.0.0");
+  assert.equal(
+    DEFAULT_CONFIG.image,
+    "ghcr.io/hcohe/pi-microsandbox:1.0.0@sha256:00ea1e0911189815614e8a8eee36d1fd64f0f1edb39492e0bda9f273c834e59f",
+  );
   assert.equal(DEFAULT_CONFIG.pullPolicy, "if-missing");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
   assert.equal(DEFAULT_CONFIG.showFooter, true);
@@ -40,6 +43,27 @@ test("defaults and precedence are deterministic", async () => {
   assert.equal(result.provenance.memoryMiB, "env");
   assert.equal(result.config.volumeQuotaMiB, 2048);
   assert.deepEqual(result.config.passThroughTools, ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"]);
+});
+
+test("default configuration is deeply immutable", () => {
+  assert.equal(Object.isFrozen(DEFAULT_CONFIG), true);
+  assert.equal(Object.isFrozen(DEFAULT_CONFIG.network), true);
+  assert.equal(Object.isFrozen(DEFAULT_CONFIG.network.allowHosts), true);
+  assert.equal(Object.isFrozen(DEFAULT_CONFIG.routeTools), true);
+
+  assert.throws(() => {
+    (DEFAULT_CONFIG as { image: string }).image = "malicious:latest";
+  }, TypeError);
+  assert.throws(() => {
+    (DEFAULT_CONFIG.network as { allowDns: boolean }).allowDns = false;
+  }, TypeError);
+  assert.throws(() => {
+    (DEFAULT_CONFIG.routeTools as string[]).push("malicious-tool");
+  }, TypeError);
+
+  assert.match(DEFAULT_CONFIG.image, /@sha256:[0-9a-f]{64}$/);
+  assert.equal(DEFAULT_CONFIG.network.allowDns, true);
+  assert.equal(DEFAULT_CONFIG.routeTools.includes("malicious-tool"), false);
 });
 
 test("untrusted project configuration is skipped", async () => {
