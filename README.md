@@ -16,6 +16,14 @@ boundaries. Set them up once, then let the agents get to work.
 
 [Get started](#get-started) · [Documentation](#documentation) · [Releases](https://github.com/hcohe/pi-microsandbox/releases)
 
+## Try it
+
+Run Pi with pi-microsandbox for one session, without installing it:
+
+```sh
+pi -e npm:pi-microsandbox
+```
+
 ## Less supervision. More work getting done.
 
 - Run multiple agents in separate Pi sessions. Git mode keeps their workspaces apart, so ordinary sandboxed edits don't collide in your host checkout.
