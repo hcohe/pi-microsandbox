@@ -55,6 +55,7 @@ extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/footer.ts required
+extensions/pi-msb/flock.ts required
 extensions/pi-msb/git.ts required
 extensions/pi-msb/index.ts required
 extensions/pi-msb/labels.ts required
@@ -68,6 +69,9 @@ extensions/pi-msb/storage.ts required
 extensions/pi-msb/tools.ts required
 extensions/pi-msb/transport.ts required
 extensions/pi-msb/types.ts required
+native/flock/prebuilds/darwin-arm64/flock.node required
+native/flock/prebuilds/linux-arm64-gnu/flock.node required
+native/flock/prebuilds/linux-x64-gnu/flock.node required
 package.json required
 EOF
 
@@ -100,7 +104,7 @@ else
   printf 'package smoke: packing npm artifact\n'
   (
     cd -- "$ROOT"
-    npm pack --json --dry-run=false --pack-destination "$PACK_DIR" --cache "$NPM_CACHE"
+    npm pack --json --dry-run=false --ignore-scripts=true --pack-destination "$PACK_DIR" --cache "$NPM_CACHE"
   ) >"$PACK_JSON"
 
   PACK_FILENAME=$(node --input-type=module - "$PACK_JSON" <<'NODE'
@@ -145,16 +149,44 @@ if [[ -s "$UNAPPROVED_FILES" || -s "$MISSING_FILES" ]]; then
 fi
 printf 'package smoke: tarball manifest approved (%s)\n' "$PACK_FILENAME"
 
+for target in darwin-arm64 linux-arm64-gnu linux-x64-gnu; do
+  listing=$(tar -tvzf "$TARBALL" "package/native/flock/prebuilds/$target/flock.node")
+  if [[ ${listing:0:1} != "-" ]]; then
+    printf 'package smoke: native addon is not a regular file: %s\n' "$target/flock.node" >&2
+    exit 1
+  fi
+done
+
+PACKAGED_MANIFEST="$TMP_ROOT/package.json"
+tar -xOzf "$TARBALL" package/package.json >"$PACKAGED_MANIFEST"
+node --input-type=module - "$PACKAGED_MANIFEST" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
+for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "allowScripts"]) {
+  for (const name of Object.keys(manifest[section] ?? {})) {
+    if (name === "fs-ext" || name === "@types/fs-ext" || name.startsWith("fs-ext@")) {
+      throw new Error(`packaged manifest must not declare ${name} in ${section}`);
+    }
+  }
+}
+const forbiddenScripts = [
+  "preinstall", "install", "postinstall", "prepare",
+  "prepack", "postpack", "prepublish", "prepublishOnly",
+];
+for (const name of forbiddenScripts) {
+  if (Object.hasOwn(manifest.scripts ?? {}, name)) {
+    throw new Error(`packaged manifest must not contain lifecycle script ${name}`);
+  }
+}
+NODE
+printf 'package smoke: manifest is fs-ext-free and scriptless\n'
+
 cat >"$CONSUMER_DIR/package.json" <<'EOF'
 {
   "name": "pi-microsandbox-package-smoke-consumer",
   "private": true,
-  "version": "0.0.0",
-  "allowScripts": {
-    "fs-ext@2.1.1": true,
-    "@google/genai": false,
-    "protobufjs": false
-  }
+  "version": "0.0.0"
 }
 EOF
 
@@ -166,12 +198,12 @@ if [[ -z "$PI_PEER_VERSION" || -z "$PI_TUI_PEER_VERSION" || -z "$TYPEBOX_PEER_VE
   exit 1
 fi
 
-printf 'package smoke: installing in isolated consumer (lifecycle scripts enabled)\n'
+printf 'package smoke: installing in isolated consumer (lifecycle scripts disabled)\n'
 npm install \
   --prefix "$CONSUMER_DIR" \
   --cache "$NPM_CACHE" \
   --dry-run=false \
-  --ignore-scripts=false \
+  --ignore-scripts=true \
   --json=false \
   --package-lock=false \
   --no-audit \
@@ -199,18 +231,41 @@ const packageRoot = process.argv[2];
 const manifestPath = join(packageRoot, "package.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const requireFromPackage = createRequire(manifestPath);
-const runtimeDependencies = ["fs-ext", "microsandbox"];
+if (typeof manifest.dependencies?.microsandbox !== "string") {
+  throw new Error("packaged manifest does not declare runtime dependency microsandbox");
+}
+const entry = requireFromPackage.resolve("microsandbox");
+await import(pathToFileURL(entry).href);
+NODE
+printf 'package smoke: runtime dependency present (microsandbox)\n'
 
-for (const dependency of runtimeDependencies) {
-  if (typeof manifest.dependencies?.[dependency] !== "string") {
-    throw new Error(`packaged manifest does not declare runtime dependency ${dependency}`);
-  }
-  const entry = requireFromPackage.resolve(dependency);
-  if (dependency === "fs-ext") requireFromPackage(dependency);
-  else await import(pathToFileURL(entry).href);
+node --experimental-strip-types --input-type=module - "$INSTALLED_PACKAGE" "$TMP_ROOT" <<'NODE'
+import assert from "node:assert/strict";
+import { cp, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.argv[2];
+// Node deliberately declines to strip TypeScript below a node_modules path.
+// Copy the exact installed package bytes to this script's isolated temp root.
+const loadRoot = join(process.argv[3], "installed-package-source");
+await cp(packageRoot, loadRoot, { recursive: true });
+const locks = await import(pathToFileURL(join(loadRoot, "extensions/pi-msb/locks.ts")).href);
+const lockDir = await mkdtemp(join(tmpdir(), "pi-msb-installed-locks-"));
+try {
+  const first = await locks.tryAcquireOrphanLock({ lockDir }, "package-smoke");
+  assert.ok(first);
+  assert.equal(await locks.tryAcquireOrphanLock({ lockDir }, "package-smoke"), null);
+  await first.release();
+  const replacement = await locks.tryAcquireOrphanLock({ lockDir }, "package-smoke");
+  assert.ok(replacement);
+  await replacement.release();
+} finally {
+  await rm(lockDir, { recursive: true, force: true });
 }
 NODE
-printf 'package smoke: runtime dependencies present (fs-ext, microsandbox)\n'
+printf 'package smoke: installed bundled flock addon passed contention test\n'
 
 PI_BIN="$CONSUMER_DIR/node_modules/.bin/pi"
 if [[ ! -x "$PI_BIN" ]]; then

@@ -1,13 +1,14 @@
 import { chmod, mkdir, open, readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
+import { flock as bundledFlock } from "./flock.ts";
 import { LOCKFILE_VERSION, resourceId } from "./types.ts";
 import type { LockHandle, LockInfo, LocksPort } from "./types.ts";
 
 /**
  * The hooks are deliberately part of the options shape so unit tests can exercise
  * the lifecycle without loading the native addon. Production callers leave them
- * unset and use fs-ext below.
+ * unset and use the lazy bundled binding.
  */
 export type FlockFn = (fd: number, operation: "exnb" | "un") => Promise<void>;
 
@@ -16,25 +17,6 @@ export interface LocksOptions {
   warn?: (message: string) => void;
   flock?: FlockFn;
   unlock?: (fd: number) => Promise<void>;
-}
-
-type FsExtCallback = (
-  fd: number,
-  operation: string,
-  callback: (error?: unknown) => void,
-) => void;
-type FsExtUnlockCallback = (fd: number, callback: (error?: unknown) => void) => void;
-type FsExtModule = {
-  flock?: FsExtCallback;
-  unlock?: FsExtUnlockCallback;
-};
-
-let fsExtPromise: Promise<FsExtModule> | undefined;
-
-// Keep the native dependency genuinely lazy and let extension-load/type-only
-// environments operate without resolving the optional native module.
-function importNativeModule(specifier: string): Promise<unknown> {
-  return import(specifier);
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -49,77 +31,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function unsupportedPlatformError(): Error {
-  return new Error(
-    "pi-microsandbox owner locks require POSIX flock(2) via fs-ext; this platform is unsupported (Windows LockFileEx is not implemented)",
-  );
-}
-
-async function loadFsExt(): Promise<FsExtModule> {
-  if (process.platform === "win32") throw unsupportedPlatformError();
-  fsExtPromise ??= importNativeModule("fs-ext").then((module) => {
-    const defaultExport = (module as unknown as { default?: unknown }).default;
-    const candidate = (defaultExport ?? module) as FsExtModule;
-    if (typeof candidate.flock !== "function") {
-      throw new Error("fs-ext loaded without flock(); refusing to use a racy PID fallback");
-    }
-    return candidate;
-  });
-  return fsExtPromise;
-}
-
-function callbackFlock(flock: FsExtCallback, fd: number, operation: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    try {
-      flock(fd, operation, (error) => (error ? reject(error) : resolve()));
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function callbackUnlock(unlock: FsExtUnlockCallback, fd: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    try {
-      unlock(fd, (error) => (error ? reject(error) : resolve()));
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
 interface LockOperations {
   flock(fd: number): Promise<void>;
   unlock(fd: number): Promise<void>;
 }
 
 async function lockOperations(opts: LocksOptions): Promise<LockOperations> {
-  if (opts.flock) {
-    return {
-      flock: (fd) => opts.flock!(fd, "exnb"),
-      unlock: (fd) => opts.unlock ? opts.unlock(fd) : opts.flock!(fd, "un"),
-    };
-  }
-
-  let module: FsExtModule;
-  try {
-    module = await loadFsExt();
-  } catch (error) {
-    throw new Error(
-      `Unable to load fs-ext for owner locks; refusing to use a racy PID fallback: ${errorMessage(error)}`,
-      { cause: error },
-    );
-  }
-  const flock = module.flock;
-  if (!flock) {
-    throw new Error("fs-ext does not provide flock(); refusing to use a racy PID fallback");
-  }
-  const unlock = module.unlock;
+  const flock = opts.flock ?? bundledFlock;
   return {
-    flock: (fd) => callbackFlock(flock, fd, "exnb"),
-    unlock: (fd) => unlock
-      ? callbackUnlock(unlock, fd)
-      : callbackFlock(flock, fd, "un"),
+    flock: (fd) => flock(fd, "exnb"),
+    unlock: (fd) => opts.unlock ? opts.unlock(fd) : flock(fd, "un"),
   };
 }
 
