@@ -15,7 +15,7 @@ The following is a small project example:
 ```toml
 # .pi-msb.toml
 mode = "git"
-image = "ghcr.io/hcohe/pi-microsandbox:1.0.0@sha256:00ea1e0911189815614e8a8eee36d1fd64f0f1edb39492e0bda9f273c834e59f"
+image = "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c"
 pull_policy = "if-missing"
 bootstrap_tools = "auto"
 cpus = 4

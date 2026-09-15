@@ -22,7 +22,7 @@ test("defaults and precedence are deterministic", async () => {
   assert.equal(DEFAULT_CONFIG.mode, "direct");
   assert.equal(
     DEFAULT_CONFIG.image,
-    "ghcr.io/hcohe/pi-microsandbox:1.0.0@sha256:00ea1e0911189815614e8a8eee36d1fd64f0f1edb39492e0bda9f273c834e59f",
+    "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c",
   );
   assert.equal(DEFAULT_CONFIG.pullPolicy, "if-missing");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
