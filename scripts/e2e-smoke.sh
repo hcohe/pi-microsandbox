@@ -89,6 +89,8 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateLine, forma
 const execFile = promisify(execFileCallback);
 const DEFAULT_IMAGE = "ghcr.io/hcohe/pi-microsandbox:latest";
 const IMAGE = process.env.PI_MSB_LIVE_IMAGE || DEFAULT_IMAGE;
+const LIVE_PULL_POLICY = process.env.PI_MSB_LIVE_PULL_POLICY || "always";
+assert.ok(["always", "if-missing", "never"].includes(LIVE_PULL_POLICY), "PI_MSB_LIVE_PULL_POLICY is invalid");
 const ROOT = "__ROOT__";
 const variantDocument = JSON.parse(await readFile(join(ROOT, "default-image", "variants.json"), "utf8"));
 const declaredPreparedImages = variantDocument.variants.map(
@@ -157,7 +159,7 @@ function config(root, mode = "git", extra = {}) {
     lockDir: join(root, ".locks"),
     image: IMAGE,
     mode,
-    pullPolicy: extra.pullPolicy ?? "always",
+    pullPolicy: extra.pullPolicy ?? LIVE_PULL_POLICY,
     bootstrapTools: extra.bootstrapTools ?? "auto",
     idleTimeoutSec: extra.idleTimeoutSec ?? 600,
     ...extra,
@@ -342,10 +344,16 @@ async function scenario8() {
     value = await boot(root, "git", { idleTimeoutSec: 2, docker: { mode: "require", startupTimeoutMs: 30000 } }); volume = await activeVolume(value);
     const firstDocker = await guest(value, "docker", ["run", "--rm", "alpine:3.22", "printf", "first"] , { timeoutMs: 120_000 });
     assert.equal(firstDocker.exitCode, 0, firstDocker.stderr.toString());
+    const firstBootId = (await guest(value, "cat", ["/proc/sys/kernel/random/boot_id"])).stdout.toString().trim();
     await sleep(5000);
     const status = await Sandbox.get(value.state.info.name); const rawStatus = String(status.status || status.state || "").toLowerCase();
     assert.ok(["stopped", "idle", "exited", "dead", "created"].includes(rawStatus), `expected idle stop, got ${rawStatus}`);
     assert.equal((await guest(value, "printf", ["woke"])).stdout.toString(), "woke");
+    const secondBootId = (await guest(value, "cat", ["/proc/sys/kernel/random/boot_id"])).stdout.toString().trim();
+    assert.notEqual(secondBootId, firstBootId, "idle wake did not cross a guest boot boundary");
+    const launchOwner = (await guest(value, "cat", ["/run/pi-msb-docker-launch.owner"])).stdout.toString().trim().split(" ");
+    assert.equal(launchOwner.length, 4, "Docker launch provenance did not include the boot ID");
+    assert.equal(launchOwner[3], secondBootId, "Docker launch provenance retained the prior boot ID");
     const secondDocker = await guest(value, "docker", ["run", "--rm", "alpine:3.22", "printf", "second"], { timeoutMs: 60_000 });
     assert.equal(secondDocker.stdout.toString(), "second", secondDocker.stderr.toString());
   } finally { if (value) await close(value, volume?.name); await rm(root, { recursive: true, force: true }); }
@@ -544,8 +552,9 @@ async function scenario17() {
     assert.equal((await guest(value, "docker", ["run", "--rm", "pi-msb-live-build", "test", "-s", "/network-ok"])).exitCode, 0);
     const compose = await guest(value, "docker", ["compose", "-f", join(root, "compose.yml"), "up", "--abort-on-container-exit", "--exit-code-from", "smoke"], { cwd: root, timeoutMs: 120_000 });
     assert.equal(compose.exitCode, 0, compose.stderr.toString());
-    const ported = await guest(value, "docker", ["run", "-d", "--name", "pi-msb-ported", "-p", `0.0.0.0:${port}:8080`, "-p", `0.0.0.0:${port + 1}:8080`, "alpine:3.22", "sh", "-c", "mkdir -p /www; printf nested >/www/index.html; httpd -f -p 8080 -h /www"]);
+    const ported = await guest(value, "docker", ["run", "-d", "--name", "pi-msb-ported", "-p", `0.0.0.0:${port}:8080`, "-p", `0.0.0.0:${port + 1}:8080`, "alpine:3.22", "sh", "-c", "while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 6\\r\\n\\r\\nnested' | nc -l -p 8080; done"]);
     assert.equal(ported.exitCode, 0, ported.stderr.toString());
+    assert.equal((await guest(value, "docker", ["inspect", "-f", "{{.State.Running}}", "pi-msb-ported"])).stdout.toString().trim(), "true", "published-port container exited");
     let body = "";
     for (let attempt = 0; attempt < 30 && body !== "nested"; attempt++) {
       try { body = await (await fetch(`http://127.0.0.1:${port}`, { signal: AbortSignal.timeout(1000) })).text(); } catch {}
@@ -594,6 +603,18 @@ async function scenario18() {
     assert.equal((await guest(denied, "kill", ["-0", newPid])).exitCode, 0, "replacement Docker daemon is not live");
     const deniedAfterRestart = await guest(denied, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
     assert.notEqual(deniedAfterRestart.exitCode, 0, "Docker restart widened deny mode");
+
+    const pendingStopped = await guest(denied, "sh", ["-c", 'kill "$1"; for i in $(seq 1 100); do if ! kill -0 "$1" 2>/dev/null && test ! -S /var/run/docker.sock; then exit 0; fi; sleep .1; done; exit 1', "sh", newPid]);
+    assert.equal(pendingStopped.exitCode, 0, "the replacement Docker daemon did not stop");
+    assert.equal((await guest(denied, "rm", ["-f", "/run/pi-msb-docker-socket.owner"])).exitCode, 0);
+    assert.equal((await guest(denied, "test", ["-d", "/run/docker"])).exitCode, 0, "expected stale Docker exec-root state");
+    const pendingRecovery = await guest(denied, "pi-msb-docker-start", ["30000"], { timeoutMs: 32_000 });
+    assert.equal(pendingRecovery.exitCode, 0, "a failed same-boot pending launch poisoned Docker startup");
+    const recoveredPid = (await guest(denied, "cat", ["/run/docker.pid"])).stdout.toString().trim();
+    assert.match(recoveredPid, /^[0-9]+$/);
+    assert.notEqual(recoveredPid, newPid, "pending launch recovery reused the exited daemon process");
+    const deniedAfterPendingRecovery = await guest(denied, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
+    assert.notEqual(deniedAfterPendingRecovery.exitCode, 0, "pending launch recovery widened deny mode");
     await close(denied); denied = undefined;
 
     allowed = await boot(root, "direct", { docker, network: { mode: "allowlist", allowHosts: ["example.com"], allowDns: true, publishPorts: [] } });

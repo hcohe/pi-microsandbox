@@ -139,7 +139,10 @@ Without that variable the script prints a `SKIP` line for every scenario and
 exits successfully; this skip path does not validate virtualization. If
 virtualization is unavailable, it prints the reason and skips the matrix rather
 than reporting false failures. Set `PI_MSB_LIVE_IMAGE` to select the main live
-test image; the default is `ghcr.io/hcohe/pi-microsandbox:latest`.
+test image; the default is `ghcr.io/hcohe/pi-microsandbox:latest`. The main
+scenarios use `pull_policy = "always"` by default. To test an image already
+imported with `msb load`, set `PI_MSB_LIVE_PULL_POLICY=never`; do not use that
+override as evidence for a published image.
 The prepared-image scenario boots all six latest variant tags under
 `network.mode = "deny"` with bootstrap disabled. Set
 `PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated image cohort, or use the

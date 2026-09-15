@@ -33,7 +33,13 @@ function fakeSdk(
       workdir(value: string) { calls.push(`workdir:${value}`); return b; },
       labels(value: Record<string, string>) { config.labels = value; calls.push("labels"); return b; },
       volume(guest: string, configure: (mount: any) => any) { calls.push(`volume:${guest}`); configure({ named: (value: string) => { calls.push(`named:${value}`); return this; }, bind: (value: string) => { calls.push(`bind:${value}`); return this; }, tmpfs: () => this }); return b; },
-      network(configure: (network: any) => any) { configure({ policy: () => undefined }); return b; },
+      network(configure: (network: any) => any) {
+        const network: any = { policy: () => { calls.push("network:policy"); return network; } };
+        configure(network);
+        return b;
+      },
+      port(host: number, guest: number) { calls.push(`port:${host}:${guest}`); return b; },
+      portBind(bind: string, host: number, guest: number) { calls.push(`port-bind:${bind}:${host}:${guest}`); return b; },
       envs() { return b; },
       secret(configure: (secret: any) => any) {
         const entry: any = {
@@ -94,6 +100,36 @@ function fakeSdk(
     };
     return b;
   };
+  const networkPolicyBuilder = (): any => {
+    const policy: any = {
+      defaultDeny() { calls.push("network:default-deny"); return policy; },
+      defaultIngress(action: string) { calls.push(`network:default-ingress:${action}`); return policy; },
+      egress(configure: (rule: any) => any) {
+        const protocols: string[] = [];
+        const ports: number[] = [];
+        const rule: any = {
+          udp() { protocols.push("udp"); return rule; },
+          tcp() { protocols.push("tcp"); return rule; },
+          port(value: number) { ports.push(value); return rule; },
+          allow(configureDestination: (destination: any) => any) {
+            const destination: any = {
+              cidr(value: string) { calls.push(`network:allow:cidr:${value}`); return destination; },
+              domain(value: string) { calls.push(`network:allow:domain:${value}`); return destination; },
+            };
+            configureDestination(destination);
+            return rule;
+          },
+          allowHost() {
+            calls.push(`network:allow:host:${protocols.join(",")}:${ports.join(",")}`);
+            return rule;
+          },
+        };
+        configure(rule);
+        return policy;
+      },
+    };
+    return policy;
+  };
   return {
     Sandbox: {
       builder,
@@ -114,8 +150,122 @@ function fakeSdk(
       },
       remove: async (name: string) => { calls.push(`volume-remove:${name}`); },
     },
+    NetworkPolicy: { builder: networkPolicyBuilder },
   };
 }
+
+test("publishes every supported port mapping form with the correct indexes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-ports-"));
+  try {
+    const calls: string[] = [];
+    const config: Config = {
+      ...DEFAULT_CONFIG,
+      mode: "direct",
+      autoStart: true,
+      bootstrapTools: false,
+      docker: { mode: "disabled", startupTimeoutMs: 15_000 },
+      network: {
+        mode: "default",
+        allowHosts: [],
+        allowDns: true,
+        publishPorts: ["3000", "4000:40", "0.0.0.0:5000:50"],
+      },
+      secrets: [],
+      mounts: [],
+      routeTools: [...DEFAULT_CONFIG.routeTools],
+      passThroughTools: [...DEFAULT_CONFIG.passThroughTools],
+      hostEnv: [...DEFAULT_CONFIG.hostEnv],
+      hostRoAllowlist: [...DEFAULT_CONFIG.hostRoAllowlist],
+    };
+    const integration = createMsbIntegration({
+      sessionId: "port-mappings",
+      cwd: root,
+      configDirName: ".pi",
+      sdkLoader: async () => fakeSdk(calls),
+      acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
+    });
+    const state = await integration.configureSession({
+      sessionId: "port-mappings",
+      cwd: root,
+      projectTrusted: true,
+      config: resolved(config),
+    });
+    assert.equal(state.status, "active");
+    assert.deepEqual(calls.filter((call) => call.startsWith("port")), [
+      "port:3000:3000",
+      "port:4000:40",
+      "port-bind:0.0.0.0:5000:50",
+    ]);
+    await integration.manager.shutdown();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("builds allowlist DNS as an exact UDP and TCP host rule", async () => {
+  const roots: string[] = [];
+  try {
+    const boot = async (sessionId: string, allowDns: boolean) => {
+      const root = await mkdtemp(join(tmpdir(), "pi-msb-allowlist-"));
+      roots.push(root);
+      const calls: string[] = [];
+      const config: Config = {
+        ...DEFAULT_CONFIG,
+        mode: "direct",
+        autoStart: true,
+        bootstrapTools: false,
+        docker: { mode: "disabled", startupTimeoutMs: 15_000 },
+        network: {
+          mode: "allowlist",
+          allowHosts: ["api.example", "10.0.0.0/8", "192.0.2.10"],
+          allowDns,
+          publishPorts: [],
+        },
+        secrets: [],
+        mounts: [],
+        routeTools: [...DEFAULT_CONFIG.routeTools],
+        passThroughTools: [...DEFAULT_CONFIG.passThroughTools],
+        hostEnv: [...DEFAULT_CONFIG.hostEnv],
+        hostRoAllowlist: [...DEFAULT_CONFIG.hostRoAllowlist],
+      };
+      const integration = createMsbIntegration({
+        sessionId,
+        cwd: root,
+        configDirName: ".pi",
+        sdkLoader: async () => fakeSdk(calls),
+        acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
+      });
+      const state = await integration.configureSession({ sessionId, cwd: root, projectTrusted: true, config: resolved(config) });
+      assert.equal(state.status, "active");
+      return { calls, integration };
+    };
+
+    const withDns = await boot("allowlist-with-dns", true);
+    assert.deepEqual(withDns.calls.filter((call) => call.startsWith("network:")), [
+      "network:default-deny",
+      "network:default-ingress:deny",
+      "network:allow:domain:api.example",
+      "network:allow:cidr:10.0.0.0/8",
+      "network:allow:cidr:192.0.2.10",
+      "network:allow:host:udp,tcp:53",
+      "network:policy",
+    ]);
+    await withDns.integration.manager.shutdown();
+
+    const withoutDns = await boot("allowlist-without-dns", false);
+    assert.deepEqual(withoutDns.calls.filter((call) => call.startsWith("network:")), [
+      "network:default-deny",
+      "network:default-ingress:deny",
+      "network:allow:domain:api.example",
+      "network:allow:cidr:10.0.0.0/8",
+      "network:allow:cidr:192.0.2.10",
+      "network:policy",
+    ]);
+    await withoutDns.integration.manager.shutdown();
+  } finally {
+    await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+  }
+});
 
 test("extension integration keeps native SDK lazy and boots through the real adapter", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-msb-integration-"));
