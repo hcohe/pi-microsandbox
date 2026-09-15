@@ -268,7 +268,7 @@ function parsePort(value: string): { bind: string; host: number; guest: number }
   const numbers = parts.slice(-2).map((item) => Number(item));
   if (parts.length === 1) return { bind: "127.0.0.1", host: numbers[0], guest: numbers[0] };
   if (parts.length === 2) return { bind: "127.0.0.1", host: numbers[0], guest: numbers[1] };
-  return { bind: parts[0], host: numbers[1], guest: numbers[2] };
+  return { bind: parts[0], host: numbers[0], guest: numbers[1] };
 }
 
 function applyMount(builder: AnyRecord, mount: Config["mounts"][number]): void {
@@ -307,7 +307,7 @@ function applyNetwork(builder: AnyRecord, config: Config, sdk: MicrosandboxModul
           return destination.domain(host);
         }));
       }
-      if (network.allowDns) policy.egress((rule: AnyRecord) => rule.allowDns());
+      if (network.allowDns) policy.egress((rule: AnyRecord) => rule.udp().tcp().port(53).allowHost());
       builder.network((n: AnyRecord) => n.policy(policy));
     }
   }
