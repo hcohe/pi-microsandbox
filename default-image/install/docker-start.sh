@@ -205,8 +205,12 @@ stale_launch_record() {
 
     if path_absent "${docker_pidfile}"; then
         # A prior boot may have stopped after publishing provenance but before
-        # dockerd created its PID file. A current-boot stale launch may not.
-        [[ "${boot}" != "${current_boot_id}" ]] || return 1
+        # dockerd created its PID file. In the current boot, only a published
+        # socket-owner record distinguishes an exited established daemon from
+        # an interrupted pending launch.
+        if [[ "${boot}" == "${current_boot_id}" ]] && path_absent "${socket_owner}"; then
+            return 1
+        fi
     else
         read -r pidfile_pid < <(read_docker_pid) || return 1
         [[ "${pidfile_pid}" == "${pid}" ]] || return 1
@@ -220,7 +224,7 @@ stale_launch_record() {
 
 cleanup_stale_state() {
     local token pid start boot marker marker_token marker_pid marker_start marker_boot
-    local marker_filesystem_inode marker_socket_inode actual_inode
+    local marker_filesystem_inode actual_inode
 
     if path_absent "${launch_owner}" && path_absent "${docker_pidfile}" && \
        path_absent "${socket_owner}" && path_absent "${docker_socket}" && \
@@ -236,9 +240,9 @@ cleanup_stale_state() {
         marker="$(read_socket_owner || true)"
         [[ -n "${marker}" ]] || return 1
         marker_token=""; marker_pid=""; marker_start=""; marker_boot=""
-        marker_filesystem_inode=""; marker_socket_inode=""
+        marker_filesystem_inode=""
         read -r marker_token marker_pid marker_start marker_boot \
-            marker_filesystem_inode marker_socket_inode <<< "${marker}"
+            marker_filesystem_inode _ <<< "${marker}"
         [[ "${marker_token} ${marker_pid} ${marker_start} ${marker_boot}" == \
            "${token} ${pid} ${start} ${boot}" ]] || return 1
     fi
