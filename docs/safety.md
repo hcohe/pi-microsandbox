@@ -19,11 +19,14 @@ The default is fail-closed:
   after a sandbox failure and is shown as `MSB host fallback`.
 - A project cannot replace another process's sandbox: ownership is a
   non-blocking kernel `flock` acquired before any sandbox or volume mutation.
-  Stale sandbox pruning never removes volumes.
+  The small bundled POSIX addon is loaded lazily, has no install script, and
+  never falls back to a racy PID check. Stale sandbox pruning never removes
+  volumes.
 
-The extension entry point does not import the native SDK. Unsupported hosts can
-still load Pi and remain blocked or explicitly off. pi-microsandbox currently supports
-macOS Apple Silicon and Linux with KVM; Windows is not supported.
+The extension entry point does not import the native SDK or load the flock
+addon. Unsupported hosts can still load Pi and remain blocked or explicitly
+off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64
+with KVM; Windows, Intel macOS, and musl Linux are not supported.
 
 ## Host-read exceptions
 

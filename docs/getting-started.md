@@ -9,28 +9,27 @@ require one of these hosts:
 
 | Host | Architecture | Virtualization requirement |
 | --- | --- | --- |
-| macOS | Apple Silicon (arm64) | Apple virtualization support available to the process |
-| Linux | x86_64 or arm64 (GNU) | KVM enabled, with `/dev/kvm` accessible to the process |
+| macOS | Apple Silicon (`darwin-arm64`) | Apple virtualization support available to the process |
+| GNU Linux | x86_64 (`linux-x64-gnu`) or arm64 (`linux-arm64-gnu`) | KVM enabled, with `/dev/kvm` accessible to the process |
 
-Windows and Intel macOS are not supported by pi-microsandbox. The upstream
-microsandbox runtime has preview Windows support, but this package deliberately
-declares only macOS and Linux. A Linux container or virtual machine also needs
-KVM passthrough or nested virtualization; many hosted environments do not
-provide it. Package loading and non-live tests do not require virtualization.
+Windows, Intel macOS, and musl Linux are not supported by pi-microsandbox. The
+upstream microsandbox runtime has preview Windows support, but this package
+deliberately supports only the three targets above. A Linux container or
+virtual machine also needs KVM passthrough or nested virtualization; many hosted
+environments do not provide it. Package loading and non-live tests do not
+require virtualization.
 
-Installation must run lifecycle scripts and include optional dependencies:
+pi-microsandbox includes a prebuilt POSIX lock addon for each supported target.
+It is loaded lazily when an owner lock is first needed. Consumer installation
+does not compile native code or require Python, a C/C++ toolchain, or npm
+lifecycle scripts; installation with scripts disabled is supported.
 
-- `fs-ext@2.1.1` compiles a native node-gyp module. Install Python and a working
-  C/C++ build toolchain (`xcode-select --install` on macOS, or a compiler,
-  `make`, and Python 3 on Linux).
-- `microsandbox@0.6.16` installs its matching native addon and runtime binaries
-  through an optional platform package. Do not use `--ignore-scripts` or omit
-  optional dependencies when installing pi-microsandbox.
-
-If the platform package is missing, reinstall with optional dependencies
-enabled, install the matching microsandbox platform package, or set `MSB_PATH`
-to a working `msb` binary. These alternatives do not remove the host
-virtualization requirement.
+Keep optional dependencies enabled. `microsandbox@0.6.16` supplies its matching
+native addon and runtime binaries through an optional platform package. If that
+platform package is missing, reinstall with optional dependencies enabled,
+install the matching Microsandbox platform package, or set `MSB_PATH` to a
+working `msb` binary. These alternatives do not remove the host virtualization
+requirement.
 
 ## Install
 

@@ -35,17 +35,205 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      # Native dependencies must run their install scripts so failures remain visible.
-      - name: Install dependencies
-        run: npm ci --ignore-scripts=false
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts=true
       - name: Run checks
         run: npm run check
-      - name: Run package smoke test
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.19.0'
-        run: npm run package-smoke
       - name: Audit production dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.19.0'
         run: npm audit --omit=dev
-      - name: Verify package creation
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.19.0'
-        run: npm pack --dry-run --json
+
+  native-flock:
+    name: Native flock (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+            platform: darwin
+            arch: arm64
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert native runner tuple
+        shell: bash
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const expected = `${process.env.EXPECTED_PLATFORM}-${process.env.EXPECTED_ARCH}`;
+          if (`${process.platform}-${process.arch}` !== expected) {
+            throw new Error(`Expected ${expected}, got ${process.platform}-${process.arch}`);
+          }
+          if (process.platform === "linux") {
+            const glibc = process.report.getReport().header.glibcVersionRuntime;
+            if (typeof glibc !== "string" || glibc.length === 0) {
+              throw new Error("A GNU libc runner is required");
+            }
+          }
+          const target = process.platform === "darwin"
+            ? `darwin-${process.arch}`
+            : `linux-${process.arch}-gnu`;
+          if (target !== process.env.EXPECTED_TARGET) {
+            throw new Error(`Expected target ${process.env.EXPECTED_TARGET}, got ${target}`);
+          }
+          NODE
+
+      - name: Set up build Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+          cache: npm
+      - name: Install build dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts=true
+      - name: Build and smoke-test native addon
+        run: |
+          npm run build:flock
+          npm run smoke:flock
+
+      - name: Validate native binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          binary="native/flock/prebuilds/${TARGET}/flock.node"
+          [[ -f "$binary" && ! -L "$binary" ]]
+          file "$binary"
+          nm -u "$binary" | grep -q 'napi_'
+
+          if [[ "$PLATFORM" == darwin ]]; then
+            file "$binary" | grep -Eq 'Mach-O 64-bit bundle arm64|Mach-O 64-bit dynamically linked shared library arm64'
+            minos="$(otool -l "$binary" | awk '$1 == "cmd" && $2 == "LC_BUILD_VERSION" { build = 1; next } build && $1 == "minos" { print $2; exit }')"
+            [[ "$minos" == "11.0" || "$minos" == "11.0.0" ]]
+            unexpected="$(otool -L "$binary" | tail -n +2 | awk '$1 != "/usr/lib/libSystem.B.dylib" { print $1 }')"
+          else
+            if [[ "$TARGET" == linux-x64-gnu ]]; then
+              file "$binary" | grep -q 'ELF 64-bit LSB shared object, x86-64'
+              readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'
+            else
+              file "$binary" | grep -q 'ELF 64-bit LSB shared object, ARM aarch64'
+              readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
+            fi
+            unexpected="$(readelf -d "$binary" | awk '/NEEDED/ { gsub(/^\[|\]$/, "", $5); if ($5 != "libc.so.6") print $5 }')"
+            while IFS= read -r version; do
+              [[ -z "$version" ]] && continue
+              newest="$(printf '%s\n' "$version" GLIBC_2.28 | sort -V | tail -n 1)"
+              if [[ "$newest" != GLIBC_2.28 ]]; then
+                echo "Unsupported glibc symbol version: $version" >&2
+                exit 1
+              fi
+            done < <(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sort -Vu)
+          fi
+
+          if [[ -n "$unexpected" ]]; then
+            echo "Unexpected linked libraries:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+          artifact_root="$RUNNER_TEMP/flock-artifact"
+          install -d "$artifact_root/$TARGET"
+          install -m 0755 "$binary" "$artifact_root/$TARGET/flock.node"
+          shasum -a 256 "$artifact_root/$TARGET/flock.node" > "$RUNNER_TEMP/flock.sha256"
+
+      - name: Set up compatibility Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.x"
+          package-manager-cache: false
+      - name: Smoke-test the same binary on Node 24
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c "$RUNNER_TEMP/flock.sha256"
+          npm run smoke:flock -- "$RUNNER_TEMP/flock-artifact/$TARGET/flock.node"
+          shasum -a 256 -c "$RUNNER_TEMP/flock.sha256"
+
+      - name: Upload exact target artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flock-${{ matrix.target }}
+          path: ${{ runner.temp }}/flock-artifact
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          include-hidden-files: false
+
+  package:
+    name: Assemble and smoke-test package
+    needs: native-flock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+          cache: npm
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts=true
+      - name: Download all native artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: flock-*
+          path: ${{ runner.temp }}/flock-artifacts
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Assemble and pack exactly one tarball
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_root="$RUNNER_TEMP/flock-artifacts"
+          staging="$RUNNER_TEMP/package-staging"
+          packed="$RUNNER_TEMP/package-artifact"
+          mkdir -p "$staging" "$packed"
+          git archive HEAD | tar -x -C "$staging"
+
+          expected="$(printf '%s\n' \
+            darwin-arm64/flock.node \
+            linux-arm64-gnu/flock.node \
+            linux-x64-gnu/flock.node)"
+          actual="$(cd "$artifact_root" && find . \( -type f -o -type l \) | sed 's#^./##' | LC_ALL=C sort)"
+          [[ "$actual" == "$expected" ]]
+
+          npm run assemble:package -- "$artifact_root" "$staging"
+          npm pack "$staging" --json --pack-destination "$packed" > "$RUNNER_TEMP/npm-pack.json"
+          TARBALL_DIR="$packed" node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const result = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/npm-pack.json", "utf8"));
+          if (!Array.isArray(result) || result.length !== 1) throw new Error("npm pack must produce one tarball");
+          const tarball = path.join(process.env.TARBALL_DIR, result[0].filename);
+          if (!fs.statSync(tarball).isFile()) throw new Error("npm pack tarball is missing");
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tarball=${tarball}\n`);
+          NODE
+      - name: Smoke-test the exact tarball
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm run package-smoke -- "$TARBALL"

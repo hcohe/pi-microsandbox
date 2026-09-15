@@ -83,10 +83,11 @@ jobs:
           fi
           printf 'Image input validation: PASS\n' >> "$SANITIZED_LOG"
 
-      - name: Install dependencies
+      - name: Install dependencies and build the test addon
         run: |
-          # fs-ext is native and must build; intentionally do not use --ignore-scripts.
-          npm ci
+          npm ci --ignore-scripts=true
+          npm run build:flock
+          npm run smoke:flock
           printf '%s\n' "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Snapshot scoped resources

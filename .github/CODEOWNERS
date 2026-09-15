@@ -9,7 +9,10 @@
 /.github/dependabot.yml @hcohe
 /.github/workflows/ @hcohe
 
-# Release, publication, and packaging automation.
+# Release, publication, packaging, and bundled native-addon automation.
+/native/ @hcohe
 /scripts/*release* @hcohe
 /scripts/*publish* @hcohe
 /scripts/*package* @hcohe
+/scripts/*flock* @hcohe
+/scripts/*assemble* @hcohe
