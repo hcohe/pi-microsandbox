@@ -23,6 +23,28 @@ npm audit --omit=dev
 The smoke and unit tests do not require KVM, image pulls, or a live sandbox.
 The boot-speed check and live matrix below are explicit VM tests.
 
+To test the current extension and default image together, run:
+
+```sh
+just dev
+```
+
+`dev-flock` builds and smoke-tests the native owner-lock addon for the current
+host. `dev-image` builds the current `default` variant as
+`pi-microsandbox-dev:local` and imports it into Microsandbox's separate image
+cache. `dev` runs both prerequisites, then starts Pi with this checkout's
+extension explicitly loaded alongside your normal discovered extensions. It
+forces the local image with `pull_policy = "never"`, requires Docker, and uses
+4 CPUs and 8192 MiB. Docker caching keeps repeat builds short
+when image inputs have not changed. Pass Pi arguments directly, for example:
+
+```sh
+just dev --continue
+just dev "Run docker info and report the storage driver"
+```
+
+Run `just dev-image` by itself when you only need to refresh the local image.
+
 ### Bundled flock addon
 
 Consumers receive prebuilt lock addons and do not need native build tools. Only
@@ -123,8 +145,11 @@ The prepared-image scenario boots all six latest variant tags under
 `PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated image cohort, or use the
 legacy singular `PI_MSB_LIVE_PREPARED_IMAGE` to test one image. The live matrix
 uses `pull_policy = "always"` intentionally so mutable development tags cannot
-remain stale on the self-hosted runner. Review the output to confirm that all 16 scenarios report
-`PASS`, not `SKIP`.
+remain stale on the self-hosted runner. Review the output to confirm that every scenario reports `PASS`, not `SKIP`.
+Docker release validation must cover daemon readiness, bridge DNS and HTTPS,
+user-defined networking, Buildx, Compose, idle wake, double port publishing,
+and nested-container enforcement for deny and allowlist policies. A skipped
+Docker scenario is not release evidence.
 
 ## Image development
 
@@ -135,7 +160,17 @@ variant's mutable latest tag and a commit-specific tag. Release builds pin the
 Ubuntu image digest and one dated apt snapshot for all variants, while published
 images restore normal apt sources for project use. See [Images](images.md#add-a-language-variant)
 for the modular installer and verifier architecture, contribution rules, and
-local validation commands.
+local validation commands. Docker changes must also pass:
+
+```sh
+node scripts/image-variants.mjs matrix
+shellcheck -e SC1091 default-image/install/*.sh default-image/verify/*.sh
+```
+
+The common image verifier checks Docker Engine 29.8.0, containerd 2.3.4, runc
+1.5.1, Buildx 0.37.1, Compose 5.5.1, and Ubuntu's iptables-nft/nftables tools.
+Docker daemon and nested-container behavior require the live microVM matrix;
+they cannot be validated during a Dockerfile build.
 
 ## Releases
 

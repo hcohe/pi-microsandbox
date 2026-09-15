@@ -37,6 +37,7 @@ import {
   type PersistedSandboxState,
   type ResolvedConfig,
   type RuntimeExecution,
+  type RuntimePreparation,
   type RuntimeState,
   type StoragePlan,
   type ToolOperations,
@@ -347,7 +348,7 @@ function sanitizeOverride(key: string, value: unknown): unknown {
 }
 
 export function createMsbIntegration(options: MsbControlOptions): MsbIntegration {
-  const configRef = { value: { ...DEFAULT_CONFIG, network: { ...DEFAULT_CONFIG.network } } as Config };
+  const configRef = { value: { ...DEFAULT_CONFIG, network: { ...DEFAULT_CONFIG.network }, docker: { ...DEFAULT_CONFIG.docker } } as Config };
   let sessionId = options.sessionId;
   let cwd = options.cwd;
   let repoRoot: string | null = null;
@@ -531,21 +532,100 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         bash: createBashOps({ withRuntime: async (callback) => callback({ transport, operations: undefined as never }) }),
       } as ToolOperations;
     },
-    probeAndBootstrap: async (runtime, config) => {
-      const missing = async () => {
-        const result = await Promise.all(REQUIRED_GUEST_COMMANDS.map(async (command) => ({ command, result: await runtime.transport.exec("sh", ["-lc", `command -v ${command}`]) })));
+    prepareRuntime: async (runtime, config): Promise<RuntimePreparation> => {
+      const commandsMissing = async (commandNames: readonly string[]) => {
+        const result = await Promise.all(commandNames.map(async (command) => ({
+          command,
+          result: await runtime.transport.exec("sh", ["-c", 'command -v "$1" >/dev/null 2>&1', "pi-msb-probe", command]),
+        })));
         return result.filter((item) => item.result.exitCode !== 0).map((item) => item.command);
       };
-      let commands = await missing();
+      let commands = await commandsMissing(REQUIRED_GUEST_COMMANDS);
       if (commands.length && config.bootstrapTools !== false) {
-        const apt = await runtime.transport.exec("sh", ["-lc", "command -v apt-get"]);
+        const apt = await runtime.transport.exec("sh", ["-c", 'command -v "$1" >/dev/null 2>&1', "pi-msb-probe", "apt-get"]);
         if (apt.exitCode === 0) {
           await runtime.transport.exec("apt-get", ["update", "-y"]);
           await runtime.transport.exec("apt-get", ["install", "-y", "--no-install-recommends", "bash", "git", "ripgrep", "file", "coreutils", "ca-certificates"]);
-          commands = await missing();
+          commands = await commandsMissing(REQUIRED_GUEST_COMMANDS);
         }
       }
       if (commands.length) throw new Error(`sandbox is missing required commands: ${commands.join(", ")}; install them or use bootstrapTools=true`);
+
+      const mode = config.docker.mode;
+      if (mode === "disabled") return { docker: { mode, readiness: "disabled" } };
+
+      const dockerComponents = [
+        { name: "docker", path: "/usr/local/bin/docker" },
+        { name: "dockerd", path: "/usr/local/bin/dockerd" },
+        { name: "pi-msb-docker-start", path: "/usr/local/sbin/pi-msb-docker-start" },
+      ] as const;
+      const dockerChecks = await Promise.all(dockerComponents.map(async (component) => ({
+        ...component,
+        result: await runtime.transport.exec("/usr/bin/test", ["-x", component.path]),
+      })));
+      const missingDocker = dockerChecks.filter((item) => item.result.exitCode !== 0).map((item) => item.name);
+      if (missingDocker.length) {
+        const reason = `image is missing Docker components: ${missingDocker.join(", ")}`;
+        if (mode === "require") throw new Error(reason);
+        return { docker: { mode, readiness: "missing", reason } };
+      }
+
+      let started = false;
+      try {
+        const result = await runtime.transport.exec(
+          "/usr/bin/env",
+          [
+            "-i",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME=/root",
+            "/usr/local/sbin/pi-msb-docker-start",
+            String(config.docker.startupTimeoutMs),
+          ],
+          { timeoutMs: config.docker.startupTimeoutMs + 2_000 },
+        );
+        started = result.exitCode === 0;
+      } catch {
+        // Keep host-visible status bounded so transport errors cannot expose
+        // environment or secret values.
+      }
+      if (!started) {
+        const reason = "Docker daemon did not become ready; inspect /var/log/pi-msb-dockerd.log inside the sandbox";
+        if (mode === "require") throw new Error(reason);
+        return { docker: { mode, readiness: "unavailable", reason } };
+      }
+
+      const inspectLocalDocker = (args: string[]) => runtime.transport.exec(
+        "/usr/bin/env",
+        [
+          "-i",
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "HOME=/root",
+          "/usr/local/bin/docker",
+          "--host=unix:///var/run/docker.sock",
+          ...args,
+        ],
+        { timeoutMs: 5_000 },
+      );
+      let version: string | undefined;
+      let storageDriver: string | undefined;
+      try {
+        const [versionResult, driverResult] = await Promise.all([
+          inspectLocalDocker(["version", "--format", "{{.Server.Version}}"]),
+          inspectLocalDocker(["info", "--format", "{{.Driver}}"]),
+        ]);
+        if (versionResult.exitCode === 0 && driverResult.exitCode === 0) {
+          version = versionResult.stdout.toString("utf8").trim().split(/\r?\n/, 1)[0]?.slice(0, 128);
+          storageDriver = driverResult.stdout.toString("utf8").trim().split(/\r?\n/, 1)[0]?.slice(0, 128);
+        }
+      } catch {
+        // Report a bounded capability error below.
+      }
+      if (!version || !storageDriver) {
+        const reason = "Docker daemon became reachable but capability inspection failed";
+        if (mode === "require") throw new Error(reason);
+        return { docker: { mode, readiness: "unavailable", reason } };
+      }
+      return { docker: { mode, readiness: "ready", version, storageDriver } };
     },
     seed: async (runtime, prepared) => seedGitVolume(runtime.transport, prepared.plan as any, prepared.bundle ?? null),
     persist: (state) => options.appendEntry?.(STATE_ENTRY, encodeSessionState(state)),
@@ -564,6 +644,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     withRuntime: (callback) => manager.withRuntime(callback),
   };
   const effective = (): ResolvedConfig => resolved;
+  const configSnapshot = (): Config => structuredClone(configRef.value);
   const overrideEntries = (entries: readonly unknown[]): DeepPartial<Config> => {
     let result: DeepPartial<Config> = {};
     for (const entry of entries) {
@@ -608,7 +689,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     }
     resolved = next;
     configReady = true;
-    Object.assign(configRef.value, next.config, { network: { ...next.config.network }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+    Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
     const state = setup.restored ?? persistenceState(options.entries?.() ?? [], sessionId);
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     failureState = explicitOff ? { status: "off", info: null } : null;
@@ -616,7 +697,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       if (!explicitOff) { await manager.setEnabled(false); failureState = { status: "off", info: null }; }
       return visibleState();
     }
-    const result = await manager.boot({ sessionId, cwd, config: configRef.value, restored: state });
+    const result = await manager.boot({ sessionId, cwd, config: configSnapshot(), restored: state });
     if (result.status === "unavailable") failureState = result;
     notifyState(visibleState());
     return visibleState();
@@ -644,7 +725,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         await manager.setEnabled(false);
         failureState = { status: "off", info: null };
       } else {
-        const result = await manager.boot({ sessionId, cwd, config: configRef.value, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+        const result = await manager.boot({ sessionId, cwd, config: configSnapshot(), restored: persistenceState(options.entries?.() ?? [], sessionId) });
         if (result.status === "unavailable") failureState = result;
       }
       notifyState(visibleState());
@@ -667,10 +748,10 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       }
       resolved = next;
       configReady = true;
-      Object.assign(configRef.value, next.config, { network: { ...next.config.network }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+      Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
       failureState = null;
       if (!explicitOff && configRef.value.autoStart) {
-        const result = await manager.boot({ sessionId, cwd, config: configRef.value, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+        const result = await manager.boot({ sessionId, cwd, config: configSnapshot(), restored: persistenceState(options.entries?.() ?? [], sessionId) });
         if (result.status === "unavailable") failureState = result;
       }
       notifyState(visibleState());

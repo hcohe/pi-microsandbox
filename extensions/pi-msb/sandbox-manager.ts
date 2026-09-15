@@ -10,6 +10,7 @@ import {
   type PreparedStorage,
   type PruneReport,
   type RuntimeExecution,
+  type RuntimePreparation,
   type RuntimeState,
   type SandboxManager,
   type SandboxTransport,
@@ -55,7 +56,7 @@ export interface SandboxManagerDeps {
   stopAndRemove(name: string, timeoutMs: number): Promise<void>;
   createTransport(raw: unknown): SandboxTransport;
   createOperations(transport: SandboxTransport): ToolOperations;
-  probeAndBootstrap(runtime: RuntimeExecution, config: Config): Promise<void>;
+  prepareRuntime(runtime: RuntimeExecution, config: Config): Promise<RuntimePreparation>;
   seed(runtime: RuntimeExecution, prepared: PreparedStorage): Promise<SeedResult>;
   persist(state: PersistedSandboxState): void;
   now?: () => number;
@@ -136,6 +137,7 @@ function infoFor(
   seedSha: string | null | undefined,
   createdAt: number,
   name: string,
+  preparation: RuntimePreparation,
 ): NonNullable<RuntimeState["info"]> {
   return {
     name,
@@ -149,6 +151,7 @@ function infoFor(
     seedBranch: seedBranch ?? null,
     seedSha: seedSha ?? null,
     createdAt,
+    docker: { ...preparation.docker },
   };
 }
 
@@ -192,6 +195,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   let state: RuntimeState = { status: "disabled", info: null };
   let lock: LockHandle | null = null;
   let runtime: RuntimeExecution | null = null;
+  let runtimeInvalid = false;
   let sandboxName: string | null = null;
   let lastRequest: BootRequest | null = null;
   let retainedState: PersistedSandboxState | null = null;
@@ -240,6 +244,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   async function disposeRuntime(): Promise<void> {
     const current = runtime;
     runtime = null;
+    runtimeInvalid = false;
     if (!current) return;
     try {
       await current.transport.dispose();
@@ -283,6 +288,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
   function requestSandboxName(request: BootRequest): string {
     return request.config.sandboxName ?? sandboxNameFor(request.sessionId);
+  }
+
+  function invalidatesRuntime(error: unknown): boolean {
+    if (!error || typeof error !== "object" || !("code" in error)) return false;
+    const code = (error as { code?: unknown }).code;
+    return code === "SANDBOX_DOWN";
   }
 
   async function connectAndBuild(raw: unknown): Promise<RuntimeExecution> {
@@ -396,7 +407,8 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
       bootedRuntime = await connectAndBuild(raw);
       runtime = bootedRuntime;
-      await deps.probeAndBootstrap(bootedRuntime, request.config);
+      runtimeInvalid = false;
+      const preparation = await deps.prepareRuntime(bootedRuntime, request.config);
 
       let seed: SeedResult | null = null;
       if (
@@ -428,6 +440,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         seedSha,
         createdAt,
         name,
+        preparation,
       );
 
       // Bundle cleanup is deliberately before state publication: a successful
@@ -510,16 +523,16 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       throw new Error(`sandbox ${sandboxName} configuration changed`);
     }
 
-    if (isRunning(inspected)) {
+    if (isRunning(inspected) && !runtimeInvalid) {
       // The boot-created transport remains authoritative while the sandbox is
       // running. Reconnecting here would replace a valid handle and dispose a
       // transport that may still have active callers.
       return runtime;
     }
 
-    // A stopped/unknown sandbox requires a replacement transport. Do not stop,
-    // start, or dispose the old one until every earlier callback has released
-    // its runtime-use reservation.
+    // A stopped/unknown sandbox or invalid running handle requires a
+    // replacement transport. Do not start or dispose the old one until every
+    // earlier callback has released its runtime-use reservation.
     await waitForActiveUses();
     let raw: unknown;
     if (isStopped(inspected)) {
@@ -530,8 +543,41 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
 
     const replacement = await connectAndBuild(raw);
+    let preparation: RuntimePreparation;
+    try {
+      preparation = await deps.prepareRuntime(replacement, lastRequest.config);
+    } catch (error) {
+      try {
+        await replacement.transport.dispose();
+      } catch {
+        // Preserve the preparation error.
+      }
+      const previous = runtime;
+      runtime = null;
+      runtimeInvalid = false;
+      if (previous) {
+        try {
+          await previous.transport.dispose();
+        } catch {
+          // The preparation error remains authoritative.
+        }
+      }
+      const failedName = sandboxName;
+      sandboxName = null;
+      activePlan = null;
+      if (failedName) {
+        try {
+          await deps.stopAndRemove(failedName, lastRequest.config.stopTimeoutMs);
+        } catch {
+          throw new Error(`${redactMessage(error, lastRequest.config)}; failed to clean up the restarted sandbox`);
+        }
+      }
+      throw error;
+    }
     const previous = runtime;
     runtime = replacement;
+    runtimeInvalid = false;
+    if (state.info) state = { ...state, info: { ...state.info, docker: { ...preparation.docker } } };
     if (previous && previous !== replacement) {
       try {
         await previous.transport.dispose();
@@ -621,7 +667,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     getState(): RuntimeState {
       return {
         status: state.status,
-        info: state.info ? { ...state.info } : null,
+        info: state.info ? { ...state.info, docker: { ...state.info.docker } } : null,
         ...(state.reason ? { reason: state.reason } : {}),
       };
     },
@@ -663,6 +709,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       }
       try {
         return await callback(current);
+      } catch (error) {
+        if (runtime === current && invalidatesRuntime(error)) runtimeInvalid = true;
+        throw error;
       } finally {
         releaseUse(true);
       }

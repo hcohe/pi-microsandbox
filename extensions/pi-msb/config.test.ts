@@ -26,6 +26,9 @@ test("defaults and precedence are deterministic", async () => {
   );
   assert.equal(DEFAULT_CONFIG.pullPolicy, "if-missing");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");
+  assert.equal(DEFAULT_CONFIG.cpus, 4);
+  assert.equal(DEFAULT_CONFIG.memoryMiB, 8_192);
+  assert.deepEqual(DEFAULT_CONFIG.docker, { mode: "auto", startupTimeoutMs: 15_000 });
   assert.equal(DEFAULT_CONFIG.showFooter, true);
   const files = new Map([
     ["/cfg/pi-msb/config.toml", "memory_mib = 1024\nroute_tools = [\"read\", \"bash\"]"],
@@ -49,6 +52,7 @@ test("default configuration is deeply immutable", () => {
   assert.equal(Object.isFrozen(DEFAULT_CONFIG), true);
   assert.equal(Object.isFrozen(DEFAULT_CONFIG.network), true);
   assert.equal(Object.isFrozen(DEFAULT_CONFIG.network.allowHosts), true);
+  assert.equal(Object.isFrozen(DEFAULT_CONFIG.docker), true);
   assert.equal(Object.isFrozen(DEFAULT_CONFIG.routeTools), true);
 
   assert.throws(() => {
@@ -192,7 +196,7 @@ test("route fields reject unknown tools and the legacy host path env alias is ac
   assert.throws(() => validateConfig({ routeTools: ["read", "not-a-tool"] as any }), /routeTools/);
   const parsed = parseEnvConfig({ PI_MSB_HOST_RO_PATHS: "/repo/one,/repo/two" });
   assert.deepEqual(parsed.value.hostRoAllowlist, ["/repo/one", "/repo/two"]);
-  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env: { PI_MSB_HOST_RO_PATHS: "/outside/one" }, readFile: async () => null, exists: async () => false, realpath: async (path) => path });
+  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env: { PI_MSB_HOST_RO_PATHS: "/outside/one" }, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
   assert.equal(resolved.config.mounts[0]?.readonly, true);
   assert.equal(resolved.config.mounts[0]?.guestPath, "/outside/one");
 });
@@ -213,13 +217,36 @@ test("trusted project mounts use realpaths for repository containment", async ()
   }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("canonicalized")));
 });
 
-test("mounts cannot shadow reserved tmp or the project mount", async () => {
+test("mounts cannot shadow reserved tmp, Docker runtime, or the project mount", async () => {
   assert.throws(() => validateConfig({ mounts: [{ type: "dir", hostPath: "/host", guestPath: "/tmp/work", readonly: true, options: [] }] }), /reserved \/tmp/);
+  for (const guestPath of ["/var/run/docker.sock", "/var/run/docker.pid", "/var/run/docker", "/run", "/usr/local/bin/docker", "/usr/local/sbin/pi-msb-docker-start", "/var/lib/docker/volumes"]) {
+    assert.throws(
+      () => validateConfig({ mounts: [{ type: "file", hostPath: "/host/docker.sock", guestPath, readonly: true, options: [] }] }),
+      /protected guest system or Docker runtime paths/,
+    );
+  }
   await assert.rejects(() => resolveConfig({
     cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
     cliOverridesToml: 'mounts = [{ host_path = "/host", guest_path = "/repo/sub" }]',
-    readFile: async () => null, exists: async () => false,
+    readFile: async () => null, exists: async () => false, realpath: async (path) => path,
   }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("project mount")));
+  await assert.rejects(() => resolveConfig({
+    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
+    cliOverridesToml: 'mounts = [{ type = "file", host_path = "/host/engine-alias", guest_path = "/mnt/agent.sock" }]',
+    readFile: async () => null, exists: async () => false,
+    realpath: async (path) => path === "/host/engine-alias" ? "/var/run/docker.sock" : path,
+    stat: async () => ({ isSocket: () => true }),
+  }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("must not mount a host socket")));
+});
+
+test("process-control environment cannot be forwarded or injected as a secret", () => {
+  for (const env of ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "PATH", "BASH_ENV", "LD_PRELOAD"]) {
+    assert.throws(() => validateConfig({ hostEnv: [env] }), new RegExp(`must not forward protected process environment variable ${env}`));
+    assert.throws(
+      () => validateConfig({ secrets: [{ env, value: "unsafe", allowHosts: ["docker.example"] }] }),
+      new RegExp(`must not set protected process environment variable ${env}`),
+    );
+  }
 });
 
 test("null secret and mount entries fail closed", () => {
@@ -247,6 +274,40 @@ test("image pull policy is configurable and validated", () => {
   assert.equal(env.value.pullPolicy, "never");
   assert.deepEqual(env.warnings, []);
   assert.throws(() => validateConfig({ pullPolicy: "sometimes" as any }), /pullPolicy: must be always, if-missing, or never/);
+});
+
+test("Docker configuration parses, merges, validates, and serializes", () => {
+  for (const mode of ["auto", "require", "disabled"] as const) {
+    assert.equal(validateConfig({ docker: { mode, startupTimeoutMs: 20_000 } }).docker.mode, mode);
+  }
+  const toml = parseTomlConfig('[docker]\nmode = "require"\nstartup_timeout_ms = 25000', "global");
+  assert.deepEqual(toml.warnings, []);
+  assert.deepEqual(toml.value.docker, { mode: "require", startupTimeoutMs: 25_000 });
+  const env = parseEnvConfig({
+    PI_MSB_DOCKER__MODE: "disabled",
+    PI_MSB_DOCKER__STARTUP_TIMEOUT_MS: "30000",
+  });
+  assert.deepEqual(env.warnings, []);
+  assert.deepEqual(env.value.docker, { mode: "disabled", startupTimeoutMs: 30_000 });
+
+  const merged = mergeConfigLayers([
+    { name: "defaults", value: DEFAULT_CONFIG, warnings: [] },
+    layer("global", { docker: { mode: "require" } }),
+    layer("env", { docker: { startupTimeoutMs: 45_000 } }),
+  ]);
+  assert.deepEqual(merged.value.docker, { mode: "require", startupTimeoutMs: 45_000 });
+  assert.equal(merged.provenance["docker.mode"], "global");
+  assert.equal(merged.provenance["docker.startupTimeoutMs"], "env");
+
+  assert.throws(() => validateConfig({ docker: { mode: "sometimes", startupTimeoutMs: 1 } as any }), /docker.mode/);
+  for (const timeout of [0, -1, 1.5, 300_001, Number.POSITIVE_INFINITY, "slow"]) {
+    assert.throws(() => validateConfig({ docker: { mode: "auto", startupTimeoutMs: timeout as any } }), /docker.startupTimeoutMs/);
+  }
+  assert.ok(parseTomlConfig("[docker]\nunknown = true", "global").warnings.some((item) => item.includes("docker.unknown")));
+  const output = toEffectiveToml({ config: validateConfig({ docker: { mode: "require", startupTimeoutMs: 22_000 } }), provenance: {}, warnings: [] });
+  assert.match(output, /^\[docker\]$/m);
+  assert.match(output, /startup_timeout_ms = 22000/);
+  assert.deepEqual(parseTomlConfig(output, "global").value.docker, { mode: "require", startupTimeoutMs: 22_000 });
 });
 
 test("footer visibility is configurable and shown by default", () => {

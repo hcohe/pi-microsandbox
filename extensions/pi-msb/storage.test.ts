@@ -48,6 +48,7 @@ const config = (mode: Config["mode"]): Config => ({
   shallowArchive: false,
   volumeQuotaMiB: 1024,
   network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
+  docker: { mode: "auto", startupTimeoutMs: 15_000 },
   secrets: [],
   mounts: [],
   blockThirdParty: true,

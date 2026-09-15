@@ -81,6 +81,7 @@ COPY verify/ /opt/pi-image-verify/
 
 RUN set -eux; \
     test -n "${IMAGE_VARIANT}"; \
+    /opt/pi-image-install/docker.sh; \
     /opt/pi-image-install/dispatch.sh "${TOOLCHAINS}"; \
     rm -rf /opt/pi-image-install; \
     /opt/pi-image-verify/dispatch.sh "${IMAGE_VARIANT}" "${TOOLCHAINS}"; \

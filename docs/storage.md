@@ -15,6 +15,20 @@
 routed edits modify the live host directory. `none` is useful for testing path
 behavior and starts empty; it is not a retained workspace.
 
+## Inner Docker state
+
+Docker stores images, layers, containers, and build cache under
+`/var/lib/docker` on the sandbox root filesystem. It uses the `vfs` storage
+driver because nested overlay filesystems and project-backed mounts cannot be
+assumed to support `overlay2`. This state disappears when the sandbox is
+removed. It is not written to the project mount or retained Git volume, and
+separate sessions do not share an inner Docker cache.
+
+A stopped sandbox may retain that state until it is restarted or removed, but a
+retained Git workspace does not preserve it. Do not move Docker's data root
+onto the Git volume. A persistent Docker cache would need a separate managed
+volume and cleanup policy.
+
 ## Git and retained volumes
 
 Git mode never bind-mounts the host checkout. On boot, pi-microsandbox captures the

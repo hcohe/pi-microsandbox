@@ -23,8 +23,9 @@ The extension registers `/msb`:
 /msb help
 ```
 
-`/msb status` reports the full sandbox name, mode, image, PID, age, branch/SHA,
-and retained volume metadata when available. Six-character IDs in UI text are
+`/msb status` reports the full sandbox name, mode, image, PID, age, Docker
+mode/readiness/version/storage driver, branch/SHA, and retained volume metadata
+when available. Six-character IDs in UI text are
 display abbreviations only. `/msb prune` walks all SDK list pages and reports
 removed, kept, and error entries; **volumes are never pruned**.
 

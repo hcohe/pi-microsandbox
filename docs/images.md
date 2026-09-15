@@ -15,7 +15,7 @@ Push an exact `image-vVERSION` Git tag to publish a release cohort. Package
 
 | Variant | Contents | Release tag | Latest tag |
 | --- | --- | --- | --- |
-| `base` | Required guest commands and CA certificates, without a language toolchain | `base-VERSION` | `base-latest` |
+| `base` | Required guest commands, CA certificates, Docker 29.8.0, Buildx 0.37.1, and Compose 5.5.1; no language toolchain | `base-VERSION` | `base-latest` |
 | `node` | Base plus Node.js 24.21.0, npm, pnpm 12.3.4, Yarn 1.22.22, and native addon build support | `node-VERSION` | `node-latest` |
 | `python` | Base plus Ubuntu Python 3, pip, uv/uvx 0.12.12, and native extension build support | `python-VERSION` | `python-latest` |
 | `rust` | Base plus Rust 1.98.0, Cargo, rustup, and native dependency build support | `rust-VERSION` | `rust-latest` |
@@ -23,8 +23,12 @@ Push an exact `image-vVERSION` Git tag to publish a release cohort. Package
 | `default` | Base plus the Node.js, Python, Rust, and Go modules above | `VERSION` | `latest` |
 
 The base contract includes `bash`, `sh`, `git`, `rg`, `file`, `cat`, `mkdir`,
-`rm`, and the other core commands used by the image verification scripts. CA
-certificates support HTTPS Git operations.
+`rm`, Docker Engine and CLI 29.8.0, containerd 2.3.4, runc 1.5.1, Buildx
+0.37.1, Compose 5.5.1, and the Ubuntu iptables-nft and nftables tools. CA
+certificates support HTTPS Git operations. Docker is part of the common base
+rather than a language toolchain, so all six variants built from this version
+contain it. The extension's digest-pinned default changes only after that cohort
+has been published and verified.
 
 Select a variant in trusted project configuration:
 
@@ -46,10 +50,10 @@ an updated mutable tag, or `"never"` to require a cached local image.
 [`default-image/variants.json`](../default-image/variants.json) is the single
 source of variant composition and tag names. The workflow passes each entry's
 toolchain list to one generic
-[`default-image/Dockerfile`](../default-image/Dockerfile). Modular
-`default-image/install/<language>.sh` and
-`default-image/verify/<language>.sh` scripts install and exercise each selected
-language.
+[`default-image/Dockerfile`](../default-image/Dockerfile). The common Docker installer runs before the modular
+`default-image/install/<language>.sh` scripts. The corresponding common
+verifier checks Docker and its CLI plugins in every variant; language verifiers
+then exercise each selected toolchain.
 
 The `default` variant runs the same Node.js, Python, Rust, and Go modules as the
 individual variants. It does not have a duplicate package list. This keeps an
@@ -63,7 +67,11 @@ can install current packages at runtime.
 ## Build a custom image
 
 A custom image must provide `bash`, `sh`, `git`, `rg`, `file`, `cat`, `mkdir`,
-and `rm`. Install CA certificates if the guest will use Git over HTTPS. With
+and `rm`. Docker is optional for custom images. The default `docker.mode =
+"auto"` records it as missing and continues; use `docker.mode = "require"` when
+the image contract must include a working daemon. pi-microsandbox does not
+install Docker during sandbox startup. Install CA certificates if the guest
+will use Git over HTTPS. With
 `bootstrap_tools = "auto"`, pi-microsandbox can install missing required
 commands through `apt-get` when the network policy permits it. A prepared image
 is required when bootstrap is disabled or package repositories are unavailable.

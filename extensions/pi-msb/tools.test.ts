@@ -40,6 +40,7 @@ function config(overrides: Partial<Config> = {}): Config {
     shallowArchive: false,
     volumeQuotaMiB: 1024,
     network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
+    docker: { mode: "auto", startupTimeoutMs: 15_000 },
     secrets: [],
     mounts: [],
     blockThirdParty: true,
@@ -71,6 +72,7 @@ function state(status: RuntimeState["status"] = "active"): RuntimeState {
           pid: 42,
           cwd: process.cwd(),
           createdAt: Date.now(),
+          docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" },
         }
       : null,
   };

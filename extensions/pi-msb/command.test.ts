@@ -26,6 +26,7 @@ function state(status: RuntimeState["status"]): RuntimeState {
             seedBranch: "feature/demo",
             seedSha: "deadbeef",
             createdAt: Date.now() - 61_000,
+            docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" },
           }
         : null,
   };
@@ -127,6 +128,10 @@ test("status is detailed and uses the full sandbox and volume names", async () =
   assert.match(message, /Name: pi-msb-0123456789abcdef0123/);
   assert.match(message, /Retained volume: pi-msb-vol-0123456789abcdef0123/);
   assert.match(message, /Seed SHA: deadbeef/);
+  assert.match(message, /Docker mode: auto/);
+  assert.match(message, /Docker readiness: ready/);
+  assert.match(message, /Docker version: 29\.8\.0/);
+  assert.match(message, /Docker storage driver: vfs/);
   assert.doesNotMatch(message, /Name: pi-msb-012345$/);
 });
 

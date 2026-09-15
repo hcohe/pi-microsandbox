@@ -207,7 +207,9 @@ jobs:
             -name 'pi-msb-live-direct-*' -o \
             -name 'pi-msb-live-none-*' -o \
             -name 'pi-msb-live-concurrent-*' -o \
-            -name 'pi-msb-live-export-*' \
+            -name 'pi-msb-live-export-*' -o \
+            -name 'pi-msb-live-docker-*' -o \
+            -name 'pi-msb-live-docker-policy-*' \
           \) -print > "$LIVE_PRIVATE_DIR/host-temp-baseline"
           printf 'Resource baseline: PASS\n' >> "$SANITIZED_LOG"
 
@@ -242,7 +244,7 @@ jobs:
           fi
           exit "$status"
 
-      - name: Run 16 live scenarios
+      - name: Run 18 live scenarios
         id: live
         continue-on-error: true
         env:
@@ -277,6 +279,8 @@ jobs:
             "Bootstrap and deny-network behavior",
             "Concurrent exec, abort, timeout, grep, and find",
             "Export and managed-volume removal are guarded",
+            "Docker bridge, Buildx, Compose, and double port publishing",
+            "Nested Docker traffic obeys deny and allowlist policies",
           ];
           const statuses = Array(scenarios.length).fill("MISSING");
           const raw = await readFile(rawPath, "utf8");

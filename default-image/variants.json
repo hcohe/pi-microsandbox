@@ -3,7 +3,7 @@
   "variants": [
     {
       "name": "base",
-      "description": "Minimal Pi runtime tools without language toolchains.",
+      "description": "Minimal Pi runtime tools with Docker, Buildx, and Compose; no language toolchains.",
       "toolchains": [],
       "tags": {
         "latest": "base-latest",
@@ -12,7 +12,7 @@
     },
     {
       "name": "node",
-      "description": "Node.js and native addon build support.",
+      "description": "Docker, Buildx, Compose, Node.js, and native addon build support.",
       "toolchains": ["node"],
       "tags": {
         "latest": "node-latest",
@@ -21,7 +21,7 @@
     },
     {
       "name": "python",
-      "description": "Python, uv, and native extension build support.",
+      "description": "Docker, Buildx, Compose, Python, uv, and native extension build support.",
       "toolchains": ["python"],
       "tags": {
         "latest": "python-latest",
@@ -30,7 +30,7 @@
     },
     {
       "name": "rust",
-      "description": "Rust and native dependency build support.",
+      "description": "Docker, Buildx, Compose, Rust, and native dependency build support.",
       "toolchains": ["rust"],
       "tags": {
         "latest": "rust-latest",
@@ -39,7 +39,7 @@
     },
     {
       "name": "go",
-      "description": "Go with cgo compilation support.",
+      "description": "Docker, Buildx, Compose, and Go with cgo compilation support.",
       "toolchains": ["go"],
       "tags": {
         "latest": "go-latest",
@@ -48,7 +48,7 @@
     },
     {
       "name": "default",
-      "description": "Complete Node.js, Python, Rust, and Go development image.",
+      "description": "Complete Docker, Buildx, Compose, Node.js, Python, Rust, and Go development image.",
       "toolchains": ["node", "python", "rust", "go"],
       "tags": {
         "latest": "latest",

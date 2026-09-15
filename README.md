@@ -39,8 +39,11 @@ Keep your everyday defaults in global config and project-specific settings in
 variables and session overrides let you adjust a particular run without
 rewriting the project's setup.
 
-The agent gets an environment built for the job. You don't have to make the
-same decisions every time you start it.
+The agent gets an environment built for the job. Image cohorts built from this
+version include Docker Engine 29.8.0, Buildx 0.37.1, and Compose 5.5.1. The
+daemon and its containers run inside the microVM; pi-microsandbox never connects them to the
+host Docker socket. You don't have to make the same decisions every time you
+start it.
 
 [Configure your project's sandbox →](docs/configuration.md)
 

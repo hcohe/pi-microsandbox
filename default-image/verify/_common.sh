@@ -14,11 +14,14 @@ require_commands() {
 
 verify_base_contract() {
     require_commands \
-        bash basename cat chmod cp cut date dirname env file git head id ln ls \
-        mkdir mktemp mv pwd readlink rg rm rmdir sh sleep sort tail tee test \
+        awk bash basename cat chmod cp cut date dirname env file git head id ln ls \
+        mkdir mktemp mv pwd readlink rg rm rmdir sh sleep sort stat tail tee test \
         touch tr uname update-ca-certificates wc
 
     dpkg-query --status ca-certificates file git ripgrep >/dev/null
+    local common_verify_dir
+    common_verify_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    "${common_verify_dir}/docker.sh"
     test ! -e /opt/pi-image-install
 
     local tmp_dir

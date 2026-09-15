@@ -28,6 +28,23 @@ addon. Unsupported hosts can still load Pi and remain blocked or explicitly
 off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64
 with KVM; Windows, Intel macOS, and musl Linux are not supported.
 
+## Docker inside the guest
+
+The Docker daemon runs inside the microVM and listens only on the guest Unix
+socket. Access to that socket is root-equivalent inside the guest, not on the
+host. Readiness probes explicitly select that socket and reject unverified
+socket ownership. Docker and process-control environment variables are cleared
+for preparation, and configuration cannot forward them. Mounts that shadow
+protected guest executables or Docker runtime paths are rejected. The extension never mounts the host Docker
+socket, starts a host daemon, or copies host Docker configuration and registry
+credentials into the guest.
+
+A container can still reach anything already mounted into the microVM. In
+`direct` mode that includes the host project directory; in Git mode it includes
+the retained workspace; explicitly configured mounts are visible too. Treat a
+Dockerfile or Compose file as guest-root code and use read-only mounts where
+possible. Container egress remains behind the Microsandbox network policy.
+
 ## Host-read exceptions
 
 Pi-discovered `SKILL.md` reads are a narrow host-read exception. A standalone
