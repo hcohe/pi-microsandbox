@@ -14,10 +14,13 @@ verify_docker_contract() {
     dockerd --version | grep -Fq 'Docker version 29.8.0'
     containerd --version | grep -Fq 'v2.3.4'
     runc --version | grep -Fq '1.5.1'
-    # `iptables --version` opens a netlink socket and fails under Buildx's
-    # cross-architecture QEMU even though the image has the correct nft backend.
+    # The nft frontends open netlink sockets even for `--version`, which fails
+    # under Buildx's cross-architecture QEMU. Verify the pinned packages and
+    # selected iptables backend without invoking either frontend.
+    test "$(dpkg-query -W -f='${Version}' iptables)" = '1.8.11-2ubuntu3'
+    test "$(dpkg-query -W -f='${Version}' nftables)" = '1.1.6-1'
     test "$(readlink -f "$(command -v iptables)")" = '/usr/sbin/xtables-nft-multi'
-    nft --version | grep -Fq 'v1.1.6'
+    test "$(stat -c '%U:%G:%a' "$(command -v nft)")" = 'root:root:755'
     docker buildx version | grep -Fq 'v0.37.1'
     docker compose version | grep -Fq 'v5.5.1'
 
