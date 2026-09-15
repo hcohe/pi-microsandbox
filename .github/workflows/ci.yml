@@ -179,6 +179,7 @@ jobs:
           retention-days: 7
           compression-level: 0
           include-hidden-files: false
+          overwrite: true
 
   package:
     name: Assemble and smoke-test package

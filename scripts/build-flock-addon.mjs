@@ -50,6 +50,15 @@ function validateBinary(binary, target) {
     const symbols = run("nm", ["-u", binary]);
     if (!symbols.includes("_napi_create_function")) throw new Error("Darwin addon has no Node-API imports");
     if (/__Z/.test(symbols)) throw new Error("Darwin addon unexpectedly imports C++ symbols");
+    const dependencies = run("otool", ["-L", binary])
+      .split("\n")
+      .slice(1)
+      .map((line) => line.trim().split(/\s+/)[0])
+      .filter(Boolean);
+    const unexpected = dependencies.filter((dependency) => dependency !== "/usr/lib/libSystem.B.dylib");
+    if (unexpected.length > 0) {
+      throw new Error(`Darwin addon links unexpected libraries: ${unexpected.join(", ")}`);
+    }
     return;
   }
 

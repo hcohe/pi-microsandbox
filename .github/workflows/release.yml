@@ -161,6 +161,7 @@ jobs:
           retention-days: 7
           compression-level: 0
           include-hidden-files: false
+          overwrite: true
 
   verify:
     name: Verify and build artifact

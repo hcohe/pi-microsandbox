@@ -95,8 +95,8 @@ static napi_value flock_binding(napi_env env, napi_callback_info info) {
     return throw_type_error(env, "operation must be \"exnb\" or \"un\"");
   }
 
-  if (strcmp(operation, "exnb") == 0) flags = LOCK_EX | LOCK_NB;
-  else if (strcmp(operation, "un") == 0) flags = LOCK_UN;
+  if (operation_length == 4 && memcmp(operation, "exnb", 4) == 0) flags = LOCK_EX | LOCK_NB;
+  else if (operation_length == 2 && memcmp(operation, "un", 2) == 0) flags = LOCK_UN;
   else return throw_type_error(env, "operation must be \"exnb\" or \"un\"");
 
   if (flock((int)fd_number, flags) != 0) {

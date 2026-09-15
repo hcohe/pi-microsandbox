@@ -51,9 +51,10 @@ from the same commit's Git archive, then give both paths to the assembler:
 
 ```sh
 run_id=GITHUB_ACTIONS_RUN_ID
-artifact_root="$(mktemp -d)"
-staging="$(mktemp -d)"
-pack_dir="$(mktemp -d)"
+mkdir -p .tmp
+artifact_root="$(mktemp -d "$PWD/.tmp/flock-artifacts.XXXXXX")"
+staging="$(mktemp -d "$PWD/.tmp/package-staging.XXXXXX")"
+pack_dir="$(mktemp -d "$PWD/.tmp/package-pack.XXXXXX")"
 
 for target in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
   gh run download "$run_id" --name "flock-$target" --dir "$artifact_root"
@@ -62,7 +63,7 @@ done
 git archive HEAD | tar -x -C "$staging"
 npm run assemble:package -- "$artifact_root" "$staging"
 pack_json="$(npm pack "$staging" --json --pack-destination "$pack_dir")"
-tarball="$(node -e 'const r=JSON.parse(process.argv[1]); process.stdout.write(r[0].filename)' "$pack_json")"
+tarball="$(node -e 'const value=JSON.parse(process.argv[1]); const results=Array.isArray(value)?value:Object.values(value); if(results.length!==1) throw new Error(`expected one pack result, got ${results.length}`); process.stdout.write(results[0].filename)' "$pack_json")"
 npm run package-smoke -- "$pack_dir/$tarball"
 ```
 

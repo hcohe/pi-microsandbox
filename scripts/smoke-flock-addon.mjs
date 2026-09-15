@@ -50,6 +50,8 @@ const first = openSync(lockPath, "a+");
 const second = openSync(lockPath, "a+");
 try {
   assert.equal(flock(first, "exnb"), undefined);
+  assert.throws(() => flock(first, "un\0x"), TypeError);
+  assert.throws(() => flock(first, "ex\0b"), TypeError);
   assert.throws(
     () => flock(second, "exnb"),
     (error) => error instanceof Error

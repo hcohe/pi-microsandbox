@@ -28,7 +28,7 @@
               "-fvisibility=hidden",
               "-fstack-protector-strong"
             ],
-            "OTHER_LDFLAGS": ["-Wl,-dead_strip"]
+            "OTHER_LDFLAGS": ["-Wl,-dead_strip", "-nostdlib++"]
           }
         }]
       ]
