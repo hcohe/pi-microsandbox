@@ -24,12 +24,12 @@ It is loaded lazily when an owner lock is first needed. Consumer installation
 does not compile native code or require Python, a C/C++ toolchain, or npm
 lifecycle scripts; installation with scripts disabled is supported.
 
-Keep optional dependencies enabled. `microsandbox@0.6.16` supplies its matching
-native addon and runtime binaries through an optional platform package. If that
+Keep optional dependencies enabled. `microsandbox@0.6.16` supplies its CLI,
+native addon, and runtime binaries through an optional platform package. If that
 platform package is missing, reinstall with optional dependencies enabled,
 install the matching Microsandbox platform package, or set `MSB_PATH` to a
-working `msb` binary. These alternatives do not remove the host virtualization
-requirement.
+working standalone `msb` binary. These alternatives do not remove the host
+virtualization requirement.
 
 ## Install
 
@@ -38,6 +38,11 @@ Install the package for the current user with Pi:
 ```sh
 pi install npm:pi-microsandbox
 ```
+
+This is the only package installation step on a supported host. The dependency
+includes the Microsandbox SDK and CLI; its matching optional platform package
+includes the host runtime. You do not need to run the standalone Microsandbox
+installer first.
 
 Before starting a sandbox, review [configuration](configuration.md) and choose a
 [published variant or custom image](images.md) if the versioned default image

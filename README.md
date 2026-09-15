@@ -50,26 +50,25 @@ You'll need Pi, **Node.js 22.19.0+**, and one of the supported host targets:
 Apple Silicon macOS (`darwin-arm64`), GNU Linux x86_64
 (`linux-x64-gnu`), or GNU Linux arm64 (`linux-arm64-gnu`). Live sandboxes also
 need host virtualization support. The POSIX lock addon is bundled and installs
-without lifecycle scripts or a compiler; keep npm optional dependencies enabled
-for the Microsandbox platform package.
+without lifecycle scripts or a compiler.
 [Full requirements and installation help →](docs/getting-started.md)
 
-Install the Microsandbox CLI first:
-
-```sh
-curl -fsSL https://install.microsandbox.dev | sh
-```
-
-For alternate installation methods and any Microsandbox-specific setup,
-runtime, or troubleshooting details, use the official
-[Microsandbox documentation](https://docs.microsandbox.dev/). The documentation
-in this repository covers the Pi integration.
-
-Then install pi-microsandbox:
+Install pi-microsandbox:
 
 ```sh
 pi install npm:pi-microsandbox
 ```
+
+That command also installs the pinned Microsandbox SDK, CLI, and matching
+platform runtime. A separate Microsandbox installation is not required on a
+supported host. Keep npm optional dependencies enabled so npm installs the
+platform package.
+
+If the platform package is unavailable, you can provide a standalone `msb`
+binary with `MSB_PATH`. See the official
+[Microsandbox documentation](https://docs.microsandbox.dev/) for standalone
+installation and runtime troubleshooting. The documentation in this repository
+covers the Pi integration.
 
 From a Git repository, start Pi with its own isolated workspace:
 
