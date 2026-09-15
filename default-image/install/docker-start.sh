@@ -204,13 +204,10 @@ stale_launch_record() {
     read -r token pid start boot < <(read_launch_owner) || return 1
 
     if path_absent "${docker_pidfile}"; then
-        # A prior boot may have stopped after publishing provenance but before
-        # dockerd created its PID file. In the current boot, only a published
-        # socket-owner record distinguishes an exited established daemon from
-        # an interrupted pending launch.
-        if [[ "${boot}" == "${current_boot_id}" ]] && path_absent "${socket_owner}"; then
-            return 1
-        fi
+        # A managed launch may exit before dockerd creates its PID file. The
+        # exact same-boot PID is checked below before its state is reclaimed;
+        # prior-boot PID values are never signaled or trusted as live identity.
+        :
     else
         read -r pidfile_pid < <(read_docker_pid) || return 1
         [[ "${pidfile_pid}" == "${pid}" ]] || return 1

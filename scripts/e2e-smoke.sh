@@ -603,6 +603,18 @@ async function scenario18() {
     assert.equal((await guest(denied, "kill", ["-0", newPid])).exitCode, 0, "replacement Docker daemon is not live");
     const deniedAfterRestart = await guest(denied, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
     assert.notEqual(deniedAfterRestart.exitCode, 0, "Docker restart widened deny mode");
+
+    const pendingStopped = await guest(denied, "sh", ["-c", 'kill "$1"; for i in $(seq 1 100); do if ! kill -0 "$1" 2>/dev/null && test ! -S /var/run/docker.sock; then exit 0; fi; sleep .1; done; exit 1', "sh", newPid]);
+    assert.equal(pendingStopped.exitCode, 0, "the replacement Docker daemon did not stop");
+    assert.equal((await guest(denied, "rm", ["-f", "/run/pi-msb-docker-socket.owner"])).exitCode, 0);
+    assert.equal((await guest(denied, "test", ["-d", "/run/docker"])).exitCode, 0, "expected stale Docker exec-root state");
+    const pendingRecovery = await guest(denied, "pi-msb-docker-start", ["30000"], { timeoutMs: 32_000 });
+    assert.equal(pendingRecovery.exitCode, 0, "a failed same-boot pending launch poisoned Docker startup");
+    const recoveredPid = (await guest(denied, "cat", ["/run/docker.pid"])).stdout.toString().trim();
+    assert.match(recoveredPid, /^[0-9]+$/);
+    assert.notEqual(recoveredPid, newPid, "pending launch recovery reused the exited daemon process");
+    const deniedAfterPendingRecovery = await guest(denied, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
+    assert.notEqual(deniedAfterPendingRecovery.exitCode, 0, "pending launch recovery widened deny mode");
     await close(denied); denied = undefined;
 
     allowed = await boot(root, "direct", { docker, network: { mode: "allowlist", allowHosts: ["example.com"], allowDns: true, publishPorts: [] } });
