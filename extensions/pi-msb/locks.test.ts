@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { flockBinaryPath, flockTarget } from "./flock.ts";
 import {
   acquireOwnerLock,
   createLocksPort,
@@ -14,10 +15,6 @@ import {
   type LocksOptions,
 } from "./locks.ts";
 import type { LockInfo } from "./types.ts";
-
-function importNativeModule(specifier: string): Promise<unknown> {
-  return import(specifier);
-}
 
 const info: LockInfo = {
   version: 1,
@@ -176,15 +173,19 @@ test("flock failures fail closed instead of falling back to PID checks", async (
   });
 });
 
-test("real fs-ext contention is kernel-backed when the native dependency is available", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("flock(2) is not available on Windows");
-    return;
-  }
+test("real bundled addon contention is kernel-backed when the current prebuild is available", async (t) => {
   try {
-    await importNativeModule("fs-ext");
+    const report = process.platform === "linux"
+      ? process.report?.getReport() as { header?: { glibcVersionRuntime?: unknown } } | undefined
+      : undefined;
+    const target = flockTarget({
+      platform: process.platform,
+      arch: process.arch,
+      glibcVersionRuntime: report?.header?.glibcVersionRuntime,
+    });
+    await access(flockBinaryPath(target));
   } catch {
-    t.skip("fs-ext is not installed in this offline unit-test environment");
+    t.skip("the current target prebuild is absent or this source host is unsupported");
     return;
   }
 

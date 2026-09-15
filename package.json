@@ -1,6 +1,6 @@
 {
   "name": "pi-microsandbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Microsandbox-backed isolation for Pi coding tools",
   "type": "module",
   "license": "MIT",
@@ -33,7 +33,10 @@
     "SECURITY.md",
     "docs/*.md",
     "extensions/pi-msb/*.ts",
-    "!extensions/pi-msb/*.test.ts"
+    "!extensions/pi-msb/*.test.ts",
+    "native/flock/prebuilds/darwin-arm64/flock.node",
+    "native/flock/prebuilds/linux-x64-gnu/flock.node",
+    "native/flock/prebuilds/linux-arm64-gnu/flock.node"
   ],
   "pi": {
     "extensions": [
@@ -41,16 +44,17 @@
     ]
   },
   "scripts": {
+    "build:flock": "node ./scripts/build-flock-addon.mjs",
+    "smoke:flock": "node ./scripts/smoke-flock-addon.mjs",
+    "assemble:package": "node ./scripts/assemble-package.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --import ./test/setup.ts --test extensions/pi-msb/*.test.ts",
     "smoke": "pi --no-extensions -e . --offline --list-models __pi_msb_smoke__",
     "check": "npm run typecheck && npm test && npm run smoke",
     "package-smoke": "./scripts/package-smoke.sh",
-    "release-check": "npm run check && npm run package-smoke && npm audit --omit=dev",
-    "prepublishOnly": "npm run release-check"
+    "release-check": "npm run check && npm audit --omit=dev"
   },
   "dependencies": {
-    "fs-ext": "2.1.1",
     "microsandbox": "0.6.16"
   },
   "peerDependencies": {
@@ -61,13 +65,12 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@earendil-works/pi-tui": "0.84.4",
-    "@types/fs-ext": "^2.0.3",
     "@types/node": "^22.10.0",
+    "node-gyp": "12.1.0",
     "typebox": "1.3.23",
     "typescript": "^7.0.2"
   },
   "allowScripts": {
-    "fs-ext@2.1.1": true,
     "@google/genai": false,
     "protobufjs": false
   }

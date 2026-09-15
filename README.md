@@ -46,9 +46,12 @@ same decisions every time you start it.
 
 ## Get started
 
-You'll need Pi, **Node.js 22.19.0+**, and either an Apple Silicon Mac or Linux
-with accessible KVM. Installation also needs Python and a C/C++ build toolchain;
-keep lifecycle scripts and optional dependencies enabled.
+You'll need Pi, **Node.js 22.19.0+**, and one of the supported host targets:
+Apple Silicon macOS (`darwin-arm64`), GNU Linux x86_64
+(`linux-x64-gnu`), or GNU Linux arm64 (`linux-arm64-gnu`). Live sandboxes also
+need host virtualization support. The POSIX lock addon is bundled and installs
+without lifecycle scripts or a compiler; keep npm optional dependencies enabled
+for the Microsandbox platform package.
 [Full requirements and installation help →](docs/getting-started.md)
 
 Install the Microsandbox CLI first:

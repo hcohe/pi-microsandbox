@@ -12,18 +12,64 @@ To test from source without installing the npm package globally:
 git clone https://github.com/hcohe/pi-microsandbox.git
 cd pi-microsandbox
 
-# fs-ext must compile during installation; do not use --ignore-scripts.
-npm ci
+npm ci --ignore-scripts=true
 npm run typecheck
 npm test
 npm run smoke       # extension-load smoke; no sandbox starts
 npm run check       # all three commands above
 npm audit --omit=dev
-npm pack --dry-run --json
 ```
 
 The smoke and unit tests do not require KVM, image pulls, or a live sandbox.
 The boot-speed check and live matrix below are explicit VM tests.
+
+### Bundled flock addon
+
+Consumers receive prebuilt lock addons and do not need native build tools. Only
+contributors building or changing the addon need Python, a C compiler, and the
+platform build tools used by node-gyp (`make` on GNU Linux or Xcode command-line
+tools on macOS). On one of the three supported targets, run:
+
+```sh
+npm ci --ignore-scripts=true
+npm run build:flock
+npm run smoke:flock
+npm run check
+```
+
+The build writes
+`native/flock/prebuilds/<target>/flock.node` for the current target. These
+outputs are ignored by Git and must not be committed. CI builds
+`darwin-arm64`, `linux-x64-gnu`, and `linux-arm64-gnu` separately on native
+runners, then loads the same binary under Node 22.19.0 and Node 24.
+
+### Assemble a package from CI artifacts
+
+A complete package needs all three `flock-<target>` artifacts from one CI run.
+Download each artifact into one empty artifact root, create a staging checkout
+from the same commit's Git archive, then give both paths to the assembler:
+
+```sh
+run_id=GITHUB_ACTIONS_RUN_ID
+mkdir -p .tmp
+artifact_root="$(mktemp -d "$PWD/.tmp/flock-artifacts.XXXXXX")"
+staging="$(mktemp -d "$PWD/.tmp/package-staging.XXXXXX")"
+pack_dir="$(mktemp -d "$PWD/.tmp/package-pack.XXXXXX")"
+
+for target in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
+  gh run download "$run_id" --name "flock-$target" --dir "$artifact_root"
+done
+
+git archive HEAD | tar -x -C "$staging"
+npm run assemble:package -- "$artifact_root" "$staging"
+pack_json="$(npm pack "$staging" --json --pack-destination "$pack_dir")"
+tarball="$(node -e 'const value=JSON.parse(process.argv[1]); const results=Array.isArray(value)?value:Object.values(value); if(results.length!==1) throw new Error(`expected one pack result, got ${results.length}`); process.stdout.write(results[0].filename)' "$pack_json")"
+npm run package-smoke -- "$pack_dir/$tarball"
+```
+
+Use artifacts built from the same commit as `HEAD`. The assembler rejects
+missing, extra, or symlinked artifacts and keeps generated binaries out of the
+source checkout.
 
 ## Boot speed regression test
 
@@ -98,7 +144,11 @@ canonical changelog. The first npm publication is a human-run local publish of
 the reviewed tarball with interactive npm 2FA. Subsequent releases publish
 directly to npm with OIDC only after a maintainer publishes the matching GitHub
 Release and approves the protected `npm` GitHub Environment. Release automation
-must not use a long-lived npm token.
+must not use a long-lived npm token. Release CI builds every flock artifact from
+the release commit, assembles a temporary staging tree, records each binary's
+SHA-256, smoke-tests the exact tarball on every supported target, and packs only
+once. The publish job downloads and publishes those verified bytes without
+repacking.
 
 The sandbox image workflow publishes all six AMD64 and ARM64 variants to
 `ghcr.io/hcohe/pi-microsandbox`. An `image-vX.Y.Z` Git tag publishes the
