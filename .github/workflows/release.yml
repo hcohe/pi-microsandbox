@@ -115,7 +115,11 @@ jobs:
               file "$binary" | grep -q 'ELF 64-bit LSB shared object, ARM aarch64'
               readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
             fi
-            unexpected="$(readelf -d "$binary" | awk '/NEEDED/ { gsub(/^\[|\]$/, "", $5); if ($5 != "libc.so.6") print $5 }')"
+            allowed_loader=""
+            if [[ "$TARGET" == linux-arm64-gnu ]]; then
+              allowed_loader="ld-linux-aarch64.so.1"
+            fi
+            unexpected="$(readelf -d "$binary" | awk -v loader="$allowed_loader" '/NEEDED/ { gsub(/^\[|\]$/, "", $5); if ($5 != "libc.so.6" && $5 != loader) print $5 }')"
             while IFS= read -r version; do
               [[ -z "$version" ]] && continue
               newest="$(printf '%s\n' "$version" GLIBC_2.28 | sort -V | tail -n 1)"
