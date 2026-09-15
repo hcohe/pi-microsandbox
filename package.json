@@ -1,6 +1,6 @@
 {
   "name": "pi-microsandbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Microsandbox-backed isolation for Pi coding tools",
   "type": "module",
   "license": "MIT",
