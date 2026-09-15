@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
-import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type {
   Config,
   ConfigLayerInput,
@@ -19,6 +19,37 @@ const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools
 const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const PROTECTED_GUEST_ENV = new Set([
+  "BASH_ENV",
+  "CDPATH",
+  "DOCKER_CERT_PATH",
+  "DOCKER_CONFIG",
+  "DOCKER_CONTEXT",
+  "DOCKER_HOST",
+  "DOCKER_TLS",
+  "DOCKER_TLS_VERIFY",
+  "ENV",
+  "GLOBIGNORE",
+  "LD_LIBRARY_PATH",
+  "LD_PRELOAD",
+  "PATH",
+  "SHELLOPTS",
+]);
+const PROTECTED_GUEST_PATHS = [
+  "/bin",
+  "/dev",
+  "/etc/ld.so.cache",
+  "/etc/ld.so.preload",
+  "/lib",
+  "/lib64",
+  "/proc",
+  "/sbin",
+  "/sys",
+  "/usr",
+  "/run",
+  "/var/run",
+  "/var/lib/docker",
+] as const;
 
 function deepFreeze<T>(value: T): DeepReadonly<T> {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
@@ -33,8 +64,8 @@ export const DEFAULT_CONFIG = deepFreeze<Config>({
   image: "ghcr.io/hcohe/pi-microsandbox:1.0.0@sha256:00ea1e0911189815614e8a8eee36d1fd64f0f1edb39492e0bda9f273c834e59f",
   pullPolicy: "if-missing",
   bootstrapTools: "auto",
-  cpus: 1,
-  memoryMiB: 512,
+  cpus: 4,
+  memoryMiB: 8_192,
   idleTimeoutSec: 600,
   stopTimeoutMs: 10_000,
   detached: true,
@@ -47,6 +78,7 @@ export const DEFAULT_CONFIG = deepFreeze<Config>({
   shallowArchive: false,
   volumeQuotaMiB: 2_048,
   network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
+  docker: { mode: "auto", startupTimeoutMs: 15_000 },
   secrets: [],
   mounts: [],
   blockThirdParty: true,
@@ -76,6 +108,7 @@ export interface ResolveConfigInput {
   readFile?: (path: string) => Promise<string | null>;
   exists?: (path: string) => Promise<boolean>;
   realpath?: (path: string) => Promise<string>;
+  stat?: (path: string) => Promise<{ isSocket(): boolean }>;
 }
 
 export class ConfigError extends Error {
@@ -299,6 +332,7 @@ function knownPath(path: string): boolean {
     return parts.length === 1 && CONTROL_KEYS.has(parts[0]) && !nestedNetworkRemoval;
   }
   if (parts[0] === "network") return parts.length === 1 || (parts.length === 2 && ["mode", "allowHosts", "allowDns", "publishPorts", "removeAllowHosts", "removePublishPorts"].includes(parts[1]));
+  if (parts[0] === "docker") return parts.length === 1 || (parts.length === 2 && ["mode", "startupTimeoutMs"].includes(parts[1]));
   if (parts[0] === "secrets") return parts.length === 1 || (parts.length === 2 && SECRET_FIELDS.has(parts[1]));
   if (parts[0] === "mounts") return parts.length === 1 || (parts.length === 2 && MOUNT_FIELDS.has(parts[1]));
   return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
@@ -495,6 +529,9 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (!n(config.replaceTimeoutMs) || config.replaceTimeoutMs < 1) issues.push(issueForPath("replaceTimeoutMs", "must be positive"));
   if (!n(config.volumeQuotaMiB) || config.volumeQuotaMiB < 1) issues.push(issueForPath("volumeQuotaMiB", "must be positive"));
   if (!["auto", "git", "direct", "none"].includes(config.mode)) issues.push(issueForPath("mode", "unknown storage mode"));
+  const docker = isPlainObject(config.docker) ? config.docker : null;
+  if (!docker || !["auto", "require", "disabled"].includes(docker.mode as string)) issues.push(issueForPath("docker.mode", "must be auto, require, or disabled"));
+  if (!docker || !n(docker.startupTimeoutMs) || !Number.isInteger(docker.startupTimeoutMs) || (docker.startupTimeoutMs as number) < 1 || (docker.startupTimeoutMs as number) > 300_000) issues.push(issueForPath("docker.startupTimeoutMs", "must be an integer between 1 and 300000"));
   if (!["auto", true, false].includes(config.bootstrapTools)) issues.push(issueForPath("bootstrapTools", "must be auto, true, or false"));
   if (!["block", "host"].includes(config.fallbackMode)) issues.push(issueForPath("fallbackMode", "must be block or host"));
   const booleanFields = ["detached", "replace", "shallowArchive", "blockThirdParty", "allowHostExecution", "allowSkillReads", "exposeSessionEnvironment", "autoStart", "pruneOnStart", "showFooter"] as const;
@@ -509,7 +546,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   };
   if (stringArray("routeTools", config.routeTools)) for (const tool of config.routeTools) if (!ROUTED_TOOLS.includes(tool)) issues.push(issueForPath("routeTools", `unknown routed tool ${tool}`));
   stringArray("passThroughTools", config.passThroughTools);
-  stringArray("hostEnv", config.hostEnv);
+  if (stringArray("hostEnv", config.hostEnv)) for (const name of config.hostEnv) if (PROTECTED_GUEST_ENV.has(name)) issues.push(issueForPath("hostEnv", `must not forward protected process environment variable ${name}`));
   stringArray("hostRoAllowlist", config.hostRoAllowlist);
   const network = isPlainObject(config.network) ? config.network : null;
   if (!network || !["default", "open", "allowlist", "deny"].includes(network.mode as string)) issues.push(issueForPath("network.mode", "unknown network mode"));
@@ -521,6 +558,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (!Array.isArray(config.secrets)) issues.push(issueForPath("secrets", "must be an array"));
   for (const [index, secret] of (Array.isArray(config.secrets) ? config.secrets : []).entries()) {
     if (!secret || typeof secret.env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.env)) issues.push(issueForPath(`secrets[${index}]`, "env must be a valid host environment name"));
+    else if (PROTECTED_GUEST_ENV.has(secret.env)) issues.push(issueForPath(`secrets[${index}].env`, `must not set protected process environment variable ${secret.env}`));
     if (typeof secret?.value !== "string") issues.push(issueForPath(`secrets[${index}].value`, "must be a string"));
     if (!Array.isArray(secret?.allowHosts) || !secret.allowHosts.length || secret.allowHosts.some((host: unknown) => typeof host !== "string" || !host)) issues.push(issueForPath(`secrets[${index}]`, "allowHosts must be a non-empty string array"));
   }
@@ -542,6 +580,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
     if (typeof guest === "string" && isAbsolute(guest)) {
       const canonical = String(canonicalGuestPath(guest));
       if (isInside(canonical, "/tmp") || isInside("/tmp", canonical)) issues.push(issueForPath(`mounts[${index}].guestPath`, "must not shadow reserved /tmp paths"));
+      if (PROTECTED_GUEST_PATHS.some((reserved) => isInside(canonical, reserved) || isInside(reserved, canonical))) issues.push(issueForPath(`mounts[${index}].guestPath`, "must not shadow protected guest system or Docker runtime paths"));
     }
   }
   if (issues.length) throw new ConfigError(issues);
@@ -599,7 +638,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   const canonicalPath = async (path: string, failClosed = false): Promise<string> => {
     try { return await realpath(path); }
     catch {
-      if (failClosed) throw new ConfigError(["trusted project path could not be canonicalized"]);
+      if (failClosed) throw new ConfigError(["mount or trusted project path could not be canonicalized"]);
       return resolve(path);
     }
   };
@@ -629,6 +668,12 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   config = normalizeLegacy(config, warnings);
   // Legacy mounts participate in the same overlap/type checks as native mounts.
   config = validateConfig(config);
+  config = {
+    ...config,
+    mounts: await Promise.all(config.mounts.map(async (mount) => mount.type === "named" || mount.type === "tmpfs"
+      ? mount
+      : { ...mount, hostPath: await canonicalPath(mount.hostPath!, true) })),
+  };
 
   const projectGuestPath = String(canonicalGuestPath(resolve(input.repoRoot ?? input.cwd)));
   const projectShadowIssues = config.mounts.flatMap((mount, index) => {
@@ -649,6 +694,20 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     .filter((mount) => mount && mount.readonly === false)
     .map((mount) => String(canonicalGuestPath(mount.guestPath ?? "")));
   const policyIssues: string[] = [];
+  const mountStat = input.stat ?? fs.stat;
+  const knownHostDockerSockets = ["/var/run/docker.sock", "/run/docker.sock"];
+  if (input.homedir ?? env.HOME) knownHostDockerSockets.push(join(String(input.homedir ?? env.HOME), ".docker", "run", "docker.sock"));
+  if (env.XDG_RUNTIME_DIR) knownHostDockerSockets.push(join(env.XDG_RUNTIME_DIR, "docker.sock"));
+  for (const [index, mount] of config.mounts.entries()) {
+    if (mount.type === "named" || mount.type === "tmpfs" || typeof mount.hostPath !== "string") continue;
+    const host = resolve(mount.hostPath);
+    let unsafe = basename(host) === "docker.sock" || knownHostDockerSockets.some((socket) => isInside(socket, host));
+    if (!unsafe) {
+      try { unsafe = (await mountStat(host)).isSocket(); }
+      catch { policyIssues.push(issueForPath(`mounts[${index}].hostPath`, "could not be safely inspected")); continue; }
+    }
+    if (unsafe) policyIssues.push(issueForPath(`mounts[${index}].hostPath`, "must not mount a host socket or Docker socket path"));
+  }
   const projectSecretFiles = new Map<string, { reference: string; canonical: string }>();
   if (Array.isArray(projectMounts)) for (const mount of projectMounts as any[]) {
     if (!mount || typeof mount.hostPath !== "string" || mount.type === "named" || mount.type === "tmpfs") continue;

@@ -22,6 +22,8 @@ SCENARIOS=(
   "Bootstrap and deny-network behavior"
   "Concurrent exec, abort, timeout, grep, and find"
   "Export and managed-volume removal are guarded"
+  "Docker bridge, Buildx, Compose, and double port publishing"
+  "Nested Docker traffic obeys deny and allowlist policies"
 )
 
 report_all_skip() {
@@ -114,6 +116,8 @@ const names = [
   "Bootstrap and deny-network behavior",
   "Concurrent exec, abort, timeout, grep, and find",
   "Export and managed-volume removal are guarded",
+  "Docker bridge, Buildx, Compose, and double port publishing",
+  "Nested Docker traffic obeys deny and allowlist policies",
 ];
 
 const env = { ...process.env, PI_MSB_DISABLE: "" };
@@ -335,11 +339,15 @@ async function holdOwner(root, session, ready) {
 async function scenario8() {
   const root = await repo(); let value; let volume;
   try {
-    value = await boot(root, "git", { idleTimeoutSec: 2 }); volume = await activeVolume(value);
+    value = await boot(root, "git", { idleTimeoutSec: 2, docker: { mode: "require", startupTimeoutMs: 30000 } }); volume = await activeVolume(value);
+    const firstDocker = await guest(value, "docker", ["run", "--rm", "alpine:3.22", "printf", "first"] , { timeoutMs: 120_000 });
+    assert.equal(firstDocker.exitCode, 0, firstDocker.stderr.toString());
     await sleep(5000);
     const status = await Sandbox.get(value.state.info.name); const rawStatus = String(status.status || status.state || "").toLowerCase();
     assert.ok(["stopped", "idle", "exited", "dead", "created"].includes(rawStatus), `expected idle stop, got ${rawStatus}`);
     assert.equal((await guest(value, "printf", ["woke"])).stdout.toString(), "woke");
+    const secondDocker = await guest(value, "docker", ["run", "--rm", "alpine:3.22", "printf", "second"], { timeoutMs: 60_000 });
+    assert.equal(secondDocker.stdout.toString(), "second", secondDocker.stderr.toString());
   } finally { if (value) await close(value, volume?.name); await rm(root, { recursive: true, force: true }); }
 }
 async function scenario9() {
@@ -438,6 +446,10 @@ async function scenario14() {
         const command = await guest(prepared, "sh", ["-lc", "printf pi-msb-prepared"], { timeoutMs: 30_000 });
         assert.equal(command.exitCode, 0, `${image} command probe failed: ${command.stderr.toString()}`);
         assert.equal(command.stdout.toString(), "pi-msb-prepared", `${image} command probe returned unexpected output`);
+        assert.equal(prepared.state.info?.docker.readiness, "ready", `${image} Docker was not ready before activation`);
+        assert.equal(prepared.state.info?.docker.storageDriver, "vfs", `${image} did not use the vfs driver`);
+        assert.match((await guest(prepared, "docker", ["buildx", "version"])).stdout.toString(), /v0\.37\.1/, `${image} Buildx version mismatch`);
+        assert.match((await guest(prepared, "docker", ["compose", "version"])).stdout.toString(), /v5\.5\.1/, `${image} Compose version mismatch`);
       } finally {
         await close(prepared, volumeNameFor(preparedSession));
       }
@@ -502,7 +514,103 @@ async function scenario16() {
   }
 }
 
-const scenarios = [scenario1, scenario2, scenario3, scenario4, scenario5, scenario6, scenario7, scenario8, scenario9, scenario10, scenario11, scenario12, scenario13, scenario14, scenario15, scenario16];
+async function scenario17() {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-live-docker-")); let value;
+  const port = 30000 + (process.pid % 10000);
+  try {
+    await writeFile(join(root, "Dockerfile"), "FROM alpine:3.22\nRUN wget -qO /network-ok https://example.com\n");
+    await writeFile(join(root, "compose.yml"), 'services:\n  smoke:\n    image: alpine:3.22\n    command: ["wget", "-qO-", "https://example.com"]\n');
+    value = await boot(root, "direct", {
+      docker: { mode: "require", startupTimeoutMs: 30000 },
+      network: { mode: "default", allowDns: true, publishPorts: [`127.0.0.1:${port}:${port}`] },
+    });
+    assert.equal(value.state.info?.docker.readiness, "ready");
+    assert.equal(value.state.info?.docker.storageDriver, "vfs");
+    const daemonPid = (await guest(value, "cat", ["/run/docker.pid"])).stdout.toString().trim();
+    assert.equal((await guest(value, "rm", ["-f", "/run/pi-msb-docker-socket.owner"])).exitCode, 0);
+    const hostileEndpoint = await guest(value, "env", ["DOCKER_HOST=tcp://127.0.0.1:9", "DOCKER_CONTEXT=hostile-context", "pi-msb-docker-start", "30000"], { timeoutMs: 32_000 });
+    assert.equal(hostileEndpoint.exitCode, 0, "Docker startup honored a hostile client endpoint");
+    assert.equal((await guest(value, "cat", ["/run/docker.pid"])).stdout.toString().trim(), daemonPid, "Docker startup did not adopt its exact managed daemon");
+    assert.equal((await guest(value, "test", ["-s", "/run/pi-msb-docker-socket.owner"])).exitCode, 0, "Docker startup did not republish socket ownership");
+    assert.equal((await guest(value, "docker", ["run", "--rm", "alpine:3.22", "uname", "-s"], { timeoutMs: 120_000 })).stdout.toString().trim(), "Linux");
+    const https = await guest(value, "docker", ["run", "--rm", "alpine:3.22", "wget", "-qO-", "https://example.com"], { timeoutMs: 60_000 });
+    assert.equal(https.exitCode, 0, https.stderr.toString());
+    assert.equal((await guest(value, "docker", ["network", "create", "pi-msb-live-net"])).exitCode, 0);
+    assert.equal((await guest(value, "docker", ["run", "-d", "--name", "pi-msb-peer", "--network", "pi-msb-live-net", "alpine:3.22", "sleep", "120"])).exitCode, 0);
+    const dns = await guest(value, "docker", ["run", "--rm", "--network", "pi-msb-live-net", "alpine:3.22", "getent", "hosts", "pi-msb-peer"]);
+    assert.equal(dns.exitCode, 0, dns.stderr.toString());
+    const build = await guest(value, "docker", ["buildx", "build", "--load", "-t", "pi-msb-live-build", "."], { cwd: root, timeoutMs: 180_000 });
+    assert.equal(build.exitCode, 0, build.stderr.toString());
+    assert.equal((await guest(value, "docker", ["run", "--rm", "pi-msb-live-build", "test", "-s", "/network-ok"])).exitCode, 0);
+    const compose = await guest(value, "docker", ["compose", "-f", join(root, "compose.yml"), "up", "--abort-on-container-exit", "--exit-code-from", "smoke"], { cwd: root, timeoutMs: 120_000 });
+    assert.equal(compose.exitCode, 0, compose.stderr.toString());
+    const ported = await guest(value, "docker", ["run", "-d", "--name", "pi-msb-ported", "-p", `0.0.0.0:${port}:8080`, "-p", `0.0.0.0:${port + 1}:8080`, "alpine:3.22", "sh", "-c", "mkdir -p /www; printf nested >/www/index.html; httpd -f -p 8080 -h /www"]);
+    assert.equal(ported.exitCode, 0, ported.stderr.toString());
+    let body = "";
+    for (let attempt = 0; attempt < 30 && body !== "nested"; attempt++) {
+      try { body = await (await fetch(`http://127.0.0.1:${port}`, { signal: AbortSignal.timeout(1000) })).text(); } catch {}
+      if (body !== "nested") await sleep(200);
+    }
+    assert.equal(body, "nested", "double-published Docker port was not reachable from the host");
+    await assert.rejects(
+      fetch(`http://127.0.0.1:${port + 1}`, { signal: AbortSignal.timeout(1000) }),
+      undefined,
+      "a Docker-only port mapping unexpectedly reached the host",
+    );
+    assert.equal((await guest(value, "test", ["!", "-e", join(root, "var", "lib", "docker")])).exitCode, 0, "Docker data leaked into the project mount");
+    assert.equal((await guest(value, "test", ["!", "-e", "/root/.docker/config.json"])).exitCode, 0, "host Docker credentials appeared in the guest");
+  } finally {
+    if (value) {
+      try { await guest(value, "docker", ["rm", "-f", "pi-msb-peer", "pi-msb-ported"]); } catch {}
+      try { await guest(value, "docker", ["network", "rm", "pi-msb-live-net"]); } catch {}
+      try { await guest(value, "docker", ["compose", "-f", join(root, "compose.yml"), "down", "--remove-orphans"], { cwd: root }); } catch {}
+      await close(value);
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+async function scenario18() {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-live-docker-policy-")); let enabled; let denied; let allowed;
+  try {
+    const docker = { mode: "require", startupTimeoutMs: 30000 };
+    enabled = await boot(root, "direct", { docker });
+    assert.equal((await guest(enabled, "docker", ["pull", "alpine:3.22"], { timeoutMs: 120_000 })).exitCode, 0);
+    assert.equal((await guest(enabled, "docker", ["save", "-o", join(root, "alpine.tar"), "alpine:3.22"], { timeoutMs: 120_000 })).exitCode, 0);
+    await close(enabled); enabled = undefined;
+
+    denied = await boot(root, "direct", { docker, network: { mode: "deny", allowDns: false, publishPorts: [] } });
+    assert.equal((await guest(denied, "docker", ["load", "-i", join(root, "alpine.tar")], { timeoutMs: 120_000 })).exitCode, 0);
+    const deniedEgress = await guest(denied, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
+    assert.notEqual(deniedEgress.exitCode, 0, "nested container bypassed deny mode");
+    const oldPid = (await guest(denied, "cat", ["/run/docker.pid"])).stdout.toString().trim();
+    assert.match(oldPid, /^[0-9]+$/);
+    const stopped = await guest(denied, "sh", ["-c", 'kill "$1"; for i in $(seq 1 100); do if ! kill -0 "$1" 2>/dev/null && test ! -S /var/run/docker.sock; then exit 0; fi; sleep .1; done; exit 1', "sh", oldPid]);
+    assert.equal(stopped.exitCode, 0, "the original Docker daemon did not stop");
+    const concurrentStarts = await Promise.all(Array.from({ length: 4 }, () => guest(denied, "pi-msb-docker-start", ["30000"], { timeoutMs: 32_000 })));
+    assert.ok(concurrentStarts.every((result) => result.exitCode === 0), "concurrent Docker startup was not serialized");
+    const newPid = (await guest(denied, "cat", ["/run/docker.pid"])).stdout.toString().trim();
+    assert.match(newPid, /^[0-9]+$/);
+    assert.notEqual(newPid, oldPid, "Docker startup reused the old daemon process");
+    assert.equal((await guest(denied, "kill", ["-0", newPid])).exitCode, 0, "replacement Docker daemon is not live");
+    const deniedAfterRestart = await guest(denied, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
+    assert.notEqual(deniedAfterRestart.exitCode, 0, "Docker restart widened deny mode");
+    await close(denied); denied = undefined;
+
+    allowed = await boot(root, "direct", { docker, network: { mode: "allowlist", allowHosts: ["example.com"], allowDns: true, publishPorts: [] } });
+    assert.equal((await guest(allowed, "docker", ["load", "-i", join(root, "alpine.tar")], { timeoutMs: 120_000 })).exitCode, 0);
+    const allowedEgress = await guest(allowed, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "10", "-qO-", "https://example.com"], { timeoutMs: 30_000 });
+    assert.equal(allowedEgress.exitCode, 0, allowedEgress.stderr.toString());
+    const blockedEgress = await guest(allowed, "docker", ["run", "--rm", "alpine:3.22", "wget", "-T", "5", "-qO-", "https://example.org"], { timeoutMs: 30_000 });
+    assert.notEqual(blockedEgress.exitCode, 0, "nested container bypassed the allowlist");
+  } finally {
+    if (enabled) await close(enabled);
+    if (denied) await close(denied);
+    if (allowed) await close(allowed);
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+const scenarios = [scenario1, scenario2, scenario3, scenario4, scenario5, scenario6, scenario7, scenario8, scenario9, scenario10, scenario11, scenario12, scenario13, scenario14, scenario15, scenario16, scenario17, scenario18];
 async function probe() {
   const name = `pi-msb-live-probe-${process.pid}-${Date.now()}`; let sandbox;
   try { sandbox = await Sandbox.builder(name).image(IMAGE).cpus(1).memory(512).idleTimeout(30).create(); const result = await sandbox.exec("true", []); if (result.code !== 0) throw new Error(`probe command exited ${result.code}`); console.log("PROBE|PASS|virtualization and image are available"); }
@@ -539,7 +647,8 @@ if [ "$probe_code" -eq 2 ]; then
 elif [ "$probe_code" -ne 0 ]; then
   reason=$(printf '%s\n' "$probe_output" | awk -F'|' '/^PROBE\|FAIL\|/ {print $3; exit}')
   printf 'FAIL  09  %s (%s)\n' "${SCENARIOS[8]}" "${reason:-live probe failed}"
-  for i in 0 1 2 3 4 5 6 7 9 10 11 12 13 14 15; do
+  for i in "${!SCENARIOS[@]}"; do
+    [ "$i" -eq 8 ] && continue
     printf 'SKIP  %02d  %s (live probe failed before this scenario)\n' "$((i + 1))" "${SCENARIOS[$i]}"
   done
   exit 1

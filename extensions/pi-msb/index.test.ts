@@ -13,6 +13,7 @@ const active: RuntimeState = {
     pid: 123,
     cwd: "/repo",
     createdAt: 0,
+    docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" },
   },
 };
 

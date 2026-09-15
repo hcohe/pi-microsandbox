@@ -198,6 +198,11 @@ function fullState(state: RuntimeState): string {
   lines.push(`Image: ${info.image}`);
   lines.push(`PID: ${info.pid}`);
   lines.push(`Age: ${displayTime(info.createdAt)}`);
+  lines.push(`Docker mode: ${info.docker.mode}`);
+  lines.push(`Docker readiness: ${info.docker.readiness}`);
+  if (info.docker.version) lines.push(`Docker version: ${info.docker.version}`);
+  if (info.docker.storageDriver) lines.push(`Docker storage driver: ${info.docker.storageDriver}`);
+  if (info.docker.reason) lines.push(`Docker reason: ${info.docker.reason}`);
   if (info.seedBranch) lines.push(`Branch: ${info.seedBranch}`);
   if (info.seedSha) lines.push(`Seed SHA: ${info.seedSha}`);
   if (info.volumeName) lines.push(`Retained volume: ${info.volumeName}`);

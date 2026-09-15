@@ -15,7 +15,11 @@ function resolved(config: Config): ResolvedConfig {
   return { config, provenance: {}, warnings: [] };
 }
 
-function fakeSdk(calls: string[], volumeHandle?: any): MicrosandboxModule {
+function fakeSdk(
+  calls: string[],
+  volumeHandle?: any,
+  execResult?: (command: string, args: string[], timeoutMs?: number) => Promise<{ code: number; stdout?: string; stderr?: string }> | { code: number; stdout?: string; stderr?: string },
+): MicrosandboxModule {
   const sandboxes = new Map<string, any>();
   const builder = (name: string): any => {
     const config: any = { name, labels: {} };
@@ -31,7 +35,17 @@ function fakeSdk(calls: string[], volumeHandle?: any): MicrosandboxModule {
       volume(guest: string, configure: (mount: any) => any) { calls.push(`volume:${guest}`); configure({ named: (value: string) => { calls.push(`named:${value}`); return this; }, bind: (value: string) => { calls.push(`bind:${value}`); return this; }, tmpfs: () => this }); return b; },
       network(configure: (network: any) => any) { configure({ policy: () => undefined }); return b; },
       envs() { return b; },
-      secret(configure: (secret: any) => any) { configure({ env: () => ({ value: () => ({ requireTlsIdentity: () => ({ allowHost: () => ({}) }) }) }) }); return b; },
+      secret(configure: (secret: any) => any) {
+        const entry: any = {
+          env: () => entry,
+          value: () => entry,
+          requireTlsIdentity: () => entry,
+          allowHost: () => entry,
+          allowHostPattern: () => entry,
+        };
+        configure(entry);
+        return b;
+      },
       async create() {
         const raw: any = {
           name,
@@ -40,7 +54,28 @@ function fakeSdk(calls: string[], volumeHandle?: any): MicrosandboxModule {
             stat: async () => ({ kind: "directory", size: 0, mode: 0o755, readonly: false }), list: async () => [],
             copyFromHost: async () => undefined, copyToHost: async () => undefined,
           }),
-          execWith: async () => ({ stdoutBytes: () => Buffer.from(""), stderrBytes: () => Buffer.from(""), code: 0 }),
+          execWith: async (command: string, configure: (builder: any) => any) => {
+            const execution = { args: [] as string[], timeoutMs: undefined as number | undefined };
+            const execBuilder: any = {
+              args(value: string[]) { execution.args = value; return execBuilder; },
+              cwd() { return execBuilder; },
+              timeout(value: number) { execution.timeoutMs = value; return execBuilder; },
+            };
+            configure(execBuilder);
+            calls.push(`exec:${command}:${JSON.stringify(execution.args)}:${execution.timeoutMs ?? ""}`);
+            const scripted = await execResult?.(command, execution.args, execution.timeoutMs);
+            const localDockerProbe = command === "/usr/bin/env" && execution.args[3] === "/usr/local/bin/docker";
+            const stdout = scripted?.stdout ?? (localDockerProbe && execution.args[5] === "version"
+              ? "29.8.0\n"
+              : localDockerProbe && execution.args[5] === "info"
+                ? "vfs\n"
+                : "");
+            return {
+              stdoutBytes: () => Buffer.from(stdout),
+              stderrBytes: () => Buffer.from(scripted?.stderr ?? ""),
+              code: scripted?.code ?? 0,
+            };
+          },
           execStreamWith: async () => ({ async *[Symbol.asyncIterator]() { yield { kind: "exited", code: 0 }; }, kill: async () => undefined }),
         };
         const handle: any = {
@@ -107,14 +142,88 @@ test("extension integration keeps native SDK lazy and boots through the real ada
     assert.equal(state.status, "active");
     assert.ok(calls.includes(`image:${DEFAULT_CONFIG.image}`));
     assert.ok(calls.includes("pull-policy:if-missing"));
-    assert.ok(calls.includes("memory:512"));
+    assert.ok(calls.includes("cpus:4"));
+    assert.ok(calls.includes("memory:8192"));
     assert.ok(calls.includes(`bind:${canonicalRoot}`));
     assert.ok(calls.includes(`volume:${root}`));
+    const cleanStartup = calls.find((call) => call.includes('/usr/local/sbin/pi-msb-docker-start","15000'));
+    assert.ok(cleanStartup?.startsWith("exec:/usr/bin/env:"));
+    const dockerProbes = calls.filter((call) => call.includes('/usr/local/bin/docker","--host=unix:///var/run/docker.sock'));
+    assert.equal(dockerProbes.length, 2);
+    assert.ok(dockerProbes.every((call) => call.startsWith("exec:/usr/bin/env:")));
+    assert.equal(state.info?.docker.readiness, "ready");
+    assert.equal(state.info?.docker.version, "29.8.0");
+    assert.equal(state.info?.docker.storageDriver, "vfs");
     await integration.manager.shutdown();
     assert.ok(calls.includes("stop"));
     assert.ok(calls.includes("remove"));
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Docker modes handle old images and startup failures without leaking helper output", async () => {
+  const roots: string[] = [];
+  try {
+    const boot = async (
+      mode: Config["docker"]["mode"],
+      execResult: NonNullable<Parameters<typeof fakeSdk>[2]>,
+      secrets: Config["secrets"] = [],
+    ) => {
+      const root = await mkdtemp(join(tmpdir(), `pi-msb-docker-${mode}-`));
+      roots.push(root);
+      const calls: string[] = [];
+      const config = {
+        ...DEFAULT_CONFIG,
+        mode: "direct",
+        bootstrapTools: false,
+        lockDir: join(root, "locks"),
+        docker: { mode, startupTimeoutMs: 1234 },
+        secrets,
+      } as Config;
+      const integration = createMsbIntegration({
+        sessionId: `docker-${mode}-${roots.length}`,
+        cwd: root,
+        configDirName: ".pi",
+        sdkLoader: async () => fakeSdk(calls, undefined, execResult),
+        acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
+      });
+      const state = await integration.configureSession({
+        sessionId: `docker-${mode}-${roots.length}`,
+        cwd: root,
+        projectTrusted: true,
+        config: resolved(config),
+      });
+      return { calls, integration, state };
+    };
+    const missingDocker = async (command: string, args: string[]) => ({
+      code: command === "/usr/bin/test" && ["/usr/local/bin/docker", "/usr/local/bin/dockerd", "/usr/local/sbin/pi-msb-docker-start"].includes(args.at(-1) ?? "") ? 1 : 0,
+    });
+
+    const auto = await boot("auto", missingDocker);
+    assert.equal(auto.state.status, "active");
+    assert.equal(auto.state.info?.docker.readiness, "missing");
+    assert.equal(auto.calls.some((call) => call.startsWith("exec:/usr/bin/env:") && call.includes("/usr/local/sbin/pi-msb-docker-start")), false);
+    await auto.integration.manager.shutdown();
+
+    const required = await boot("require", missingDocker);
+    assert.equal(required.state.status, "unavailable");
+    assert.match(required.state.reason ?? "", /missing Docker components/);
+
+    const disabled = await boot("disabled", async () => ({ code: 0 }));
+    assert.equal(disabled.state.status, "active");
+    assert.equal(disabled.state.info?.docker.readiness, "disabled");
+    assert.equal(disabled.calls.some((call) => call.includes("pi-msb-docker-start")), false);
+    await disabled.integration.manager.shutdown();
+
+    const failed = await boot("require", async (command, args) => command === "/usr/bin/env" && args.includes("/usr/local/sbin/pi-msb-docker-start")
+      ? { code: 1, stderr: "daemon rejected super-secret-value" }
+      : { code: 0 }, [{ env: "TOKEN", value: "super-secret-value", allowHosts: ["registry.example"] }]);
+    assert.equal(failed.state.status, "unavailable");
+    assert.match(failed.state.reason ?? "", /did not become ready/);
+    assert.doesNotMatch(failed.state.reason ?? "", /super-secret-value/);
+  } finally {
+    await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
   }
 });
 

@@ -40,6 +40,7 @@ function config(overrides: Partial<Config> = {}): Config {
     shallowArchive: false,
     volumeQuotaMiB: 1024,
     network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
+    docker: { mode: "auto", startupTimeoutMs: 15_000 },
     secrets: [],
     mounts: [],
     blockThirdParty: true,
@@ -166,8 +167,9 @@ function depsFor(events: string[], overrides: Partial<SandboxManagerDeps> = {}):
       events.push("operations");
       return operations;
     },
-    probeAndBootstrap: async () => {
-      events.push("probe");
+    prepareRuntime: async () => {
+      events.push("runtime");
+      return { docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" } };
     },
     seed: async () => {
       events.push("seed");
@@ -265,8 +267,8 @@ test("boot failure disposes, cleans the bundle, and never removes a volume", asy
       bundle,
       volume: { name: plan.volumeName, hostPath: "/vol", labels: {} },
     }),
-    probeAndBootstrap: async () => {
-      events.push("probe");
+    prepareRuntime: async () => {
+      events.push("runtime");
       throw new Error("bootstrap failed");
     },
   });
@@ -282,6 +284,7 @@ test("boot failure disposes, cleans the bundle, and never removes a volume", asy
 test("withRuntime wakes and swaps the transport without retrying the callback", async () => {
   const events: string[] = [];
   let inspectCount = 0;
+  let prepareCount = 0;
   let calls = 0;
   const req = request();
   const inspected: InspectedSandbox = {
@@ -300,6 +303,10 @@ test("withRuntime wakes and swaps the transport without retrying the callback", 
       inspectCount += 1;
       return { ...inspected, status: inspectCount === 1 ? "running" : "stopped" };
     },
+    prepareRuntime: async () => {
+      prepareCount += 1;
+      return { docker: { mode: "auto", readiness: "ready", version: `29.8.${prepareCount - 1}`, storageDriver: "vfs" } };
+    },
   });
   const manager = createSandboxManager(deps);
   await manager.boot(req);
@@ -313,6 +320,80 @@ test("withRuntime wakes and swaps the transport without retrying the callback", 
   );
   assert.equal(calls, 1);
   assert.equal(events.includes("start"), true);
+  assert.equal(prepareCount, 2);
+  assert.equal(manager.getState().info?.docker.version, "29.8.1");
+  await manager.shutdown();
+});
+
+test("wake preparation failure disposes the replacement before blocking callbacks", async () => {
+  const events: string[] = [];
+  const req = request();
+  let inspections = 0;
+  let preparations = 0;
+  let disposed = 0;
+  let callbackCalled = false;
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => {
+      inspections += 1;
+      if (inspections === 1) return null;
+      return {
+        name: sandboxNameFor(req.sessionId),
+        status: "stopped",
+        labels: labels(req),
+      };
+    },
+    createTransport: () => transport(() => { disposed += 1; }),
+    prepareRuntime: async () => {
+      preparations += 1;
+      if (preparations === 2) throw new Error("Docker daemon did not become ready");
+      return { docker: { mode: "require", readiness: "ready", version: "29.8.0", storageDriver: "vfs" } };
+    },
+  }));
+  await manager.boot(req);
+
+  await assert.rejects(manager.withRuntime(async () => { callbackCalled = true; }), /Docker daemon/);
+  assert.equal(callbackCalled, false);
+  assert.equal(preparations, 2);
+  assert.equal(disposed, 2, "replacement and previous transports must both be disposed");
+  assert.equal(manager.getState().status, "unavailable");
+  assert.equal(events.includes("stop-remove"), true);
+  assert.ok(events.indexOf("stop-remove") < events.indexOf("release"));
+  assert.equal(events.includes("release"), true);
+  await manager.shutdown();
+});
+
+test("a transport-down error reconnects and prepares the running sandbox on the next call", async () => {
+  const events: string[] = [];
+  const req = request();
+  let inspections = 0;
+  let preparations = 0;
+  let callbackCalls = 0;
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => {
+      inspections += 1;
+      if (inspections === 1) return null;
+      return { name: sandboxNameFor(req.sessionId), status: "running", labels: labels(req) };
+    },
+    prepareRuntime: async () => {
+      preparations += 1;
+      return { docker: { mode: "auto", readiness: "ready", version: `29.8.${preparations - 1}`, storageDriver: "vfs" } };
+    },
+  }));
+  await manager.boot(req);
+
+  const down = Object.assign(new Error("transport is down"), { code: "SANDBOX_DOWN" });
+  await assert.rejects(manager.withRuntime(async () => {
+    callbackCalls += 1;
+    throw down;
+  }), /transport is down/);
+  assert.equal(callbackCalls, 1, "arbitrary callbacks must not be retried");
+  assert.equal(manager.getState().status, "active");
+
+  await manager.withRuntime(async () => { callbackCalls += 1; });
+  assert.equal(callbackCalls, 2);
+  assert.equal(events.filter((event) => event === "connect").length, 1);
+  assert.equal(preparations, 2);
+  assert.equal(manager.getState().info?.docker.version, "29.8.1");
   await manager.shutdown();
 });
 

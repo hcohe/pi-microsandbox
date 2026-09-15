@@ -37,7 +37,12 @@ export type FallbackMode = "block" | "host";
 export type BootstrapTools = "auto" | boolean;
 export type PullPolicy = "always" | "if-missing" | "never";
 export type MountType = "dir" | "file" | "named" | "tmpfs";
+export type DockerMode = "auto" | "require" | "disabled";
 
+export interface DockerConfig {
+  mode: DockerMode;
+  startupTimeoutMs: number;
+}
 export interface NetworkConfig {
   mode: NetworkMode;
   allowHosts: string[];
@@ -74,6 +79,7 @@ export interface Config {
   shallowArchive: boolean;
   volumeQuotaMiB: number;
   network: NetworkConfig;
+  docker: DockerConfig;
   secrets: SecretConfig[];
   mounts: MountConfig[];
   blockThirdParty: boolean;
@@ -362,6 +368,17 @@ export type RuntimeStatus =
   | "off"
   | "host-fallback"
   | "disabled";
+export type DockerReadiness = "ready" | "missing" | "unavailable" | "disabled";
+export interface DockerCapabilityStatus {
+  mode: DockerMode;
+  readiness: DockerReadiness;
+  version?: string;
+  storageDriver?: string;
+  reason?: string;
+}
+export interface RuntimePreparation {
+  docker: DockerCapabilityStatus;
+}
 export interface SandboxInfo {
   name: string;
   displayId: string;
@@ -374,6 +391,7 @@ export interface SandboxInfo {
   seedBranch?: string | null;
   seedSha?: string | null;
   createdAt: number;
+  docker: DockerCapabilityStatus;
 }
 export interface RuntimeState {
   status: RuntimeStatus;
