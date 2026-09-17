@@ -19,6 +19,8 @@ const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools
 const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const REMOVED_WORKSPACE_KEYS = new Set(["mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB"]);
+const REMOVED_WORKSPACE_MESSAGE = "was removed; pi-microsandbox now bind-mounts the discovered workspace root read/write";
 const PROTECTED_GUEST_ENV = new Set([
   "BASH_ENV",
   "CDPATH",
@@ -72,11 +74,6 @@ export const DEFAULT_CONFIG = deepFreeze<Config>({
   replace: false,
   replaceTimeoutMs: 10_000,
   sandboxName: null,
-  mode: "direct",
-  cloneBranch: "current",
-  cloneDepth: "unlimited",
-  shallowArchive: false,
-  volumeQuotaMiB: 2_048,
   network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
   docker: { mode: "auto", startupTimeoutMs: 15_000 },
   secrets: [],
@@ -178,6 +175,16 @@ function camel(key: string): string {
 function snake(key: string): string {
   return key.replace(/MiB/g, "mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
+function removedWorkspaceIssues(value: Record<string, unknown>): string[] {
+  return Object.keys(value)
+    .map(camel)
+    .filter((key) => REMOVED_WORKSPACE_KEYS.has(key))
+    .map((key) => `${snake(key)} ${REMOVED_WORKSPACE_MESSAGE}`);
+}
+function assertNoRemovedWorkspaceKeys(value: Record<string, unknown>): void {
+  const issues = removedWorkspaceIssues(value);
+  if (issues.length) throw new ConfigError(issues);
+}
 function pathKey(parts: string[]): string { return parts.join("."); }
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -229,6 +236,64 @@ function findEquals(text: string): number {
   }
   return -1;
 }
+function decodeBasicTomlKey(text: string): string {
+  let result = "";
+  for (let index = 1; index < text.length - 1; index++) {
+    const character = text[index]!;
+    if (character !== "\\") {
+      result += character;
+      continue;
+    }
+    const escape = text[++index];
+    if (escape === undefined) throw new Error("invalid quoted TOML key");
+    const simple: Record<string, string> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", "\"": "\"", "\\": "\\" };
+    if (Object.hasOwn(simple, escape)) {
+      result += simple[escape];
+      continue;
+    }
+    if (escape !== "u" && escape !== "U") throw new Error("invalid quoted TOML key");
+    const length = escape === "u" ? 4 : 8;
+    const hex = text.slice(index + 1, index + 1 + length);
+    if (!new RegExp(`^[0-9a-fA-F]{${length}}$`).test(hex)) throw new Error("invalid quoted TOML key");
+    const codePoint = Number.parseInt(hex, 16);
+    if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) throw new Error("invalid quoted TOML key");
+    result += String.fromCodePoint(codePoint);
+    index += length;
+  }
+  return result;
+}
+function parseTomlKeySegment(text: string): string {
+  const key = text.trim();
+  if (key.startsWith("\"") && key.endsWith("\"")) return decodeBasicTomlKey(key);
+  if (key.startsWith("'") && key.endsWith("'") && !key.slice(1, -1).includes("'")) return key.slice(1, -1);
+  if (/^[A-Za-z0-9_-]+$/.test(key)) return key;
+  throw new Error("invalid TOML key");
+}
+function parseTomlKey(text: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let quote = "";
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]!;
+    if (quote === "\"") {
+      if (character === "\\") index++;
+      else if (character === quote) quote = "";
+      continue;
+    }
+    if (quote === "'") {
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "\"" || character === "'") quote = character;
+    else if (character === ".") {
+      parts.push(parseTomlKeySegment(text.slice(start, index)));
+      start = index + 1;
+    }
+  }
+  if (quote) throw new Error("invalid TOML key");
+  parts.push(parseTomlKeySegment(text.slice(start)));
+  return parts;
+}
 function parseTomlValue(text: string): unknown {
   const value = text.trim();
   if (value.startsWith("[") && value.endsWith("]")) return splitTopLevel(value.slice(1, -1)).map(parseTomlValue);
@@ -237,9 +302,8 @@ function parseTomlValue(text: string): unknown {
     for (const part of splitTopLevel(value.slice(1, -1))) {
       const at = findEquals(part);
       if (at < 0) throw new Error("invalid inline table");
-      const key = part.slice(0, at).trim();
-      assertSafeConfigKey(key, [key]);
-      object[key] = parseTomlValue(part.slice(at + 1));
+      const keys = parseTomlKey(part.slice(0, at));
+      assign(object, keys, parseTomlValue(part.slice(at + 1)));
     }
     return object;
   }
@@ -270,7 +334,7 @@ function readToml(text: string): Record<string, unknown> {
     const line = stripTomlComment(raw);
     if (!line) continue;
     if (line.startsWith("[[") && line.endsWith("]]")) {
-      const keys = line.slice(2, -2).trim().split(".").map((x) => x.trim());
+      const keys = parseTomlKey(line.slice(2, -2).trim());
       assertSafeConfigPath(keys);
       let parent: Record<string, unknown> = root;
       for (const key of keys.slice(0, -1)) {
@@ -288,14 +352,14 @@ function readToml(text: string): Record<string, unknown> {
       continue;
     }
     if (line.startsWith("[") && line.endsWith("]")) {
-      section = line.slice(1, -1).trim().split(".").map((x) => x.trim());
+      section = parseTomlKey(line.slice(1, -1).trim());
       assertSafeConfigPath(section);
       arraySection = null;
       continue;
     }
     const at = findEquals(line);
     if (at < 0) throw new Error("invalid assignment");
-    const key = line.slice(0, at).trim();
+    const keys = parseTomlKey(line.slice(0, at));
     const value = parseTomlValue(line.slice(at + 1));
     if (arraySection) {
       let parent: Record<string, unknown> = root;
@@ -304,9 +368,8 @@ function readToml(text: string): Record<string, unknown> {
         if (!Array.isArray(list) || !isPlainObject(list[list.length - 1])) throw new Error("invalid array table");
         parent = list[list.length - 1] as Record<string, unknown>;
       }
-      assertSafeConfigKey(key, [...arraySection, key]);
-      parent[key] = value;
-    } else assign(root, [...section, ...key.split(".").map((x) => x.trim())], value);
+      assign(parent, keys, value);
+    } else assign(root, [...section, ...keys], value);
   }
   return root;
 }
@@ -335,7 +398,7 @@ function knownPath(path: string): boolean {
   if (parts[0] === "docker") return parts.length === 1 || (parts.length === 2 && ["mode", "startupTimeoutMs"].includes(parts[1]));
   if (parts[0] === "secrets") return parts.length === 1 || (parts.length === 2 && SECRET_FIELDS.has(parts[1]));
   if (parts[0] === "mounts") return parts.length === 1 || (parts.length === 2 && MOUNT_FIELDS.has(parts[1]));
-  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
+  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
 }
 function collectUnknown(value: unknown, base: string[], warnings: string[]): void {
   if (!isPlainObject(value)) return;
@@ -368,7 +431,9 @@ function withMountDefaults(value: LayerValue): LayerValue {
 }
 function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, source?: string): ParsedConfigLayer {
   assertSafeConfigValue(raw);
-  const value = withMountDefaults(normalizeValue(raw) as LayerValue);
+  const normalized = normalizeValue(raw) as Record<string, unknown>;
+  assertNoRemovedWorkspaceKeys(normalized);
+  const value = withMountDefaults(normalized as LayerValue);
   const warnings: string[] = [];
   collectUnknown(value, [], warnings);
   if (name === "project" && Array.isArray(value.secrets)) {
@@ -383,7 +448,10 @@ function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, sou
 
 export function parseTomlConfig(text: string, source: string): ParsedConfigLayer {
   try { return normalizeLayer(source === "cli" ? "cli" : source === "env" ? "env" : source === "project" ? "project" : "global", readToml(text), source); }
-  catch { throw new ConfigError([`invalid TOML in ${source}`]); }
+  catch (error) {
+    if (error instanceof ConfigError) throw error;
+    throw new ConfigError([`invalid TOML in ${source}`]);
+  }
 }
 
 function envScalar(text: string, key: string): unknown {
@@ -488,6 +556,7 @@ export function mergeConfigLayers(layers: readonly ConfigLayerInput[]): MergeRes
   const warnings: string[] = [];
   for (const layer of layers) {
     assertSafeConfigValue(layer.value);
+    assertNoRemovedWorkspaceKeys(layer.value as Record<string, unknown>);
     warnings.push(...layer.warnings.map(warning));
     const source = withMountDefaults(clone(layer.value) as LayerValue);
     applyRemovals(result, source, layer.name, provenance);
@@ -517,6 +586,7 @@ function validatePort(port: unknown): boolean {
 }
 
 export function validateConfig(raw: DeepPartial<Config>): Config {
+  assertNoRemovedWorkspaceKeys(raw as Record<string, unknown>);
   const config = mergeWithDefaults(raw);
   const issues: string[] = [];
   const n = (value: unknown) => typeof value === "number" && Number.isFinite(value);
@@ -527,18 +597,14 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (!n(config.idleTimeoutSec) || config.idleTimeoutSec < 0) issues.push(issueForPath("idleTimeoutSec", "must be non-negative"));
   if (!n(config.stopTimeoutMs) || config.stopTimeoutMs < 1) issues.push(issueForPath("stopTimeoutMs", "must be positive"));
   if (!n(config.replaceTimeoutMs) || config.replaceTimeoutMs < 1) issues.push(issueForPath("replaceTimeoutMs", "must be positive"));
-  if (!n(config.volumeQuotaMiB) || config.volumeQuotaMiB < 1) issues.push(issueForPath("volumeQuotaMiB", "must be positive"));
-  if (!["auto", "git", "direct", "none"].includes(config.mode)) issues.push(issueForPath("mode", "unknown storage mode"));
   const docker = isPlainObject(config.docker) ? config.docker : null;
   if (!docker || !["auto", "require", "disabled"].includes(docker.mode as string)) issues.push(issueForPath("docker.mode", "must be auto, require, or disabled"));
   if (!docker || !n(docker.startupTimeoutMs) || !Number.isInteger(docker.startupTimeoutMs) || (docker.startupTimeoutMs as number) < 1 || (docker.startupTimeoutMs as number) > 300_000) issues.push(issueForPath("docker.startupTimeoutMs", "must be an integer between 1 and 300000"));
   if (!["auto", true, false].includes(config.bootstrapTools)) issues.push(issueForPath("bootstrapTools", "must be auto, true, or false"));
   if (!["block", "host"].includes(config.fallbackMode)) issues.push(issueForPath("fallbackMode", "must be block or host"));
-  const booleanFields = ["detached", "replace", "shallowArchive", "blockThirdParty", "allowHostExecution", "allowSkillReads", "exposeSessionEnvironment", "autoStart", "pruneOnStart", "showFooter"] as const;
+  const booleanFields = ["detached", "replace", "blockThirdParty", "allowHostExecution", "allowSkillReads", "exposeSessionEnvironment", "autoStart", "pruneOnStart", "showFooter"] as const;
   for (const field of booleanFields) if (typeof config[field] !== "boolean") issues.push(issueForPath(field, "must be boolean"));
   if (config.sandboxName !== null && typeof config.sandboxName !== "string") issues.push(issueForPath("sandboxName", "must be a string or null"));
-  if (typeof config.cloneBranch !== "string" || !config.cloneBranch) issues.push(issueForPath("cloneBranch", "must be a non-empty string"));
-  if (config.cloneDepth !== "unlimited" && (!n(config.cloneDepth) || !Number.isInteger(config.cloneDepth) || config.cloneDepth < 1)) issues.push(issueForPath("cloneDepth", "must be a positive integer or unlimited"));
   const stringArray = (field: string, value: unknown) => {
     if (!Array.isArray(value)) { issues.push(issueForPath(field, "must be an array")); return false; }
     for (const item of value) if (typeof item !== "string" || !item) issues.push(issueForPath(field, "must contain non-empty strings"));
@@ -619,7 +685,10 @@ function configDir(env: NodeJS.ProcessEnv, input: ResolveConfigInput): string {
 }
 function layerFromText(name: ConfigLayerName, text: string, source: string): ParsedConfigLayer {
   try { return normalizeLayer(name, readToml(text), source); }
-  catch { throw new ConfigError([`invalid TOML in ${source}`]); }
+  catch (error) {
+    if (error instanceof ConfigError) throw error;
+    throw new ConfigError([`invalid TOML in ${source}`]);
+  }
 }
 
 export async function resolveConfig(input: ResolveConfigInput): Promise<ResolvedConfig> {
@@ -643,22 +712,34 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     }
   };
   const project = await projectFile(input.cwd, input.repoRoot, input.configDirName, exists);
-  if (project && !input.projectTrusted) warnings.push("project config ignored because this project is not trusted");
-  if (project && input.projectTrusted) {
-    const text = await readFile(project);
-    if (text !== null) {
-      const parsed = layerFromText("project", text, project);
-      const projectValue = withMountDefaults(clone(parsed.value) as LayerValue);
-      if (Array.isArray(projectValue.mounts)) {
-        projectValue.mounts = await Promise.all(projectValue.mounts.map(async (mount: any) => {
-          if (mount && (mount.type === "dir" || mount.type === "file") && typeof mount.hostPath === "string" && isAbsolute(mount.hostPath)) {
-            return { ...mount, hostPath: await canonicalPath(mount.hostPath, true) };
-          }
-          return mount;
-        })) as any;
+  const projectText = project ? await readFile(project) : null;
+  if (project && !input.projectTrusted) {
+    warnings.push("project config ignored because this project is not trusted");
+    if (projectText !== null) {
+      // Ignored project configuration cannot influence policy, but a removed
+      // workspace selector must still stop startup before direct host writes.
+      try {
+        const normalized = normalizeValue(readToml(projectText)) as Record<string, unknown>;
+        assertNoRemovedWorkspaceKeys(normalized);
+      } catch (error) {
+        if (error instanceof ConfigError && error.issues.some((issue) => issue.includes(REMOVED_WORKSPACE_MESSAGE))) throw error;
+        // Preserve the existing trust rule for every other malformed/unsafe key:
+        // untrusted project configuration is not interpreted.
       }
-      layers.push({ ...parsed, value: projectValue });
     }
+  }
+  if (project && input.projectTrusted && projectText !== null) {
+    const parsed = layerFromText("project", projectText, project);
+    const projectValue = withMountDefaults(clone(parsed.value) as LayerValue);
+    if (Array.isArray(projectValue.mounts)) {
+      projectValue.mounts = await Promise.all(projectValue.mounts.map(async (mount: any) => {
+        if (mount && (mount.type === "dir" || mount.type === "file") && typeof mount.hostPath === "string" && isAbsolute(mount.hostPath)) {
+          return { ...mount, hostPath: await canonicalPath(mount.hostPath, true) };
+        }
+        return mount;
+      })) as any;
+    }
+    layers.push({ ...parsed, value: projectValue });
   }
   layers.push(parseEnvConfig(env));
   if (input.cliOverridesToml !== undefined) layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
@@ -767,7 +848,11 @@ function setAt(base: any, parts: string[], value: unknown): any {
 export function applyOverride(base: DeepPartial<Config>, dottedSnakeKey: string, value: unknown): DeepPartial<Config> {
   const rawParts = dottedSnakeKey.split(".").filter(Boolean);
   assertSafeConfigPath(rawParts);
-  return setAt(base, rawParts.map(camel), value) as DeepPartial<Config>;
+  const parts = rawParts.map(camel);
+  if (REMOVED_WORKSPACE_KEYS.has(parts[0] ?? "")) {
+    throw new ConfigError([`${dottedSnakeKey} ${REMOVED_WORKSPACE_MESSAGE}`]);
+  }
+  return setAt(base, parts, value) as DeepPartial<Config>;
 }
 export function removeOverride(base: DeepPartial<Config>, dottedSnakeKey: string): DeepPartial<Config> {
   assertSafeConfigValue(base);
@@ -776,6 +861,9 @@ export function removeOverride(base: DeepPartial<Config>, dottedSnakeKey: string
   assertSafeConfigPath(rawParts);
   const parts = rawParts.map(camel);
   assertSafeConfigPath(parts);
+  if (REMOVED_WORKSPACE_KEYS.has(parts[0] ?? "")) {
+    throw new ConfigError([`${dottedSnakeKey} ${REMOVED_WORKSPACE_MESSAGE}`]);
+  }
   let current = out;
   for (const part of parts.slice(0, -1)) { if (!isPlainObject(current[part])) return out; current = current[part]; }
   delete current[parts[parts.length - 1]];

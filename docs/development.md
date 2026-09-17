@@ -103,9 +103,9 @@ just test-boot-speed
 ```
 
 The tool performs one unmeasured warm-up, then three fresh boots using the
-default prepared image. It forces direct mode, disables guest networking and
-stale-resource pruning, and sets `bootstrap_tools = false` so the result
-measures repeat boot and readiness rather than an image pull or package install.
+default prepared image. It disables guest networking and stale-resource
+pruning, and sets `bootstrap_tools = false` so the result measures repeat boot
+and readiness rather than an image pull or package install.
 The p95 must be at most 2,000 ms. Every sandbox is shut down and removed. If
 lifecycle cleanup fails, the test fails and retains its reported `.tmp` directory
 for recovery instead of claiming success.
@@ -127,9 +127,9 @@ as the live matrix.
 ## Live test matrix
 
 From a source checkout, the live matrix is opt-in because it can pull an image,
-start VMs, create retained resources, and use network and disk capacity. Run it
-only from a trusted checkout on a disposable test host after reviewing the
-script:
+start VMs, write through the host workspace mount, and use network and disk
+capacity. Run it only from a trusted checkout on a disposable test host after
+reviewing the script:
 
 ```sh
 PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh
@@ -149,10 +149,14 @@ The prepared-image scenario boots all six latest variant tags under
 legacy singular `PI_MSB_LIVE_PREPARED_IMAGE` to test one image. The live matrix
 uses `pull_policy = "always"` intentionally so mutable development tags cannot
 remain stale on the self-hosted runner. Review the output to confirm that every scenario reports `PASS`, not `SKIP`.
-Docker release validation must cover daemon readiness, bridge DNS and HTTPS,
-user-defined networking, Buildx, Compose, idle wake, double port publishing,
-and nested-container enforcement for deny and allowlist policies. A skipped
-Docker scenario is not release evidence.
+The workspace scenarios must show that a Git subdirectory mounts the whole
+worktree, a non-Git cwd mounts itself, and routed writes appear immediately on
+the host. They also cover off/on and reload, stale-sandbox pruning, fail-closed
+boot errors, and approved host execution. Docker release validation must cover
+daemon readiness, bridge DNS and HTTPS, user-defined networking, Buildx,
+Compose, idle wake, double port publishing, nested-container access to the
+workspace, and network enforcement for deny and allowlist policies. A skipped
+scenario is not release evidence.
 
 ## Image development
 

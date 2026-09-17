@@ -75,8 +75,6 @@ function basicSandbox(overrides: Record<string, unknown> = {}): any {
       { path: "/tmp/link", kind: "symlink" },
       { path: "/tmp/device", kind: "other" },
     ],
-    copyFromHost: async () => undefined,
-    copyToHost: async () => undefined,
   };
   const sandbox = {
     calls,
@@ -113,8 +111,8 @@ test("maps filesystem calls and preserves binary data", async () => {
     { name: "link", kind: "other" },
     { name: "device", kind: "other" },
   ]);
-  await transport.copyFromHost("/host/a", "/guest/a");
-  await transport.copyToHost("/guest/a", "/host/a");
+  assert.equal("copyFromHost" in transport, false);
+  assert.equal("copyToHost" in transport, false);
 });
 
 test("configures collected execution exactly and returns raw output bytes", async () => {

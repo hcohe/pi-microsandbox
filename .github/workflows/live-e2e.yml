@@ -104,27 +104,20 @@ jobs:
           const safeLog = process.env.SANITIZED_LOG;
           const require = createRequire(join(process.env.GITHUB_WORKSPACE, "package.json"));
           const sdk = await import(pathToFileURL(require.resolve("microsandbox")).href);
-          const { Sandbox, Volume } = sdk;
+          const { Sandbox } = sdk;
           const baselinePath = join(privateDir, "resource-baseline.json");
-          const sessionPattern = /^(?:pi-msb-live-[0-9]+-[0-9a-f]+|parent-[0-9]+|fork-[0-9]+|prune-[0-9]+|bad-[0-9]+|fallback-[0-9]+|deny-[0-9]+|prepared-[0-9]+)$/;
+          const sessionPattern = /^(?:pi-msb-live-[0-9]+-[0-9a-f]+|same-live-session|stale-[0-9]+|pruner-[0-9]+|bad-[0-9]+|fallback-[0-9]+|deny-[0-9]+|prepared-[0-9]+-[0-9a-f]+)$/;
           const probePattern = /^pi-msb-live-probe-[0-9]+-[0-9]+$/;
 
           const resourceId = (session) => createHash("sha256").update(session).digest("hex").slice(0, 20);
           const sandboxName = (session) => `pi-msb-${resourceId(session)}`;
-          const volumeName = (session) => `pi-msb-vol-${resourceId(session)}`;
           const labelsForSandbox = (handle) => handle.config()?.labels ?? {};
-          const managedLabels = (labels) =>
-            labels["pi-msb.managed"] === "true" &&
-            labels["pi-msb.schema"] === "1" &&
-            labels["pi-msb.keep"] === "true" &&
-            sessionPattern.test(labels["pi-msb.session"] ?? "");
           const isOwnedSandbox = (handle) => {
             const labels = labelsForSandbox(handle);
-            return managedLabels(labels) && handle.name === sandboxName(labels["pi-msb.session"]);
-          };
-          const isOwnedVolume = (handle) => {
-            const labels = handle.labels ?? {};
-            return managedLabels(labels) && handle.name === volumeName(labels["pi-msb.session"]);
+            const session = labels["pi-msb.session"] ?? "";
+            return labels["pi-msb.managed"] === "true" &&
+              sessionPattern.test(session) &&
+              handle.name === sandboxName(session);
           };
 
           async function sandboxes() {
@@ -141,10 +134,7 @@ jobs:
           }
 
           async function inventory() {
-            return {
-              sandboxes: (await sandboxes()).map((item) => item.name),
-              volumes: (await Volume.list()).map((item) => item.name),
-            };
+            return { sandboxes: (await sandboxes()).map((item) => item.name) };
           }
 
           if (process.argv[2] === "snapshot") {
@@ -152,11 +142,8 @@ jobs:
           } else if (process.argv[2] === "cleanup") {
             const baseline = JSON.parse(await readFile(baselinePath, "utf8"));
             const oldSandboxes = new Set(baseline.sandboxes);
-            const oldVolumes = new Set(baseline.volumes);
             const newSandboxes = (await sandboxes()).filter((item) => !oldSandboxes.has(item.name));
-            const newVolumes = (await Volume.list()).filter((item) => !oldVolumes.has(item.name));
             let removedSandboxes = 0;
-            let removedVolumes = 0;
             let errors = 0;
 
             for (const item of newSandboxes) {
@@ -170,19 +157,9 @@ jobs:
               } catch { errors++; }
             }
 
-            for (const item of newVolumes) {
-              if (!isOwnedVolume(item)) continue;
-              try {
-                const current = await Volume.get(item.name);
-                if (!isOwnedVolume(current)) throw new Error("identity changed");
-                await Volume.remove(item.name);
-                removedVolumes++;
-              } catch { errors++; }
-            }
-
             await appendFile(
               safeLog,
-              `Resource cleanup: detected ${newSandboxes.length} new sandbox record(s) and ${newVolumes.length} new volume record(s); removed ${removedSandboxes} sandbox(es) and ${removedVolumes} volume(s); ${errors} error(s).\n`,
+              `Resource cleanup: detected ${newSandboxes.length} new sandbox record(s); removed ${removedSandboxes} sandbox(es); ${errors} error(s).\n`,
               { encoding: "utf8" },
             );
             if (errors > 0) process.exitCode = 1;
@@ -201,13 +178,11 @@ jobs:
           find "$tmp_root" -maxdepth 1 \( \
             -name 'pi-msb-e2e-output.*' -o \
             -name 'pi-msb-live-repo-*' -o \
+            -name 'pi-msb-live-nongit-*' -o \
             -name 'pi-msb-live-tools-*' -o \
             -name 'pi-msb-live-skill-*' -o \
             -name 'pi-msb-live-output-*' -o \
-            -name 'pi-msb-live-direct-*' -o \
-            -name 'pi-msb-live-none-*' -o \
             -name 'pi-msb-live-concurrent-*' -o \
-            -name 'pi-msb-live-export-*' -o \
             -name 'pi-msb-live-docker-*' -o \
             -name 'pi-msb-live-docker-policy-*' \
           \) -print > "$LIVE_PRIVATE_DIR/host-temp-baseline"
@@ -244,7 +219,7 @@ jobs:
           fi
           exit "$status"
 
-      - name: Run 18 live scenarios
+      - name: Run 14 live scenarios
         id: live
         continue-on-error: true
         env:
@@ -263,22 +238,18 @@ jobs:
 
           const [rawPath, safePath, exitText] = process.argv.slice(2);
           const scenarios = [
-            "Git bundle excludes untracked files",
-            "Git volume is clean and host-readable",
-            "Shutdown removes sandbox and retains volume",
-            "Reload and off/on reuse the volume",
-            "Forked session gets a new identity",
+            "Git subdirectory mounts the whole host repository",
+            "Non-Git cwd is mounted read/write",
+            "Reload and off/on reconnect safely",
             "Duplicate owner is blocked before mutation",
-            "SIGKILL owner is pruned, volume retained",
+            "Orphaned sandbox is pruned",
             "Idle timeout wakes before execution",
-            "Boot failure blocks and host modes differ",
+            "Boot failure fails closed while explicit host policies differ",
             "Host target requires exact approval",
             "Skill reads enforce canonical containment",
             "Generated output grants one exact path",
-            "Direct and none preserve their documented paths",
             "Bootstrap and deny-network behavior",
             "Concurrent exec, abort, timeout, grep, and find",
-            "Export and managed-volume removal are guarded",
             "Docker bridge, Buildx, Compose, and double port publishing",
             "Nested Docker traffic obeys deny and allowlist policies",
           ];
@@ -346,13 +317,13 @@ jobs:
             "${TMPDIR:-/tmp}" -maxdepth 1 \( \
               -name 'pi-msb-e2e-output.*' -o \
               -name 'pi-msb-live-repo-*' -o \
+              -name 'pi-msb-live-nongit-*' -o \
               -name 'pi-msb-live-tools-*' -o \
               -name 'pi-msb-live-skill-*' -o \
               -name 'pi-msb-live-output-*' -o \
-              -name 'pi-msb-live-direct-*' -o \
-              -name 'pi-msb-live-none-*' -o \
               -name 'pi-msb-live-concurrent-*' -o \
-              -name 'pi-msb-live-export-*' \
+              -name 'pi-msb-live-docker-*' -o \
+              -name 'pi-msb-live-docker-policy-*' \
             \)
 
           printf 'Temporary-path cleanup: removed %s scoped path(s).\n' "$removed_temp" >> "$SANITIZED_LOG"

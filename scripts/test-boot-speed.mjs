@@ -192,7 +192,6 @@ async function main() {
       ...DEFAULT_CONFIG,
       image: options.image,
       pullPolicy: "if-missing",
-      mode: "direct",
       bootstrapTools: false,
       autoStart: true,
       pruneOnStart: false,
@@ -254,7 +253,7 @@ async function main() {
     } else {
       console.log("pi-microsandbox boot speed");
       console.log(`  image: ${options.image}`);
-      console.log(`  policy: prepared image, direct mount, network denied, pruning disabled`);
+      console.log(`  policy: prepared image, direct workspace mount, network denied, pruning disabled`);
       for (const [index, value] of warmupMs.entries()) {
         console.log(`  warm-up ${index + 1}: ${value.toFixed(1)} ms (excluded)`);
       }

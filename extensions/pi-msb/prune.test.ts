@@ -7,16 +7,16 @@ import { pruneStale } from "./prune.ts";
 import type { PrunePort } from "./prune.ts";
 import type { LocksPort, ManagedSandboxRecord, LockHandle } from "./types.ts";
 
-const labels = (sessionId: string, mode: "git" | "direct" | "none" = "direct") => ({
+const labels = (sessionId: string) => ({
   [LABEL_KEYS.managed]: "true",
   [LABEL_KEYS.schema]: String(STATE_SCHEMA_VERSION),
   [LABEL_KEYS.session]: sessionId,
-  [LABEL_KEYS.mode]: mode,
-  [LABEL_KEYS.cwd]: "/tmp/project",
+  [LABEL_KEYS.cwd]: "/tmp/project/packages/app",
+  [LABEL_KEYS.root]: "/canonical/tmp/project",
+  [LABEL_KEYS.guestRoot]: "/tmp/project",
   [LABEL_KEYS.pid]: "1234",
   [LABEL_KEYS.image]: "ubuntu:24.04",
   [LABEL_KEYS.keep]: "true",
-  ...(mode === "git" ? { [LABEL_KEYS.volume]: "pi-msb-vol-test" } : {}),
 });
 
 function sandbox(name: string, sessionId: string, status = "stopped"): ManagedSandboxRecord {
@@ -142,29 +142,33 @@ test("keeps malformed/schema-invalid records out of mutation and never throws li
   assert.match(failed.errors[0], /sdk unavailable/);
 });
 
-test("rejects volume labels on direct and none sandboxes", async () => {
+test("old-schema sandboxes are removed under their session lock without inspecting volume metadata", async () => {
   const events: string[] = [];
-  const direct = {
-    ...sandbox("direct-volume", "direct-owner"),
-    labels: { ...labels("direct-owner", "direct"), [LABEL_KEYS.volume]: "unexpected" },
+  const legacy: ManagedSandboxRecord = {
+    name: "legacy-git-sandbox",
+    status: "running",
+    labels: {
+      [LABEL_KEYS.managed]: "true",
+      [LABEL_KEYS.schema]: "1",
+      [LABEL_KEYS.session]: "legacy-owner",
+      "pi-msb.mode": "git",
+      "pi-msb.volume": "pi-msb-vol-only-copy",
+    },
   };
-  const none = {
-    ...sandbox("none-volume", "none-owner"),
-    labels: { ...labels("none-owner", "none"), [LABEL_KEYS.volume]: "unexpected" },
-  };
-
   const report = await pruneStale({
-    port: portPages([{ sandboxes: [direct, none] }], events),
+    port: portPages([{ sandboxes: [legacy] }], events),
     locks: lockPort(new Set(), events),
     stopTimeoutMs: 100,
   });
-
-  assert.equal(report.inspected, 2);
-  assert.deepEqual(report.removed, []);
-  assert.deepEqual(report.kept, []);
-  assert.match(report.errors[0], /direct-volume/);
-  assert.match(report.errors[1], /none-volume/);
-  assert.deepEqual(events, ["list:first"]);
+  assert.deepEqual(report.removed, [legacy.name]);
+  assert.deepEqual(events, [
+    "list:first",
+    "lock:legacy-owner",
+    `stop:${legacy.name}:100`,
+    `remove:${legacy.name}`,
+    "release:legacy-owner",
+  ]);
+  assert.equal(events.some((event) => /volume/i.test(event)), false);
 });
 
 test("records stop/remove failures, releases orphan locks, and continues", async () => {

@@ -26,12 +26,13 @@ const MANAGED_LABELS: Readonly<Record<string, string>> = Object.freeze({
   [LABEL_KEYS.managed]: "true",
 });
 
-const REQUIRED_LABELS = [
+const CURRENT_REQUIRED_LABELS = [
   LABEL_KEYS.managed,
   LABEL_KEYS.schema,
   LABEL_KEYS.session,
-  LABEL_KEYS.mode,
   LABEL_KEYS.cwd,
+  LABEL_KEYS.root,
+  LABEL_KEYS.guestRoot,
   LABEL_KEYS.pid,
   LABEL_KEYS.image,
   LABEL_KEYS.keep,
@@ -62,17 +63,20 @@ function validateRecord(value: unknown): ManagedSandboxRecord | null {
     labels[key] = label;
   }
 
-  for (const key of REQUIRED_LABELS) {
-    if (typeof labels[key] !== "string" || labels[key].length === 0) return null;
-  }
   if (labels[LABEL_KEYS.managed] !== "true") return null;
-  if (labels[LABEL_KEYS.schema] !== String(STATE_SCHEMA_VERSION)) return null;
-  if (!/^\d+$/.test(labels[LABEL_KEYS.pid])) return null;
-  if (!Number.isSafeInteger(Number(labels[LABEL_KEYS.pid]))) return null;
-  if (labels[LABEL_KEYS.keep] !== "true") return null;
-  if (!["git", "direct", "none"].includes(labels[LABEL_KEYS.mode])) return null;
-  if (labels[LABEL_KEYS.mode] === "git" && !labels[LABEL_KEYS.volume]) return null;
-  if (labels[LABEL_KEYS.mode] !== "git" && labels[LABEL_KEYS.volume] !== undefined) return null;
+  if (!labels[LABEL_KEYS.session] || !/^\d+$/.test(labels[LABEL_KEYS.schema] ?? "")) return null;
+  if (Number(labels[LABEL_KEYS.schema]) > STATE_SCHEMA_VERSION) return null;
+
+  // Old managed schemas are removable after their session owner lock is
+  // acquired. Their storage labels are deliberately ignored: prune has no
+  // volume capability and legacy volumes must remain untouched.
+  if (labels[LABEL_KEYS.schema] === String(STATE_SCHEMA_VERSION)) {
+    for (const key of CURRENT_REQUIRED_LABELS) {
+      if (typeof labels[key] !== "string" || labels[key].length === 0) return null;
+    }
+    if (!/^\d+$/.test(labels[LABEL_KEYS.pid]) || !Number.isSafeInteger(Number(labels[LABEL_KEYS.pid]))) return null;
+    if (labels[LABEL_KEYS.keep] !== "true") return null;
+  }
 
   return {
     name: value.name,

@@ -19,7 +19,7 @@ import {
 const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ name, value, warnings: [] });
 
 test("defaults and precedence are deterministic", async () => {
-  assert.equal(DEFAULT_CONFIG.mode, "direct");
+  assert.equal("mode" in DEFAULT_CONFIG, false);
   assert.equal(
     DEFAULT_CONFIG.image,
     "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c",
@@ -44,8 +44,41 @@ test("defaults and precedence are deterministic", async () => {
   assert.equal(result.config.network.mode, "deny");
   assert.deepEqual(result.config.routeTools, DEFAULT_CONFIG.routeTools);
   assert.equal(result.provenance.memoryMiB, "env");
-  assert.equal(result.config.volumeQuotaMiB, 2048);
+  assert.equal("volumeQuotaMiB" in result.config, false);
   assert.deepEqual(result.config.passThroughTools, ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"]);
+});
+
+test("all removed workspace keys are rejected at TOML, environment, and direct override ingress", () => {
+  const removed = [
+    ["mode", "mode", "PI_MSB_MODE"],
+    ["clone_branch", "cloneBranch", "PI_MSB_CLONE_BRANCH"],
+    ["clone_depth", "cloneDepth", "PI_MSB_CLONE_DEPTH"],
+    ["shallow_archive", "shallowArchive", "PI_MSB_SHALLOW_ARCHIVE"],
+    ["volume_quota_mib", "volumeQuotaMiB", "PI_MSB_VOLUME_QUOTA_MIB"],
+  ] as const;
+  for (const [key, normalizedKey, envKey] of removed) {
+    const escapedKey = `"\\u${key.codePointAt(0)!.toString(16).padStart(4, "0")}${key.slice(1)}"`;
+    for (const source of ["global", "project"] as const) {
+      for (const tomlKey of [key, `"${key}"`, `'${key}'`, escapedKey]) {
+        assert.throws(() => parseTomlConfig(`${tomlKey} = \"legacy\"`, source), /removed.*bind-mounts.*read\/write/);
+      }
+    }
+    assert.throws(() => parseEnvConfig({ [envKey]: "legacy" }), /removed.*bind-mounts.*read\/write/);
+    assert.throws(
+      () => mergeConfigLayers([layer("global", { [normalizedKey]: "legacy" })]),
+      /removed.*bind-mounts.*read\/write/,
+    );
+    assert.throws(() => applyOverride({}, key, "legacy"), /removed.*bind-mounts.*read\/write/);
+    assert.throws(() => removeOverride({}, key), /removed.*bind-mounts.*read\/write/);
+  }
+});
+
+test("effective configuration omits every removed workspace setting", () => {
+  const output = toEffectiveToml({ config: validateConfig({}), provenance: {}, warnings: [] });
+  const parsed = parseTomlConfig(output, "global").value as Record<string, unknown>;
+  for (const key of ["mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB"]) {
+    assert.equal(Object.hasOwn(parsed, key), false);
+  }
 });
 
 test("default configuration is deeply immutable", () => {
@@ -78,6 +111,14 @@ test("untrusted project configuration is skipped", async () => {
   });
   assert.equal(result.config.memoryMiB, DEFAULT_CONFIG.memoryMiB);
   assert.match(result.warnings.join("\n"), /not trusted/);
+});
+
+test("removed workspace settings in untrusted project config still fail closed", async () => {
+  await assert.rejects(resolveConfig({
+    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
+    exists: async (path) => path === "/repo/.pi-msb.toml",
+    readFile: async (path) => path === "/repo/.pi-msb.toml" ? '"\\u006dode" = "git"' : null,
+  }), /mode was removed.*bind-mounts.*read\/write/);
 });
 
 test("identity arrays replace and remove safely", () => {

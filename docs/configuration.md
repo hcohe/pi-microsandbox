@@ -7,14 +7,14 @@ CLI overrides. Global configuration is `$XDG_CONFIG_HOME/pi-msb/config.toml`
 (or `~/.config/pi-msb/config.toml`) plus the optional `PI_MSB_CONFIG_FILE` in
 the same layer. A trusted project may use the nearest `.pi-msb.toml` or
 `<Pi CONFIG_DIR_NAME>/msb.toml`, stopping at the Git root. Untrusted project
-configuration is ignored with a warning.
+configuration is ignored with a warning, except that removed workspace settings
+still stop startup before any direct host write can occur.
 
 TOML uses snake_case; environment variables use `PI_MSB_` with `__` for nesting.
 The following is a small project example:
 
 ```toml
 # .pi-msb.toml
-mode = "git"
 image = "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c"
 pull_policy = "if-missing"
 bootstrap_tools = "auto"
@@ -41,15 +41,22 @@ allow_hosts = ["registry.npmjs.org"]
 
 Important configuration behavior:
 
+- There are no workspace modes or storage selection settings. Inside a Git
+  worktree, the whole worktree root is mounted read/write at the same lexical
+  guest path; elsewhere, the current directory is mounted. Commands retain the
+  original cwd, and writes reach the host immediately. The removed `mode`,
+  `clone_branch`, `clone_depth`, `shallow_archive`, and `volume_quota_mib`
+  settings, including `PI_MSB_MODE`, are startup errors rather than ignored
+  compatibility options.
 - `show_footer = true` uses Pi's single custom-footer slot so the MSB status can
   appear in the upper-right corner. It replaces Pi's built-in footer (or another
   extension's custom footer), preserves the standard location, usage, model,
   and shared status fields, but cannot show Pi-only indicators such as the
   auto-compaction and experimental-feature markers.
-- The default image is the complete Node.js, Python, Rust, and Go `1.0.0`
+- The default image is the complete Node.js, Python, Rust, and Go `1.1.0`
   variant, pinned to its immutable multi-platform digest. Image releases have
-  an independent version stream; the initial package remains `0.1.0`. The
-  default `pull_policy = "if-missing"` pulls only when that exact reference is
+  an independent version stream from package releases. The default
+  `pull_policy = "if-missing"` pulls only when that exact reference is
   absent from the Microsandbox cache. `"always"` and `"never"` are also
   supported.
   See [Images](images.md) for all published variants, exact tag patterns,
@@ -84,8 +91,9 @@ Important configuration behavior:
   `BASH_ENV`, and `LD_PRELOAD` cannot be forwarded with `host_env` or injected
   as secrets.
 - Directory/file mounts have absolute guest paths. Project mounts outside the
-  repository must be read-only unless a global/session policy authorizes the
-  write. Mounts may not overlap or shadow the project mount, reserved `/tmp`,
+  selected workspace root must be read-only unless a global/session policy
+  authorizes the write. Mounts may not overlap or shadow the project mount,
+  reserved `/tmp`,
   protected guest system trees such as `/usr`, `/bin`, `/proc`, and `/sys`, or
   Docker runtime paths such as `/run`, `/var/run`, and `/var/lib/docker`.
   Host mount sources are canonicalized before use; socket targets, including
@@ -97,7 +105,6 @@ Useful environment controls include:
 
 ```sh
 PI_MSB_DISABLE=1                 # explicit host/off mode
-PI_MSB_MODE=none                 # nested scalar example
 PI_MSB_PULL_POLICY=always        # recheck mutable custom image tags on creation
 PI_MSB_NETWORK__MODE=deny        # nested environment key
 PI_MSB_DOCKER__MODE=require      # require a working guest Docker daemon

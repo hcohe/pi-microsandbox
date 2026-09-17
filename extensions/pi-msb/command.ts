@@ -2,12 +2,10 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-  LABEL_KEYS,
-  type MsbControl,
-  type PruneReport,
-  type RuntimeState,
-  type VolumeRecord,
+import type {
+  MsbControl,
+  PruneReport,
+  RuntimeState,
 } from "./types.ts";
 
 /** The small part of Pi's command context used by this module. */
@@ -24,10 +22,7 @@ const HELP = `Usage: /msb <command>
 
 /status                         Show the current runtime
 /on | /off | /reload            Change runtime state
-/prune                          Remove stale sandboxes (never volumes)
-/volumes ls                     List retained volumes
-/volumes rm <name> [--yes]      Remove one unmounted managed volume
-/export <paths...> [--to dir]   Safely export files from the sandbox
+/prune                          Remove stale sandboxes
 /logs [tail-lines]              Show recent sandbox logs
 /config                         Show redacted effective configuration
 /set <key> <value>              Set a session override
@@ -52,19 +47,6 @@ function displayTime(createdAt: number | undefined): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function formatBytes(bytes: number | undefined): string {
-  if (bytes === undefined || !Number.isFinite(bytes)) return "unknown";
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KiB", "MiB", "GiB", "TiB"];
-  let value = bytes;
-  let unit = -1;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
-}
-
 /**
  * Format the short footer/status representation. A display ID is deliberately
  * not used as an identity here; the full sandbox name is the authoritative name.
@@ -74,7 +56,7 @@ export function formatStatus(state: RuntimeState): string | undefined {
     case "active": {
       const info = state.info;
       if (!info) return "MSB active (sandbox details unavailable)";
-      return `MSB active · ${info.mode} · ${info.name}`;
+      return `MSB active · ${info.root} · ${info.name}`;
     }
     case "booting":
       return "MSB booting…";
@@ -99,12 +81,9 @@ export function systemPromptNote(state: RuntimeState): string {
     case "active": {
       const info = state.info;
       if (!info) return "MSB is active, but runtime details are unavailable.";
-      const volume = info.volumeName
-        ? ` Retained volume: ${info.volumeName}${info.volumeHostPath ? ` at ${info.volumeHostPath}` : ""}.`
-        : "";
       const targetWarning =
         " Host-target execution, when enabled, is an explicit escape from the sandbox and should be used deliberately.";
-      return `MSB sandbox is active in ${info.mode} mode (${info.name}).${volume}${targetWarning}`;
+      return `MSB sandbox ${info.name} has the host workspace mounted read/write at ${info.root}.${targetWarning}`;
     }
     case "off":
       return "MSB is explicitly off: tools run on the host. No sandbox is active.";
@@ -194,7 +173,8 @@ function fullState(state: RuntimeState): string {
   }
 
   lines.push(`Name: ${info.name}`);
-  lines.push(`Mode: ${info.mode}`);
+  lines.push(`Workspace root: ${info.root}`);
+  lines.push(`Workdir: ${info.cwd}`);
   lines.push(`Image: ${info.image}`);
   lines.push(`PID: ${info.pid}`);
   lines.push(`Age: ${displayTime(info.createdAt)}`);
@@ -203,28 +183,7 @@ function fullState(state: RuntimeState): string {
   if (info.docker.version) lines.push(`Docker version: ${info.docker.version}`);
   if (info.docker.storageDriver) lines.push(`Docker storage driver: ${info.docker.storageDriver}`);
   if (info.docker.reason) lines.push(`Docker reason: ${info.docker.reason}`);
-  if (info.seedBranch) lines.push(`Branch: ${info.seedBranch}`);
-  if (info.seedSha) lines.push(`Seed SHA: ${info.seedSha}`);
-  if (info.volumeName) lines.push(`Retained volume: ${info.volumeName}`);
-  if (info.volumeHostPath) lines.push(`Volume path: ${info.volumeHostPath}`);
   return lines.join("\n");
-}
-
-function volumeLine(
-  volume: VolumeRecord,
-  details?: {
-    branch?: string;
-    lastCommit?: string;
-    dirtyCount?: number;
-    mounted?: boolean;
-  },
-): string {
-  const labels = volume.labels;
-  const branch = details?.branch ?? labels[LABEL_KEYS.seedBranch] ?? "-";
-  const lastCommit = details?.lastCommit ?? labels[LABEL_KEYS.seedSha] ?? "-";
-  const dirty = details?.dirtyCount === undefined ? "unknown" : String(details.dirtyCount);
-  const mounted = details?.mounted ? " mounted" : "";
-  return `${volume.name}  labels=${JSON.stringify(labels)}  path=${volume.hostPath}  size=${formatBytes(volume.usedBytes)}  age=${displayTime(volume.createdAt)}  branch=${branch}  last=${lastCommit}  dirty=${dirty}${mounted}`;
 }
 
 function redactedError(error: unknown, control: MsbControl): string {
@@ -243,15 +202,6 @@ function notify(ctx: CommandContext, message: string, type: "info" | "warning" |
   ctx.ui.notify(message, type);
 }
 
-async function confirm(
-  ctx: CommandContext,
-  title: string,
-  message: string,
-): Promise<boolean> {
-  if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") return false;
-  return ctx.ui.confirm(title, message);
-}
-
 function parseTail(args: string[]): number | undefined {
   if (!args.length) return undefined;
   if (args.length !== 1 || !/^\d+$/.test(args[0])) {
@@ -262,118 +212,11 @@ function parseTail(args: string[]): number | undefined {
   return tail;
 }
 
-async function listVolumes(control: MsbControl): Promise<string> {
-  const volumes = await control.listVolumes();
-  if (!volumes.length) return "No retained volumes.\nVolumes are never pruned automatically.";
-  const rows = await Promise.all(
-    volumes.map(async (volume) => {
-      try {
-        const described = await control.describeVolume(volume.name);
-        return volumeLine(volume, described);
-      } catch {
-        return volumeLine(volume);
-      }
-    }),
-  );
-  return ["Retained volumes (volumes are never pruned automatically):", ...rows].join("\n");
-}
-
 function pruneSummary(report: PruneReport): string {
   const removed = report.removed.length ? report.removed.join(", ") : "none";
   const kept = report.kept.length ? report.kept.join(", ") : "none";
   const errors = report.errors.length ? report.errors.join("; ") : "none";
-  return `Prune complete\nInspected: ${report.inspected}\nRemoved: ${removed}\nKept: ${kept}\nErrors: ${errors}\nVolumes are never pruned.`;
-}
-
-async function handleVolumeRemove(
-  args: string[],
-  ctx: CommandContext,
-  control: MsbControl,
-): Promise<void> {
-  const yes = args.includes("--yes");
-  const names = args.filter((arg) => arg !== "--yes");
-  if (names.length !== 1 || args.filter((arg) => arg === "--yes").length > 1) {
-    throw new Error("usage: /msb volumes rm <name> [--yes]");
-  }
-  await ctx.waitForIdle();
-  const name = names[0];
-  const described = await control.describeVolume(name);
-  if (described.volume.labels[LABEL_KEYS.managed] !== "true") {
-    throw new Error("refusing to remove an unmanaged volume");
-  }
-  if (described.mounted) throw new Error("refusing to remove a mounted volume");
-
-  const metadata = volumeLine(described.volume, described);
-  if (!yes) {
-    if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") {
-      throw new Error("volume removal requires --yes when no UI is available");
-    }
-    const approved = await confirm(
-      ctx,
-      "Remove retained volume?",
-      `This permanently removes the managed volume.\n${metadata}`,
-    );
-    if (!approved) {
-      notify(ctx, "Volume removal cancelled", "warning");
-      return;
-    }
-  }
-  await control.removeVolume(name);
-  notify(ctx, `Removed volume ${name}.`);
-}
-
-function parseExportArgs(args: string[]): { paths: string[]; destination?: string; yes: boolean } {
-  const paths: string[] = [];
-  let destination: string | undefined;
-  let yes = false;
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index];
-    if (arg === "--yes") {
-      if (yes) throw new Error("duplicate --yes");
-      yes = true;
-    } else if (arg === "--to") {
-      if (destination !== undefined || index + 1 >= args.length) {
-        throw new Error("usage: /msb export <paths...> [--to dir]");
-      }
-      destination = args[++index];
-    } else if (arg.startsWith("--")) {
-      throw new Error(`unknown export option ${arg}`);
-    } else {
-      paths.push(arg);
-    }
-  }
-  if (!paths.length) throw new Error("usage: /msb export <paths...> [--to dir]");
-  return { paths, destination, yes };
-}
-
-async function handleExport(
-  args: string[],
-  ctx: CommandContext,
-  control: MsbControl,
-): Promise<void> {
-  const { paths, destination, yes } = parseExportArgs(args);
-  await ctx.waitForIdle();
-  if (!yes && (!ctx.hasUI || typeof ctx.ui.confirm !== "function")) {
-    throw new Error("export requires --yes when no UI is available");
-  }
-  if (!yes && ctx.hasUI && typeof ctx.ui.confirm === "function") {
-    const where = destination ? ` to ${destination}` : " to the dedicated export directory";
-    const approved = await confirm(
-      ctx,
-      "Export sandbox files?",
-      `Export ${paths.length} path${paths.length === 1 ? "" : "s"}${where}. Existing destinations are never overwritten without confirmation.`,
-    );
-    if (!approved) {
-      notify(ctx, "Export cancelled", "warning");
-      return;
-    }
-  }
-  const results = await control.exportPaths(paths, destination);
-  if (!results.length) {
-    notify(ctx, "No paths were exported.", "warning");
-    return;
-  }
-  notify(ctx, results.map((result) => `${result.source} -> ${result.destination}`).join("\n"));
+  return `Prune complete\nInspected: ${report.inspected}\nRemoved: ${removed}\nKept: ${kept}\nErrors: ${errors}`;
 }
 
 async function handleNetwork(args: string[], control: MsbControl): Promise<string> {
@@ -448,16 +291,9 @@ async function executeCommand(
     case "reload": {
       if (tokens.length) throw new Error(`usage: /msb ${command}`);
       await ctx.waitForIdle();
-      const before = control.getState();
       if (command === "reload") await control.reload();
       else await control.setEnabled(command === "on");
-      const after = control.getState();
-      const reused =
-        before.info?.volumeName &&
-        after.info?.volumeName === before.info.volumeName
-          ? `\nVolume reused: ${after.info.volumeName}`
-          : "";
-      notify(ctx, `${fullState(after)}${reused}`);
+      notify(ctx, fullState(control.getState()));
       return;
     }
     case "prune": {
@@ -466,19 +302,6 @@ async function executeCommand(
       notify(ctx, pruneSummary(await control.pruneNow()));
       return;
     }
-    case "volumes":
-      if (tokens[0] === "ls" && tokens.length === 1) {
-        notify(ctx, await listVolumes(control));
-        return;
-      }
-      if (tokens[0] === "rm") {
-        await handleVolumeRemove(tokens.slice(1), ctx, control);
-        return;
-      }
-      throw new Error("usage: /msb volumes ls | /msb volumes rm <name> [--yes]");
-    case "export":
-      await handleExport(tokens, ctx, control);
-      return;
     case "logs":
       notify(ctx, await control.getLogs(parseTail(tokens)));
       return;
@@ -531,7 +354,7 @@ export function createCommandHandler(control: MsbControl): CommandHandler {
 
 export function registerMsbCommand(pi: ExtensionAPI, control: MsbControl): void {
   pi.registerCommand("msb", {
-    description: "Manage pi-microsandbox and retained volumes",
+    description: "Manage pi-microsandbox",
     handler: createCommandHandler(control),
   });
 }

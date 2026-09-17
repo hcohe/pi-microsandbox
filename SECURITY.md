@@ -26,7 +26,7 @@ public channel.
 A useful report includes the affected pi-microsandbox version or commit, Pi and
 Node.js versions, host operating system and architecture, virtualization setup,
 impact, and minimal reproduction steps. State whether the behavior requires a
-particular storage mode, network policy, fallback setting, or host-execution
+particular workspace layout, network policy, fallback setting, or host-execution
 approval.
 
 ## Keep sensitive data out of reports
@@ -39,13 +39,17 @@ not include:
 - resolved secret values from `$ENV:` or `$FILE:` references;
 - complete sandbox logs, configuration dumps, session files, or command output
   that may contain secrets;
-- retained-volume contents, source code, `.env` files, or other private user
-  data that is not essential to the report.
+- workspace or legacy-volume contents, source code, `.env` files, or other
+  private user data that is not essential to the report.
 
-If a real secret may have been exposed, revoke or rotate it first. Use synthetic
-values in the reproduction and describe omitted material rather than attaching
-it. Remember that GitHub advisory participants can read uploaded artifacts, so
-a private report is not a reason to include unnecessary secrets.
+If a real secret may have been exposed, revoke or rotate it first. The selected
+workspace is mounted read/write: inside Git it includes the entire worktree,
+including `.git`, secrets, untracked files, and sibling directories; outside
+Git it is the current directory. Writes reach the host immediately, concurrent
+sessions share the checkout, and nested containers can access the mount. Use
+synthetic values in the reproduction and describe omitted material rather than
+attaching it. Remember that GitHub advisory participants can read uploaded
+artifacts, so a private report is not a reason to include unnecessary secrets.
 
 ## What happens next
 

@@ -34,11 +34,6 @@ function config(overrides: Partial<Config> = {}): Config {
     replace: false,
     replaceTimeoutMs: 10_000,
     sandboxName: null,
-    mode: "auto",
-    cloneBranch: "current",
-    cloneDepth: "unlimited",
-    shallowArchive: false,
-    volumeQuotaMiB: 1024,
     network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
     docker: { mode: "auto", startupTimeoutMs: 15_000 },
     secrets: [],
@@ -67,10 +62,10 @@ function state(status: RuntimeState["status"] = "active"): RuntimeState {
       ? {
           name: "pi-msb-full-id",
           displayId: "full-i",
-          mode: "git",
           image: "ubuntu:24.04",
           pid: 42,
           cwd: process.cwd(),
+          root: process.cwd(),
           createdAt: Date.now(),
           docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" },
         }
@@ -192,16 +187,16 @@ test("adds an optional Google-compatible target while preserving required fields
   assert.deepEqual(withoutExecutionTarget({ path: "x", execution_target: "host" as const }), { path: "x" });
 });
 
-test("approval messages omit routing and warn about retained git volume", () => {
+test("approval messages omit routing and use a generic host-isolation warning", () => {
   const message = hostApprovalMessage("bash", {
     z: 1,
     execution_target: "host",
     command: "git status",
-  }, "/work/repo", "git");
+  }, "/work/repo");
   assert.match(message, /Tool: bash/);
   assert.match(message, /Working directory: \/work\/repo/);
-  assert.match(message, /bypass.*retained git volume/i);
-  assert.doesNotMatch(message, /execution_target/);
+  assert.match(message, /bypasses VM, process, and network isolation/i);
+  assert.doesNotMatch(message, /execution_target|mode|volume/i);
   assert.ok(message.indexOf('"command"') < message.indexOf('"z"'));
 });
 
@@ -261,6 +256,11 @@ test("blocks routed tools when unavailable and supports configured host fallback
   const [gate] = await blocked.emit("tool_call", { toolName: "read", toolCallId: "blocked", input });
   assert.equal(gate.block, true);
   await assert.rejects(blocked.tools.get("read").execute("blocked", input, undefined, undefined, blocked.ctx), /unavailable/);
+
+  const disabled = createHarness({ runtimeState: state("disabled"), config: { fallbackMode: "host" } });
+  const [disabledGate] = await disabled.emit("tool_call", { toolName: "read", toolCallId: "disabled", input });
+  assert.equal(disabledGate.block, true);
+  await assert.rejects(disabled.tools.get("read").execute("disabled", input, undefined, undefined, disabled.ctx), /unavailable/);
 
   const fallback = createHarness({ runtimeState: state("host-fallback"), config: { fallbackMode: "host" } });
   const result = await fallback.tools.get("read").execute("fallback", input, undefined, undefined, fallback.ctx);

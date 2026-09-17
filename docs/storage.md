@@ -1,19 +1,31 @@
-# Storage modes and retained work
+# Workspace storage
 
 [Back to README](../README.md)
 
-## Storage modes
+## One read/write workspace
 
-| Mode | Guest view | Host effect of routed writes |
-| --- | --- | --- |
-| `git` | A named volume at the repository root, with the same absolute path | Volume only |
-| `direct` | The current directory bind-mounted at the same absolute path | Host directory |
-| `none` | An empty tmpfs at the same absolute path | No host files; changes disappear with the sandbox |
-| `auto` | Same as `direct` | Host directory |
+There are no workspace modes. pi-microsandbox selects one workspace root when
+it starts:
 
-`direct` is intentionally a warning-level escape from the Git isolation model:
-routed edits modify the live host directory. `none` is useful for testing path
-behavior and starts empty; it is not a retained workspace.
+- If the current working directory is inside a Git worktree, it mounts the
+  entire worktree root.
+- Otherwise, it mounts the current working directory itself.
+
+The selected root is bind-mounted read/write at the same lexical path inside
+the guest. Commands still start in the original current working directory.
+Writes are immediately visible in the host directory; there is no export or
+synchronization step.
+
+Starting Pi below a Git worktree root does not narrow the boundary. The sandbox
+can see the whole worktree, including `.git`, untracked files, sibling
+directories, and files such as `.env`. Separate Pi sessions that use the same
+checkout also use the same files, so their edits can conflict. Use separate
+host worktrees or checkouts when tasks need independent workspaces.
+
+The extension creates one project bind mount. Linked-worktree or submodule Git
+metadata stored outside the selected worktree root is not mounted separately.
+An unsupported path or symlink layout fails startup instead of silently
+mounting a narrower directory.
 
 ## Inner Docker state
 
@@ -21,51 +33,38 @@ Docker stores images, layers, containers, and build cache under
 `/var/lib/docker` on the sandbox root filesystem. It uses the `vfs` storage
 driver because nested overlay filesystems and project-backed mounts cannot be
 assumed to support `overlay2`. This state disappears when the sandbox is
-removed. It is not written to the project mount or retained Git volume, and
-separate sessions do not share an inner Docker cache.
+removed and is not written to the project mount. Separate sessions do not share
+an inner Docker cache.
 
-A stopped sandbox may retain that state until it is restarted or removed, but a
-retained Git workspace does not preserve it. Do not move Docker's data root
-onto the Git volume. A persistent Docker cache would need a separate managed
-volume and cleanup policy.
+Containers started inside the microVM can reach the mounted workspace. Treat
+Dockerfiles and Compose files as code with access to the entire selected root.
 
-## Git and retained volumes
+## Upgrading from named Git volumes
 
-Git mode never bind-mounts the host checkout. On boot, pi-microsandbox captures the
-committed `HEAD` (and selected branch) into a temporary verified Git bundle,
-copies it into the guest, and seeds a named volume mounted at the repository's
-absolute root. Untracked files, including `.env`, and working-tree edits are
-not in that bundle. The temporary host and guest bundle files are removed after
-seeding, including failure paths.
+Older releases could keep Git workspaces in named `pi-msb-vol-*` volumes. The
+new workspace behavior does not reconnect, migrate, or delete those volumes.
+They may contain the only copy of unexported work.
 
-Edits and commits made in Git mode land in the retained volume. The host
-checkout is not changed by ordinary routed tools. A normal Pi session shutdown
-removes the sandbox but keeps the managed volume; the next boot reuses it only
-when the complete session/schema/mode/cwd identity matches. A copied or forked
-session state is rejected by the full session ID and gets a different resource
-identity.
-
-The SDK's `VolumeHandle` returned by `Volume.get()` does not expose a host
-path. pi-microsandbox therefore refuses to fabricate one: a newly created volume
-may show its path, while a later retained-volume lookup may not support
-`/msb volumes ls` or volume enrichment. The volume remains mountable by name
-and is never automatically deleted. Use the path recorded at creation time or
-the microsandbox volume tooling when host-side inspection is required.
-
-To manually synchronize a retained checkout, use a host-side fetch deliberately
-(the command is not performed automatically by pi-microsandbox):
+Before upgrading, while the old `/msb volumes` and `/msb export` commands are
+still available, inventory every retained volume and export or copy any work
+you need. After upgrading, use Microsandbox itself:
 
 ```sh
-REPO=/absolute/path/to/checkout
-VOLUME_PATH=/path/returned-for-the-managed-volume
-BRANCH=$(git -C "$REPO" branch --show-current)
-
-git -C "$VOLUME_PATH" remote remove host 2>/dev/null || true
-git -C "$VOLUME_PATH" remote add host "$REPO"
-git -C "$VOLUME_PATH" fetch --no-tags host "$BRANCH"
-# Review before changing the retained checkout:
-git -C "$VOLUME_PATH" log --oneline --decorate --all -10
+msb volume ls
+mkdir -p ./legacy-workspace-recovery
+msb run --name pi-msb-recovery \
+  --mount-named pi-msb-vol-REPLACE_ME:/legacy:ro \
+  --mount-dir "$PWD/legacy-workspace-recovery:/recovery:rw" \
+  alpine -- sh -c 'cp -a /legacy/. /recovery/'
+msb rm pi-msb-recovery
 ```
 
-The host repository is an input to this explicit sync operation. Do not add a
-host checkout bind mount to Git mode.
+Verify the copied files, then remove the old volume with:
+
+```sh
+msb volume rm pi-msb-vol-REPLACE_ME
+```
+
+Copy the exact name from `msb volume ls`: a mistyped named mount can create a
+new empty volume. Choose an already-cached recovery image if `alpine` is
+unavailable. pi-microsandbox no longer lists, removes, or exports volumes.

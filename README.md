@@ -2,17 +2,14 @@
 
 **Let your agents work. Stop babysitting every command.**
 
-Give an agent a task and get on with your day. Give a few agents different tasks
-and let them work in parallel. Come back to review the results.
-
-pi-microsandbox uses [Microsandbox](https://microsandbox.dev/) to run
+Give an agent a task and get on with your day. pi-microsandbox uses
+[Microsandbox](https://microsandbox.dev/) to run
 [Pi](https://github.com/earendil-works/pi)'s file and shell tools in lightweight
 microVMs. Microsandbox is an open-source, local-first runtime for isolating
 untrusted workloads, with a separate Linux kernel for each sandbox.
 
-In Git mode, each separate Pi session gets its own workspace instead of editing
-your host checkout. Each project can define its own environment and safety
-boundaries. Set them up once, then let the agents get to work.
+Each project can define its own environment and safety boundaries. Set them up
+once, then let the agent get to work.
 
 [Get started](#get-started) · [Documentation](#documentation) · [Releases](https://github.com/hcohe/pi-microsandbox/releases)
 
@@ -26,32 +23,50 @@ pi -e npm:pi-microsandbox
 
 ## Less supervision. More work getting done.
 
-- Run multiple agents in separate Pi sessions. Git mode keeps their workspaces apart, so ordinary sandboxed edits don't collide in your host checkout.
-- Let routine file and shell work happen inside the sandbox. Host execution stays an explicit escape, with approval required while the sandbox is active.
-- Step away without throwing away the work. Git-mode files survive sandbox shutdown, ready when you resume the matching session.
-- If the sandbox can't start, routed tools stop by default. They don't quietly run on your host instead.
+- Let routine file and shell work happen inside the sandbox. Host execution
+  stays an explicit escape, with approval required while the sandbox is active.
+- Work at the same path inside and outside the VM. Sandboxed writes appear in
+  the host checkout immediately, with no export step.
+- If the sandbox cannot start, routed tools stop by default. They do not quietly
+  run on your host instead.
 
-You still review what the agents produce. The point is to spend your attention
-on the results, rather than supervise every step along the way.
+You still review what the agent produces. The point is to spend your attention
+on the results rather than supervise every step along the way.
+
+## One workspace behavior
+
+There are no workspace modes. If Pi starts inside a Git worktree,
+pi-microsandbox mounts the whole worktree root read/write at the same lexical
+path in the guest. If Pi starts outside Git, it mounts the current working
+directory itself. Commands start in the original current working directory.
+
+This is a VM boundary, not checkout isolation. The selected root is fully
+visible, including `.git`, secrets such as `.env`, untracked files, and sibling
+directories. Writes change the host immediately. Multiple sessions using the
+same checkout share those files and can conflict; use separate host worktrees
+or checkouts when you need independent changes. Containers started inside the
+microVM can also reach the mounted workspace.
+
+[Understand workspace storage and legacy-volume recovery →](docs/storage.md)
 
 ## Every project gets its own boundaries
 
-Your frontend app and your internal service don't need the same sandbox.
+Your frontend app and your internal service do not need the same sandbox.
 Choose a [published variant or custom image](docs/images.md) with the tools a
 project needs, allow only the network hosts it should reach, and configure its
-file mounts and secrets. Another project can have a completely different setup,
+extra file mounts and secrets. Another project can have a different setup,
 including no network access.
 
-Keep your everyday defaults in global config and project-specific settings in
+Keep everyday defaults in global config and project-specific settings in
 `.pi-msb.toml`. Trusted project config layers over those defaults; environment
-variables and session overrides let you adjust a particular run without
-rewriting the project's setup.
+variables and session overrides let you adjust a run without rewriting the
+project setup.
 
 The agent gets an environment built for the job. Image cohorts built from this
 version include Docker Engine 29.8.0, Buildx 0.37.1, and Compose 5.5.1. The
-daemon and its containers run inside the microVM; pi-microsandbox never connects them to the
-host Docker socket. You don't have to make the same decisions every time you
-start it.
+daemon and its containers run inside the microVM; pi-microsandbox never connects
+them to the host Docker socket. Nested containers can still access the mounted
+workspace and remain subject to the outer network policy.
 
 [Configure your project's sandbox →](docs/configuration.md)
 
@@ -81,46 +96,36 @@ binary with `MSB_PATH`. See the official
 installation and runtime troubleshooting. The documentation in this repository
 covers the Pi integration.
 
-From a Git repository, start Pi with its own isolated workspace:
+Start Pi from the directory where you want to work:
 
 ```sh
-PI_MSB_MODE=git pi
+cd /path/to/project
+pi
 ```
 
-Git mode starts from committed `HEAD`. Commit any changes you want the agent to
-see first; untracked files such as `.env` and uncommitted edits stay out of the
-initial copy. An existing retained workspace is reused for a matching session.
-
-Once you're in Pi:
+Once you're in Pi, inspect the selected workspace root:
 
 ```text
 /msb status
 ```
 
-Give Pi a task. To work on another task in parallel, start a separate Pi session
-with the same command in another terminal. Each session gets its own Git-mode
-workspace.
+> **Host execution is separate.** `/msb off` explicitly hands tools to the
+> host. `fallback_mode = "host"` opts into automatic host execution after a
+> sandbox failure. Neither control changes the workspace mount, and neither is
+> sandboxed. The default fallback blocks tools when startup fails.
 
-When you're ready to review an agent's work, export a file to a new destination:
-
-```text
-/msb export src/example.ts --to ../sandbox-review
-```
-
-Exports ask for confirmation and won't overwrite existing destinations.
-See [storage and retained work](docs/storage.md) for the details.
-
-> **Choose your boundary.** The default storage mode is `direct`, which writes
-> to your host directory. The command above explicitly selects `git` isolation.
-> `/msb off` turns sandboxing off; `fallback_mode = "host"` opts into automatic
-> host execution after a failure. Neither is sandboxed.
+Upgrading from a release that used named Git volumes requires a manual recovery
+check. Before upgrading, use the old `/msb volumes` and `/msb export` commands
+to inventory and copy retained work. After upgrading, use Microsandbox's own
+tooling to recover or remove legacy volumes; they are never deleted
+automatically. See [workspace storage](docs/storage.md).
 
 ## Documentation
 
 | When you want to… | Read |
 | --- | --- |
 | Install or check host support | [Getting started](docs/getting-started.md) |
-| Choose a workspace mode or recover retained work | [Storage](docs/storage.md) |
+| Understand the workspace mount or recover legacy volumes | [Storage](docs/storage.md) |
 | Choose an image variant or build a custom image | [Images](docs/images.md) |
 | Set up networking, secrets, mounts, or other options | [Configuration](docs/configuration.md) |
 | Look up an `/msb` command | [Command reference](docs/commands.md) |

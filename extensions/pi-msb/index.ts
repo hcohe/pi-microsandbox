@@ -117,8 +117,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     currentContext = ctx;
     updateStatus(ctx, { status: "booting", info: null });
     try {
-      // configureSession performs Git discovery before project config resolution,
-      // so trust and the nearest project file are evaluated against the real root.
+      // configureSession discovers the workspace once before project config
+      // resolution, and passes that same identity through sandbox boot.
       const state = await integration.configureSession({
         sessionId: ctx.sessionManager.getSessionId(),
         cwd: ctx.cwd,
