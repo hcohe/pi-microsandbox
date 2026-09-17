@@ -64,7 +64,19 @@ blocks routed tools rather than silently running them on the host. Keep that
 default for a fail-closed setup. `fallback_mode = "host"` is an explicit,
 visibly labelled opt-in to automatic unsandboxed execution.
 
-The public package is named `pi-microsandbox`. Existing technical interfaces
-retain the shorter `msb` name for compatibility, including `/msb`,
-`PI_MSB_*`, `.pi-msb.toml`, configuration directories, and managed-resource
-labels. Existing configuration and retained resources therefore keep working.
+The public package is named `pi-microsandbox`. Current technical interfaces
+retain the shorter `msb` name, including `/msb`, `PI_MSB_*`, `.pi-msb.toml`,
+configuration directories, and managed-resource labels.
+
+There are no workspace modes. Starting inside Git mounts the entire worktree
+root read/write; starting elsewhere mounts the cwd. The mount uses the same
+lexical guest path, commands retain their original cwd, and writes reach the
+host immediately. This exposes `.git`, secrets, untracked files, and sibling
+directories. Concurrent sessions share a checkout, and nested containers can
+reach the mount.
+
+Before upgrading from a release with named Git workspaces, use its `/msb
+volumes` and `/msb export` commands to inventory and copy retained work. The new
+release neither reconnects nor deletes legacy volumes. Recover or remove them
+manually with Microsandbox tooling after confirming their contents. Removed
+settings such as `mode` and `PI_MSB_MODE` are errors, not compatibility aliases.

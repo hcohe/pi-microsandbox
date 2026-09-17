@@ -4,33 +4,16 @@ import {
   STATE_SCHEMA_VERSION,
   type BootRequest,
   type Config,
-  type GitRepoInfo,
   type LockHandle,
   type PersistedSandboxState,
-  type PreparedStorage,
   type PruneReport,
   type RuntimeExecution,
   type RuntimePreparation,
   type RuntimeState,
   type SandboxManager,
   type SandboxTransport,
-  type SeedResult,
-  type StorageMode,
-  type StoragePlan,
   type ToolOperations,
 } from "./types.ts";
-
-/**
- * Inputs to the storage planner. Kept local because the shared contract only
- * describes the values crossing the manager boundary.
- */
-export interface StoragePlanInput {
-  cwd: string;
-  sessionId: string;
-  config: Config;
-  git: GitRepoInfo;
-  restored?: PersistedSandboxState | null;
-}
 
 /** The SDK adapter deliberately owns the concrete shape of an inspected handle. */
 export interface InspectedSandbox {
@@ -43,21 +26,14 @@ export interface InspectedSandbox {
 export interface SandboxManagerDeps {
   acquireOwnerLock(request: BootRequest): Promise<LockHandle | null>;
   pruneOthers(currentSessionId: string): Promise<PruneReport>;
-  detectGit(cwd: string): Promise<GitRepoInfo>;
-  buildStoragePlan(input: StoragePlanInput): StoragePlan;
-  prepareStorage(
-    plan: StoragePlan,
-    restored: PersistedSandboxState | null,
-  ): Promise<PreparedStorage>;
   inspectSandbox(name: string): Promise<InspectedSandbox | null>;
   connectSandbox(value: InspectedSandbox): Promise<unknown>;
   startSandbox(value: InspectedSandbox): Promise<unknown>;
-  createSandbox(request: BootRequest, prepared: PreparedStorage): Promise<unknown>;
+  createSandbox(request: BootRequest): Promise<unknown>;
   stopAndRemove(name: string, timeoutMs: number): Promise<void>;
   createTransport(raw: unknown): SandboxTransport;
   createOperations(transport: SandboxTransport): ToolOperations;
   prepareRuntime(runtime: RuntimeExecution, config: Config): Promise<RuntimePreparation>;
-  seed(runtime: RuntimeExecution, prepared: PreparedStorage): Promise<SeedResult>;
   persist(state: PersistedSandboxState): void;
   now?: () => number;
 }
@@ -71,18 +47,6 @@ const STOPPED_STATUSES = new Set([
   "dead",
   "created",
 ]);
-
-function modeForPlan(plan: StoragePlan): StorageMode {
-  return plan.kind === "git-volume"
-    ? "git"
-    : plan.kind === "direct-mount"
-      ? "direct"
-      : "none";
-}
-
-function volumeNameForPlan(plan: StoragePlan): string | undefined {
-  return plan.kind === "git-volume" ? plan.volumeName : undefined;
-}
 
 function statusOf(value: InspectedSandbox): string | undefined {
   if (typeof value.status === "string") return value.status.toLowerCase();
@@ -112,29 +76,25 @@ function isManagedOwner(value: InspectedSandbox, request: BootRequest): boolean 
   );
 }
 
-function matchesPlan(value: InspectedSandbox, request: BootRequest, plan: StoragePlan): boolean {
+function isLegacyManagedOwner(value: InspectedSandbox, request: BootRequest): boolean {
   const labels = labelsOf(value);
-  const expectedMode = modeForPlan(plan);
-  const expectedVolume = volumeNameForPlan(plan);
+  return labels["pi-msb.managed"] === "true" &&
+    labels["pi-msb.session"] === request.sessionId &&
+    /^\d+$/.test(labels["pi-msb.schema"] ?? "") &&
+    Number(labels["pi-msb.schema"]) < STATE_SCHEMA_VERSION;
+}
 
-  if (request.config.mode !== "auto" && request.config.mode !== expectedMode) return false;
-  if (!isManagedOwner(value, request)) return false;
-  if (labels["pi-msb.mode"] !== expectedMode) return false;
-  if (labels["pi-msb.cwd"] !== request.cwd) return false;
-  if (labels["pi-msb.image"] !== request.config.image) return false;
-
-  const actualVolume = labels["pi-msb.volume"];
-  return expectedVolume === undefined
-    ? actualVolume === undefined
-    : actualVolume === expectedVolume;
+function matchesWorkspace(value: InspectedSandbox, request: BootRequest): boolean {
+  const labels = labelsOf(value);
+  return isManagedOwner(value, request) &&
+    labels["pi-msb.cwd"] === request.cwd &&
+    labels["pi-msb.root"] === request.workspace.hostRoot &&
+    labels["pi-msb.guest-root"] === request.workspace.guestRoot &&
+    labels["pi-msb.image"] === request.config.image;
 }
 
 function infoFor(
   request: BootRequest,
-  plan: StoragePlan,
-  prepared: PreparedStorage,
-  seedBranch: string | null | undefined,
-  seedSha: string | null | undefined,
   createdAt: number,
   name: string,
   preparation: RuntimePreparation,
@@ -142,14 +102,10 @@ function infoFor(
   return {
     name,
     displayId: displayId(request.sessionId),
-    mode: modeForPlan(plan),
     image: request.config.image,
     pid: process.pid,
     cwd: request.cwd,
-    volumeName: volumeNameForPlan(plan),
-    volumeHostPath: plan.kind === "git-volume" ? prepared.volume?.hostPath : undefined,
-    seedBranch: seedBranch ?? null,
-    seedSha: seedSha ?? null,
+    root: request.workspace.guestRoot,
     createdAt,
     docker: { ...preparation.docker },
   };
@@ -172,6 +128,8 @@ function sameBootRequest(a: BootRequest, b: BootRequest): boolean {
   return (
     a.sessionId === b.sessionId &&
     a.cwd === b.cwd &&
+    a.workspace.hostRoot === b.workspace.hostRoot &&
+    a.workspace.guestRoot === b.workspace.guestRoot &&
     JSON.stringify(a.config) === JSON.stringify(b.config)
   );
 }
@@ -183,7 +141,9 @@ function sameSessionRestore(
   if (!restored) return null;
   if (restored.version !== STATE_SCHEMA_VERSION) return null;
   if (restored.sessionId !== request.sessionId) return null;
-  if (restored.cwd !== request.cwd) return null;
+  if (restored.cwd !== request.cwd ||
+      restored.root !== request.workspace.hostRoot ||
+      restored.guestRoot !== request.workspace.guestRoot) return null;
   return restored;
 }
 
@@ -199,7 +159,6 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   let sandboxName: string | null = null;
   let lastRequest: BootRequest | null = null;
   let retainedState: PersistedSandboxState | null = null;
-  let activePlan: StoragePlan | null = null;
   // activeUses includes reservations made before preflight. pendingUses marks
   // those reservations; only activeUses - pendingUses are callbacks currently
   // using a transport and therefore must drain before replacement/disposal.
@@ -353,7 +312,6 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
     lock = owner;
 
-    let prepared: PreparedStorage | null = null;
     let partialSandbox = false;
     let currentRequestInfo: RuntimeState["info"] = null;
     let bootedRuntime: RuntimeExecution | null = null;
@@ -362,17 +320,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       if (request.config.pruneOnStart) {
         await deps.pruneOthers(request.sessionId);
       }
-      const git = await deps.detectGit(request.cwd);
       const restored = sameSessionRestore(request);
-      const plan = deps.buildStoragePlan({
-        cwd: request.cwd,
-        sessionId: request.sessionId,
-        config: request.config,
-        git,
-        restored,
-      });
-      prepared = await deps.prepareStorage(plan, restored);
-
       const name = requestSandboxName(request);
       sandboxName = name;
       const inspected = await deps.inspectSandbox(name);
@@ -380,17 +328,23 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
       if (!inspected) {
         partialSandbox = true;
-        raw = await deps.createSandbox(request, prepared);
+        raw = await deps.createSandbox(request);
+      } else if (isLegacyManagedOwner(inspected, request)) {
+        // The current session owner lock guards removal. Legacy named volumes
+        // are intentionally neither inspected nor removed.
+        await deps.stopAndRemove(name, request.config.stopTimeoutMs);
+        partialSandbox = true;
+        raw = await deps.createSandbox(request);
       } else if (!isManagedOwner(inspected, request)) {
         throw new Error(`sandbox name conflict: ${name}`);
-      } else if (!matchesPlan(inspected, request, plan)) {
+      } else if (!matchesWorkspace(inspected, request)) {
         // The labels prove this is ours, but its configuration is stale. Only
         // that proven ownership permits a replacement.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
         // The old instance was removed; a failed replacement still needs its
         // own best-effort cleanup.
         partialSandbox = true;
-        raw = await deps.createSandbox(request, prepared);
+        raw = await deps.createSandbox(request);
       } else if (isRunning(inspected)) {
         raw = await deps.connectSandbox(inspected);
         partialSandbox = true;
@@ -410,72 +364,25 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       runtimeInvalid = false;
       const preparation = await deps.prepareRuntime(bootedRuntime, request.config);
 
-      let seed: SeedResult | null = null;
-      if (
-        prepared.plan.kind === "git-volume" &&
-        prepared.createdVolume &&
-        prepared.plan.seedRequired
-      ) {
-        seed = await deps.seed(bootedRuntime, prepared);
-      }
-
       const createdAt = deps.now ? deps.now() : Date.now();
-      const previous = restored;
-      const seedBranch = prepared.createdVolume
-        ? prepared.plan.kind === "git-volume"
-          ? prepared.plan.branch
-          : null
-        : previous?.seedBranch ??
-          (prepared.plan.kind === "git-volume" ? prepared.plan.branch : null);
-      const seedSha = prepared.createdVolume
-        ? seed?.headSha ??
-          (prepared.plan.kind === "git-volume" ? prepared.plan.headSha : null)
-        : previous?.seedSha ??
-          (prepared.plan.kind === "git-volume" ? prepared.plan.headSha : null);
-      currentRequestInfo = infoFor(
-        request,
-        prepared.plan,
-        prepared,
-        seedBranch,
-        seedSha,
-        createdAt,
-        name,
-        preparation,
-      );
-
-      // Bundle cleanup is deliberately before state publication: a successful
-      // boot never publishes a state whose temporary host artifact leaked.
-      if (prepared.bundle) await prepared.bundle.cleanup();
-      prepared.bundle = null;
+      currentRequestInfo = infoFor(request, createdAt, name, preparation);
 
       const persisted: PersistedSandboxState = {
         version: STATE_SCHEMA_VERSION,
         sessionId: request.sessionId,
         sandboxName: name,
-        mode: currentRequestInfo.mode,
         cwd: request.cwd,
+        root: request.workspace.hostRoot,
+        guestRoot: request.workspace.guestRoot,
         image: request.config.image,
-        volumeName: currentRequestInfo.volumeName,
-        volumeHostPath: currentRequestInfo.volumeHostPath,
-        seedBranch: currentRequestInfo.seedBranch,
-        seedSha: currentRequestInfo.seedSha,
         enabled: true,
         createdAt,
       };
       deps.persist(persisted);
       retainedState = persisted;
-      activePlan = prepared.plan;
       state = { status: "active", info: currentRequestInfo };
       return state;
     } catch (error) {
-      if (prepared?.bundle) {
-        try {
-          await prepared.bundle.cleanup();
-        } catch {
-          // The primary boot error is more useful, and no secret is exposed.
-        }
-        prepared.bundle = null;
-      }
       await disposeRuntime();
       if (partialSandbox && sandboxName) {
         try {
@@ -486,7 +393,6 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       }
       runtime = null;
       bootedRuntime = null;
-      activePlan = null;
       sandboxName = null;
       if (lock === owner) {
         lock = null;
@@ -502,7 +408,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   }
 
   async function wakeIfNeeded(): Promise<RuntimeExecution> {
-    if (state.status !== "active" || !runtime || !lastRequest || !sandboxName || !activePlan) {
+    if (state.status !== "active" || !runtime || !lastRequest || !sandboxName) {
       throw unavailableError(state);
     }
 
@@ -517,9 +423,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       throw new Error(`sandbox ${sandboxName} has conflicting labels`);
     }
     // Revalidate the complete managed runtime identity before waking or
-    // reconnecting. A same-name resource with changed mode/cwd/image/volume is
-    // not safe to attach to.
-    if (!matchesPlan(inspected, lastRequest, activePlan)) {
+    // reconnecting. A same-name resource with changed cwd/root/image is not
+    // safe to attach to.
+    if (!matchesWorkspace(inspected, lastRequest)) {
       throw new Error(`sandbox ${sandboxName} configuration changed`);
     }
 
@@ -564,7 +470,6 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       }
       const failedName = sandboxName;
       sandboxName = null;
-      activePlan = null;
       if (failedName) {
         try {
           await deps.stopAndRemove(failedName, lastRequest.config.stopTimeoutMs);
@@ -611,7 +516,6 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
 
     runtime = null;
-    activePlan = null;
     sandboxName = null;
 
     if (persistDisabled && request && oldInfo) {
@@ -620,13 +524,10 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         version: STATE_SCHEMA_VERSION,
         sessionId: request.sessionId,
         sandboxName: oldInfo.name,
-        mode: oldInfo.mode,
         cwd: oldInfo.cwd,
+        root: request.workspace.hostRoot,
+        guestRoot: request.workspace.guestRoot,
         image: oldInfo.image,
-        volumeName: oldInfo.volumeName,
-        volumeHostPath: oldInfo.volumeHostPath,
-        seedBranch: oldInfo.seedBranch,
-        seedSha: oldInfo.seedSha,
         enabled: false,
         createdAt,
       };

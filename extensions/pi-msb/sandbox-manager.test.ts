@@ -1,625 +1,316 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  createSandboxManager,
-  type InspectedSandbox,
-  type SandboxManagerDeps,
-} from "./sandbox-manager.ts";
-import {
-  sandboxNameFor,
-  type BootRequest,
-  type Config,
-  type LockHandle,
-  type PreparedStorage,
-  type RuntimeExecution,
-  type SandboxTransport,
-  type StoragePlan,
-  type ToolOperations,
-} from "./types.ts";
+import { DEFAULT_CONFIG } from "./config.ts";
+import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } from "./sandbox-manager.ts";
+import { sandboxNameFor, STATE_SCHEMA_VERSION, type BootRequest, type Config, type LockHandle, type SandboxTransport, type ToolOperations } from "./types.ts";
 
-const cwd = "/tmp/pi-msb-project";
 const sessionId = "session-manager-test";
+const cwd = "/tmp/project/packages/app";
+const workspace = { hostRoot: "/canonical/project", guestRoot: "/tmp/project", cwd, fromGit: true };
 
 function config(overrides: Partial<Config> = {}): Config {
-  return {
-    image: "ubuntu:24.04",
-    pullPolicy: "if-missing",
-    bootstrapTools: false,
-    cpus: 1,
-    memoryMiB: 512,
-    idleTimeoutSec: 600,
-    stopTimeoutMs: 10,
-    detached: true,
-    replace: false,
-    replaceTimeoutMs: 10,
-    sandboxName: null,
-    mode: "direct",
-    cloneBranch: "current",
-    cloneDepth: "unlimited",
-    shallowArchive: false,
-    volumeQuotaMiB: 1024,
-    network: { mode: "default", allowHosts: [], allowDns: true, publishPorts: [] },
-    docker: { mode: "auto", startupTimeoutMs: 15_000 },
-    secrets: [],
-    mounts: [],
-    blockThirdParty: true,
-    routeTools: [],
-    passThroughTools: [],
-    allowHostExecution: true,
-    allowSkillReads: true,
-    fallbackMode: "block",
-    exposeSessionEnvironment: false,
-    hostEnv: [],
-    autoStart: true,
-    pruneOnStart: true,
-    showFooter: false,
-    lockDir: "/tmp",
-    hostRoAllowlist: [],
-    ...overrides,
-  };
+  return { ...(structuredClone(DEFAULT_CONFIG) as Config), bootstrapTools: false, stopTimeoutMs: 10, pruneOnStart: true, ...overrides };
 }
 
 function request(overrides: Partial<BootRequest> = {}): BootRequest {
+  return { sessionId, cwd, workspace, config: config(), restored: null, ...overrides };
+}
+
+function labels(req = request()): Record<string, string> {
   return {
-    sessionId,
-    cwd,
-    config: config(),
-    restored: null,
-    ...overrides,
+    "pi-msb.managed": "true",
+    "pi-msb.schema": String(STATE_SCHEMA_VERSION),
+    "pi-msb.session": req.sessionId,
+    "pi-msb.cwd": req.cwd,
+    "pi-msb.root": req.workspace.hostRoot,
+    "pi-msb.guest-root": req.workspace.guestRoot,
+    "pi-msb.pid": "42",
+    "pi-msb.image": req.config.image,
+    "pi-msb.keep": "true",
   };
 }
 
 function transport(onDispose?: () => void): SandboxTransport {
   return {
-    readFile: async () => Buffer.from(""),
-    writeFile: async () => undefined,
-    exists: async () => true,
+    readFile: async () => Buffer.alloc(0), writeFile: async () => undefined, exists: async () => true,
     stat: async () => ({ kind: "file", size: 0, mode: 0o644, readonly: false, modifiedAt: null }),
     list: async () => [],
-    copyFromHost: async () => undefined,
-    copyToHost: async () => undefined,
-    exec: async () => ({ stdout: Buffer.from(""), stderr: Buffer.from(""), exitCode: 0 }),
+    exec: async () => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 }),
     execStream: async () => ({ exitCode: 0 }),
-    dispose: async () => {
-      onDispose?.();
-    },
+    dispose: async () => { onDispose?.(); },
   };
 }
 
 const operations = {} as ToolOperations;
 
-function directPlan(): StoragePlan {
-  return { kind: "direct-mount", hostPath: cwd, guestPath: cwd, workdir: cwd };
-}
-
-function prepared(plan = directPlan(), extras: Partial<PreparedStorage> = {}): PreparedStorage {
-  return { plan, createdVolume: false, ...extras };
-}
-
-function lock(events: string[]): LockHandle {
-  return {
-    path: "/tmp/pi-msb.lock",
-    release: async () => {
-      events.push("release");
-    },
-  };
-}
-
-function labels(req = request(), plan = directPlan()): Record<string, string> {
-  return {
-    "pi-msb.managed": "true",
-    "pi-msb.schema": "1",
-    "pi-msb.session": req.sessionId,
-    "pi-msb.mode": plan.kind === "direct-mount" ? "direct" : plan.kind === "none" ? "none" : "git",
-    "pi-msb.cwd": req.cwd,
-    "pi-msb.image": req.config.image,
-  };
+function owner(events: string[]): LockHandle {
+  return { path: "/tmp/owner.lock", release: async () => { events.push("release"); } };
 }
 
 function depsFor(events: string[], overrides: Partial<SandboxManagerDeps> = {}): SandboxManagerDeps {
-  const req = request();
   return {
-    acquireOwnerLock: async () => {
-      events.push("lock");
-      return lock(events);
-    },
-    pruneOthers: async () => {
-      events.push("prune");
-      return { inspected: 0, removed: [], kept: [], errors: [] };
-    },
-    detectGit: async () => {
-      events.push("git");
-      return { isGitRepo: false, repoRoot: null, branch: null, headSha: null, unborn: false, isLinkedWorktree: false };
-    },
-    buildStoragePlan: () => {
-      events.push("plan");
-      return directPlan();
-    },
-    prepareStorage: async (plan) => {
-      events.push("prepare");
-      return prepared(plan);
-    },
-    inspectSandbox: async () => {
-      events.push("inspect");
-      return null;
-    },
-    connectSandbox: async () => {
-      events.push("connect");
-      return {};
-    },
-    startSandbox: async () => {
-      events.push("start");
-      return {};
-    },
-    createSandbox: async () => {
-      events.push("create");
-      return {};
-    },
-    stopAndRemove: async () => {
-      events.push("stop-remove");
-    },
-    createTransport: () => {
-      events.push("transport");
-      return transport();
-    },
-    createOperations: () => {
-      events.push("operations");
-      return operations;
-    },
-    prepareRuntime: async () => {
-      events.push("runtime");
-      return { docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" } };
-    },
-    seed: async () => {
-      events.push("seed");
-      return { headSha: null };
-    },
-    persist: () => {
-      events.push("persist");
-    },
+    acquireOwnerLock: async () => { events.push("lock"); return owner(events); },
+    pruneOthers: async () => { events.push("prune"); return { inspected: 0, removed: [], kept: [], errors: [] }; },
+    inspectSandbox: async () => { events.push("inspect"); return null; },
+    connectSandbox: async () => { events.push("connect"); return {}; },
+    startSandbox: async () => { events.push("start"); return {}; },
+    createSandbox: async () => { events.push("create"); return {}; },
+    stopAndRemove: async () => { events.push("stop-remove"); },
+    createTransport: () => { events.push("transport"); return transport(); },
+    createOperations: () => { events.push("operations"); return operations; },
+    prepareRuntime: async () => { events.push("prepare-runtime"); return { docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" } }; },
+    persist: () => { events.push("persist"); },
     now: () => 1234,
     ...overrides,
   };
 }
 
-test("acquires the owner lock before every resource mutation", async () => {
+test("the owner lock precedes every resource mutation", async () => {
   const events: string[] = [];
   const manager = createSandboxManager(depsFor(events));
-
-  const result = await manager.boot(request());
-  assert.equal(result.status, "active");
-  assert.deepEqual(events.slice(0, 9), [
-    "lock", "prune", "git", "plan", "prepare", "inspect", "create", "transport", "operations",
-  ]);
-  assert.ok(events.indexOf("lock") < events.indexOf("create"));
-  assert.ok(events.indexOf("lock") < events.indexOf("prepare"));
-
+  assert.equal((await manager.boot(request())).status, "active");
+  assert.deepEqual(events.slice(0, 8), ["lock", "prune", "inspect", "create", "transport", "operations", "prepare-runtime", "persist"]);
   await manager.shutdown();
   assert.deepEqual(events.slice(-2), ["stop-remove", "release"]);
 });
 
-test("a duplicate live session fails closed without touching storage or SDK", async () => {
+test("a duplicate live session fails closed before SDK access", async () => {
   const events: string[] = [];
-  const deps = depsFor(events, {
-    acquireOwnerLock: async () => {
-      events.push("lock");
-      return null;
-    },
-  });
-  const manager = createSandboxManager(deps);
-
-  const result = await manager.boot(request());
-  assert.equal(result.status, "unavailable");
+  const manager = createSandboxManager(depsFor(events, { acquireOwnerLock: async () => { events.push("lock"); return null; } }));
+  assert.equal((await manager.boot(request())).status, "unavailable");
   assert.deepEqual(events, ["lock"]);
 });
 
-test("connects matching running sandboxes and starts matching stopped sandboxes", async () => {
+test("matching current identity reconnects running sandboxes and starts stopped sandboxes", async () => {
   for (const status of ["running", "stopped"] as const) {
     const events: string[] = [];
     const req = request();
-    const inspected: InspectedSandbox = {
-      name: sandboxNameFor(req.sessionId),
-      status,
-      labels: labels(req),
-    };
-    const manager = createSandboxManager(depsFor(events, {
-      inspectSandbox: async () => inspected,
-    }));
-
-    const result = await manager.boot(req);
-    assert.equal(result.status, "active");
+    const inspected: InspectedSandbox = { name: sandboxNameFor(req.sessionId), status, labels: labels(req) };
+    const manager = createSandboxManager(depsFor(events, { inspectSandbox: async () => inspected }));
+    assert.equal((await manager.boot(req)).status, "active");
     assert.equal(events.includes(status === "running" ? "connect" : "start"), true);
     assert.equal(events.includes("create"), false);
     await manager.shutdown();
   }
 });
 
-test("boot failure disposes, cleans the bundle, and never removes a volume", async () => {
+test("active info and persisted state use session, schema, image, cwd, and canonical root identity", async () => {
   const events: string[] = [];
-  const bundle = {
-    hostPath: "/tmp/bundle",
-    branch: "main",
-    headSha: "abc",
-    cleanup: async () => {
-      events.push("bundle-cleanup");
-    },
-  };
-  const plan: StoragePlan = {
-    kind: "git-volume",
-    sessionId,
-    volumeName: "pi-msb-vol-test",
-    volumeQuotaMiB: 1,
-    repoRoot: "/repo",
-    mountGuestPath: "/repo",
-    workdir: cwd,
-    branch: "main",
-    headSha: "abc",
-    unborn: false,
-    depth: "unlimited",
-    seedRequired: true,
-  };
-  const deps = depsFor(events, {
-    buildStoragePlan: () => plan,
-    prepareStorage: async () => ({
-      plan,
-      createdVolume: true,
-      bundle,
-      volume: { name: plan.volumeName, hostPath: "/vol", labels: {} },
-    }),
-    prepareRuntime: async () => {
-      events.push("runtime");
-      throw new Error("bootstrap failed");
-    },
+  let persisted: any;
+  const req = request();
+  const manager = createSandboxManager(depsFor(events, { persist: (state) => { persisted = state; } }));
+  const state = await manager.boot(req);
+  assert.deepEqual(state.info && {
+    name: state.info.name, image: state.info.image, cwd: state.info.cwd, root: state.info.root,
+  }, {
+    name: sandboxNameFor(sessionId), image: req.config.image, cwd, root: workspace.guestRoot,
   });
-  const manager = createSandboxManager(deps);
+  assert.deepEqual(persisted, {
+    version: STATE_SCHEMA_VERSION,
+    sessionId,
+    sandboxName: sandboxNameFor(sessionId),
+    cwd,
+    root: workspace.hostRoot,
+    guestRoot: workspace.guestRoot,
+    image: req.config.image,
+    enabled: true,
+    createdAt: 1234,
+  });
+  await manager.shutdown();
+});
 
+test("same-session legacy sandbox is removed under the held lock without volume access", async () => {
+  const events: string[] = [];
+  const req = request();
+  const legacy: InspectedSandbox = {
+    name: sandboxNameFor(sessionId), status: "running",
+    labels: { "pi-msb.managed": "true", "pi-msb.schema": "1", "pi-msb.session": sessionId, "pi-msb.mode": "git", "pi-msb.volume": "pi-msb-vol-only-copy" },
+  };
+  const manager = createSandboxManager(depsFor(events, { inspectSandbox: async () => legacy }));
+  assert.equal((await manager.boot(req)).status, "active");
+  assert.ok(events.indexOf("lock") < events.indexOf("stop-remove"));
+  assert.ok(events.indexOf("stop-remove") < events.indexOf("create"));
+  assert.equal(events.some((event) => /volume/i.test(event)), false);
+  await manager.shutdown();
+});
+
+test("stale current-schema cwd, root, or image is replaced but a different session is never mutated", async () => {
+  for (const field of ["pi-msb.cwd", "pi-msb.root", "pi-msb.guest-root", "pi-msb.image"] as const) {
+    const events: string[] = [];
+    const req = request();
+    const manager = createSandboxManager(depsFor(events, {
+      inspectSandbox: async () => ({ name: sandboxNameFor(sessionId), status: "running", labels: { ...labels(req), [field]: "changed" } }),
+    }));
+    assert.equal((await manager.boot(req)).status, "active");
+    assert.ok(events.indexOf("stop-remove") < events.indexOf("create"));
+    await manager.shutdown();
+  }
+
+  const events: string[] = [];
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => ({ name: sandboxNameFor(sessionId), status: "running", labels: { ...labels(), "pi-msb.session": "another" } }),
+  }));
+  assert.equal((await manager.boot(request())).status, "unavailable");
+  assert.equal(events.includes("stop-remove"), false);
+  assert.equal(events.includes("create"), false);
+});
+
+test("wake revalidates name, session, schema, image, cwd, and root", async () => {
+  const mutations: Array<[string, string]> = [
+    ["name", "pi-msb-unexpected"],
+    ["pi-msb.session", "other"],
+    ["pi-msb.schema", "1"],
+    ["pi-msb.image", "other:image"],
+    ["pi-msb.cwd", "/different"],
+    ["pi-msb.root", "/different-root"],
+    ["pi-msb.guest-root", "/different-guest-root"],
+  ];
+  for (const [field, value] of mutations) {
+    const events: string[] = [];
+    let inspections = 0;
+    const req = request();
+    const manager = createSandboxManager(depsFor(events, {
+      inspectSandbox: async () => {
+        if (inspections++ === 0) return null;
+        const record = { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) };
+        if (field === "name") record.name = value;
+        else record.labels[field] = value;
+        return record;
+      },
+    }));
+    await manager.boot(req);
+    await assert.rejects(manager.withRuntime(async () => undefined), /mismatch|conflicting labels|configuration changed/);
+    assert.equal(manager.getState().status, "unavailable");
+  }
+});
+
+test("boot preparation failure disposes the transport, cleans the sandbox, releases ownership, and honors fallback", async () => {
+  const events: string[] = [];
+  let disposed = 0;
+  const manager = createSandboxManager(depsFor(events, {
+    createTransport: () => transport(() => { disposed++; }),
+    prepareRuntime: async () => { throw new Error("bootstrap failed"); },
+  }));
   const result = await manager.boot(request({ config: config({ fallbackMode: "host" }) }));
   assert.equal(result.status, "host-fallback");
-  assert.equal(events.includes("bundle-cleanup"), true);
-  assert.equal(events.includes("stop-remove"), true);
-  assert.equal(events.some((entry) => entry.toLowerCase().includes("volume")), false);
-});
-
-test("withRuntime wakes and swaps the transport without retrying the callback", async () => {
-  const events: string[] = [];
-  let inspectCount = 0;
-  let prepareCount = 0;
-  let calls = 0;
-  const req = request();
-  const inspected: InspectedSandbox = {
-    name: sandboxNameFor(req.sessionId),
-    status: "running",
-    labels: labels(req),
-  };
-  const first = transport();
-  const second = transport();
-  const deps = depsFor(events, {
-    createTransport: () => {
-      events.push("transport");
-      return inspectCount > 1 ? second : first;
-    },
-    inspectSandbox: async () => {
-      inspectCount += 1;
-      return { ...inspected, status: inspectCount === 1 ? "running" : "stopped" };
-    },
-    prepareRuntime: async () => {
-      prepareCount += 1;
-      return { docker: { mode: "auto", readiness: "ready", version: `29.8.${prepareCount - 1}`, storageDriver: "vfs" } };
-    },
-  });
-  const manager = createSandboxManager(deps);
-  await manager.boot(req);
-
-  await assert.rejects(
-    manager.withRuntime(async () => {
-      calls += 1;
-      throw new Error("operation failed");
-    }),
-    /operation failed/,
-  );
-  assert.equal(calls, 1);
-  assert.equal(events.includes("start"), true);
-  assert.equal(prepareCount, 2);
-  assert.equal(manager.getState().info?.docker.version, "29.8.1");
-  await manager.shutdown();
-});
-
-test("wake preparation failure disposes the replacement before blocking callbacks", async () => {
-  const events: string[] = [];
-  const req = request();
-  let inspections = 0;
-  let preparations = 0;
-  let disposed = 0;
-  let callbackCalled = false;
-  const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => {
-      inspections += 1;
-      if (inspections === 1) return null;
-      return {
-        name: sandboxNameFor(req.sessionId),
-        status: "stopped",
-        labels: labels(req),
-      };
-    },
-    createTransport: () => transport(() => { disposed += 1; }),
-    prepareRuntime: async () => {
-      preparations += 1;
-      if (preparations === 2) throw new Error("Docker daemon did not become ready");
-      return { docker: { mode: "require", readiness: "ready", version: "29.8.0", storageDriver: "vfs" } };
-    },
-  }));
-  await manager.boot(req);
-
-  await assert.rejects(manager.withRuntime(async () => { callbackCalled = true; }), /Docker daemon/);
-  assert.equal(callbackCalled, false);
-  assert.equal(preparations, 2);
-  assert.equal(disposed, 2, "replacement and previous transports must both be disposed");
-  assert.equal(manager.getState().status, "unavailable");
-  assert.equal(events.includes("stop-remove"), true);
+  assert.match(result.reason ?? "", /bootstrap failed/);
+  assert.equal(disposed, 1);
   assert.ok(events.indexOf("stop-remove") < events.indexOf("release"));
-  assert.equal(events.includes("release"), true);
-  await manager.shutdown();
 });
 
-test("a transport-down error reconnects and prepares the running sandbox on the next call", async () => {
-  const events: string[] = [];
-  const req = request();
-  let inspections = 0;
-  let preparations = 0;
-  let callbackCalls = 0;
-  const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => {
-      inspections += 1;
-      if (inspections === 1) return null;
-      return { name: sandboxNameFor(req.sessionId), status: "running", labels: labels(req) };
-    },
-    prepareRuntime: async () => {
-      preparations += 1;
-      return { docker: { mode: "auto", readiness: "ready", version: `29.8.${preparations - 1}`, storageDriver: "vfs" } };
-    },
-  }));
-  await manager.boot(req);
-
-  const down = Object.assign(new Error("transport is down"), { code: "SANDBOX_DOWN" });
-  await assert.rejects(manager.withRuntime(async () => {
-    callbackCalls += 1;
-    throw down;
-  }), /transport is down/);
-  assert.equal(callbackCalls, 1, "arbitrary callbacks must not be retried");
-  assert.equal(manager.getState().status, "active");
-
-  await manager.withRuntime(async () => { callbackCalls += 1; });
-  assert.equal(callbackCalls, 2);
-  assert.equal(events.filter((event) => event === "connect").length, 1);
-  assert.equal(preparations, 2);
-  assert.equal(manager.getState().info?.docker.version, "29.8.1");
-  await manager.shutdown();
-});
-
-test("keeps a valid running transport without reconnecting or disposing it", async () => {
+test("a valid running transport is reused without reconnect or disposal", async () => {
   const events: string[] = [];
   let disposed = 0;
   const req = request();
-  const inspected: InspectedSandbox = {
-    name: sandboxNameFor(req.sessionId),
-    status: "running",
-    labels: labels(req),
-  };
-  const deps = depsFor(events, {
+  const inspected = { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) };
+  const manager = createSandboxManager(depsFor(events, {
     inspectSandbox: async () => inspected,
-    createTransport: () => {
-      events.push("transport");
-      return transport(() => {
-        disposed += 1;
-      });
-    },
-  });
-  const manager = createSandboxManager(deps);
+    createTransport: () => transport(() => { disposed++; }),
+  }));
   await manager.boot(req);
-
-  await manager.withRuntime(async (current) => {
-    assert.equal(current.operations, operations);
-  });
+  await manager.withRuntime(async (runtime) => { assert.equal(runtime.operations, operations); });
   assert.equal(events.filter((event) => event === "connect").length, 1);
-  assert.equal(events.filter((event) => event === "transport").length, 1);
   assert.equal(disposed, 0);
   await manager.shutdown();
   assert.equal(disposed, 1);
 });
 
-test("waits for prior runtime users before replacing a stopped transport", async () => {
+test("wake preparation failure blocks callbacks and disposes replacement and previous handles", async () => {
   const events: string[] = [];
-  const req = request();
   let inspections = 0;
-  let startCalls = 0;
+  let preparations = 0;
   let disposed = 0;
-  let firstCallbackStarted!: () => void;
-  const firstStarted = new Promise<void>((resolve) => {
-    firstCallbackStarted = resolve;
-  });
-  let releaseFirst!: () => void;
-  const firstRelease = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
+  let callbackCalled = false;
+  const req = request();
   const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => {
-      inspections += 1;
-      if (inspections === 1) return null;
-      return {
-        name: sandboxNameFor(req.sessionId),
-        status: "stopped",
-        labels: labels(req),
-      };
+    inspectSandbox: async () => inspections++ === 0 ? null : { name: sandboxNameFor(sessionId), status: "stopped", labels: labels(req) },
+    createTransport: () => transport(() => { disposed++; }),
+    prepareRuntime: async () => {
+      if (++preparations === 2) throw new Error("Docker daemon did not become ready");
+      return { docker: { mode: "require", readiness: "ready" } };
     },
-    startSandbox: async () => {
-      startCalls += 1;
-      events.push("start");
-      return {};
-    },
-    createTransport: () => transport(() => {
-      disposed += 1;
-    }),
   }));
   await manager.boot(req);
+  await assert.rejects(manager.withRuntime(async () => { callbackCalled = true; }), /Docker daemon/);
+  assert.equal(callbackCalled, false);
+  assert.equal(disposed, 2);
+  assert.equal(manager.getState().status, "unavailable");
+  assert.ok(events.indexOf("stop-remove") < events.indexOf("release"));
+});
 
-  const first = manager.withRuntime(async () => {
-    firstCallbackStarted();
-    await firstRelease;
-  });
-  await firstStarted;
+test("transport-down marks a running handle invalid and reconnects without retrying the callback", async () => {
+  const events: string[] = [];
+  let inspections = 0;
+  let preparations = 0;
+  let callbacks = 0;
+  const req = request();
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => inspections++ === 0 ? null : { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) },
+    prepareRuntime: async () => ({ docker: { mode: "auto", readiness: "ready", version: `v${++preparations}` } }),
+  }));
+  await manager.boot(req);
+  await assert.rejects(manager.withRuntime(async () => {
+    callbacks++;
+    throw Object.assign(new Error("transport down"), { code: "SANDBOX_DOWN" });
+  }), /transport down/);
+  await manager.withRuntime(async () => { callbacks++; });
+  assert.equal(callbacks, 2);
+  assert.equal(events.filter((event) => event === "connect").length, 1);
+  assert.equal(preparations, 2);
+  await manager.shutdown();
+});
+
+test("replacement waits for an active callback before disposing its transport", async () => {
+  const events: string[] = [];
+  let inspections = 0;
+  let disposed = 0;
+  let started!: () => void;
+  const callbackStarted = new Promise<void>((resolve) => { started = resolve; });
+  let release!: () => void;
+  const callbackRelease = new Promise<void>((resolve) => { release = resolve; });
+  const req = request();
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => inspections++ === 0 ? null : { name: sandboxNameFor(sessionId), status: "stopped", labels: labels(req) },
+    createTransport: () => transport(() => { disposed++; }),
+  }));
+  await manager.boot(req);
+  const first = manager.withRuntime(async () => { started(); await callbackRelease; });
+  await callbackStarted;
   const second = manager.withRuntime(async () => undefined);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(startCalls, 1);
   assert.equal(disposed, 1);
-
-  releaseFirst();
+  release();
   await Promise.all([first, second]);
-  assert.equal(startCalls, 2);
   assert.equal(disposed, 2);
   await manager.shutdown();
   assert.equal(disposed, 3);
 });
 
-test("rejects a sandbox name mismatch before waking", async () => {
+test("reconnect failure switches to configured host fallback and releases the lock", async () => {
   const events: string[] = [];
-  const req = request();
   let inspections = 0;
-  const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => {
-      inspections += 1;
-      if (inspections === 1) return null;
-      return {
-        name: "pi-msb-unexpected",
-        status: "running",
-        labels: labels(req),
-      };
-    },
-  }));
-  await manager.boot(req);
-  await assert.rejects(manager.withRuntime(async () => undefined), /sandbox name mismatch/);
-  assert.equal(manager.getState().status, "unavailable");
-  assert.equal(events.filter((event) => event === "connect").length, 0);
-  await manager.shutdown();
-});
-
-test("revalidates mode, cwd, image, and volume labels before wake", async () => {
-  for (const [field, value] of [
-    ["pi-msb.mode", "none"],
-    ["pi-msb.cwd", "/different"],
-    ["pi-msb.image", "other:image"],
-    ["pi-msb.volume", "unexpected-volume"],
-  ] as const) {
-    const events: string[] = [];
-    const req = request();
-    let inspections = 0;
-    const manager = createSandboxManager(depsFor(events, {
-      inspectSandbox: async () => {
-        inspections += 1;
-        if (inspections === 1) return null;
-        return {
-          name: sandboxNameFor(req.sessionId),
-          status: "running",
-          labels: { ...labels(req), [field]: value },
-        };
-      },
-    }));
-    await manager.boot(req);
-    await assert.rejects(manager.withRuntime(async () => undefined), /configuration changed/);
-    assert.equal(manager.getState().status, "unavailable");
-    assert.equal(events.includes("start"), false);
-    assert.equal(events.filter((event) => event === "connect").length, 0);
-    await manager.shutdown();
-  }
-});
-
-test("rejects a changed explicit storage mode before waking", async () => {
-  const events: string[] = [];
-  const req = request();
-  let inspections = 0;
-  const inspected: InspectedSandbox = {
-    name: sandboxNameFor(req.sessionId),
-    status: "running",
-    labels: labels(req),
-  };
-  const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => inspections++ === 0 ? null : inspected,
-  }));
-  await manager.boot(req);
-  req.config.mode = "none";
-
-  await assert.rejects(manager.withRuntime(async () => undefined), /configuration changed/);
-  assert.equal(manager.getState().status, "unavailable");
-  assert.equal(events.filter((event) => event === "connect").length, 0);
-  await manager.shutdown();
-});
-
-test("uses host fallback when waking or reconnecting fails", async () => {
-  const events: string[] = [];
   const req = request({ config: config({ fallbackMode: "host" }) });
-  let inspections = 0;
-  let bootConnect = true;
   const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => {
-      inspections += 1;
-      if (inspections === 1) return null;
-      return {
-        name: sandboxNameFor(req.sessionId),
-        status: "stopped",
-        labels: labels(req),
-      };
-    },
-    startSandbox: async () => {
-      events.push("start");
-      return undefined;
-    },
-    connectSandbox: async () => {
-      events.push("connect");
-      if (!bootConnect) throw new Error("reconnect failed");
-      return {};
-    },
+    inspectSandbox: async () => inspections++ === 0 ? null : { name: sandboxNameFor(sessionId), status: "stopped", labels: labels(req) },
+    startSandbox: async () => undefined,
+    connectSandbox: async () => { throw new Error("reconnect failed"); },
   }));
   await manager.boot(req);
-  bootConnect = false;
-
   await assert.rejects(manager.withRuntime(async () => undefined), /reconnect failed/);
   assert.equal(manager.getState().status, "host-fallback");
   assert.equal(events.includes("release"), true);
-  await manager.shutdown();
-  assert.equal(events.includes("stop-remove"), true);
 });
 
-test("off retains state and on boots with the retained restore", async () => {
+test("off persists direct identity and on boots again", async () => {
   const events: string[] = [];
-  let restored: unknown;
-  const manager = createSandboxManager(depsFor(events, {
-    prepareStorage: async (plan, value) => {
-      restored = value;
-      return prepared(plan);
-    },
-  }));
-  const req = request();
-  await manager.boot(req);
+  const states: any[] = [];
+  const manager = createSandboxManager(depsFor(events, { persist: (state) => { states.push(state); } }));
+  await manager.boot(request());
   await manager.setEnabled(false);
   assert.equal(manager.getState().status, "off");
-  await manager.setEnabled(true);
-  assert.equal(manager.getState().status, "active");
-  assert.equal((restored as { sessionId: string }).sessionId, sessionId);
+  assert.equal(states.at(-1).root, workspace.hostRoot);
+  assert.equal(states.at(-1).enabled, false);
+  assert.equal((await manager.setEnabled(true)).status, "active");
   await manager.shutdown();
-});
-
-test("a conflicting sandbox name is never blindly replaced", async () => {
-  const events: string[] = [];
-  const req = request();
-  const manager = createSandboxManager(depsFor(events, {
-    inspectSandbox: async () => ({
-      name: sandboxNameFor(req.sessionId),
-      status: "running",
-      labels: { "pi-msb.managed": "true", "pi-msb.schema": "1", "pi-msb.session": "another" },
-    }),
-  }));
-  const result = await manager.boot(req);
-  assert.equal(result.status, "unavailable");
-  assert.equal(events.includes("stop-remove"), false);
-  assert.equal(events.includes("create"), false);
 });

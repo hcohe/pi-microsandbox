@@ -8,10 +8,10 @@ const active: RuntimeState = {
   info: {
     name: "pi-msb-example",
     displayId: "bf9379",
-    mode: "direct",
     image: "ubuntu:24.04",
     pid: 123,
-    cwd: "/repo",
+    cwd: "/repo/packages/app",
+    root: "/repo",
     createdAt: 0,
     docker: { mode: "auto", readiness: "ready", version: "29.8.0", storageDriver: "vfs" },
   },

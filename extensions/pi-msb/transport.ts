@@ -327,22 +327,6 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
       });
     });
 
-  const copyFromHost = (hostPath: string, guestPath: string): Promise<void> =>
-    call("copyFromHost", async () => {
-      const copy = method<
-        (hostPath: string, guestPath: string) => Promise<void>
-      >(getFs(), "copyFromHost");
-      await copy(hostPath, guestPath);
-    });
-
-  const copyToHost = (guestPath: string, hostPath: string): Promise<void> =>
-    call("copyToHost", async () => {
-      const copy = method<
-        (guestPath: string, hostPath: string) => Promise<void>
-      >(getFs(), "copyToHost");
-      await copy(guestPath, hostPath);
-    });
-
   const exec = (
     command: string,
     args: string[],
@@ -509,8 +493,6 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
     exists,
     stat,
     list,
-    copyFromHost,
-    copyToHost,
     exec,
     execStream,
     dispose,

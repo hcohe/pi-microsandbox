@@ -12,8 +12,8 @@ import type {
 
 // --------------------------------------------------------------- identity ----
 
-export const STATE_SCHEMA_VERSION = 1;
-export const LOCKFILE_VERSION = 1;
+export const STATE_SCHEMA_VERSION = 2;
+export const LOCKFILE_VERSION = 2;
 
 export function resourceId(sessionId: string): string {
   return createHash("sha256").update(sessionId).digest("hex").slice(0, 20);
@@ -24,14 +24,7 @@ export function displayId(sessionId: string): string {
 export function sandboxNameFor(sessionId: string): string {
   return `pi-msb-${resourceId(sessionId)}`;
 }
-export function volumeNameFor(sessionId: string): string {
-  return `pi-msb-vol-${resourceId(sessionId)}`;
-}
-
 // ---------------------------------------------------------------- config ----
-
-export type StorageMode = "git" | "direct" | "none";
-export type ConfigStorageMode = "auto" | StorageMode;
 export type NetworkMode = "default" | "open" | "allowlist" | "deny";
 export type FallbackMode = "block" | "host";
 export type BootstrapTools = "auto" | boolean;
@@ -73,11 +66,6 @@ export interface Config {
   replace: boolean;
   replaceTimeoutMs: number;
   sandboxName: string | null;
-  mode: ConfigStorageMode;
-  cloneBranch: "current" | string;
-  cloneDepth: number | "unlimited";
-  shallowArchive: boolean;
-  volumeQuotaMiB: number;
   network: NetworkConfig;
   docker: DockerConfig;
   secrets: SecretConfig[];
@@ -137,31 +125,21 @@ export const LABEL_KEYS = {
   managed: "pi-msb.managed",
   schema: "pi-msb.schema",
   session: "pi-msb.session",
-  mode: "pi-msb.mode",
   cwd: "pi-msb.cwd",
+  root: "pi-msb.root",
+  guestRoot: "pi-msb.guest-root",
   pid: "pi-msb.pid",
-  volume: "pi-msb.volume",
   image: "pi-msb.image",
   keep: "pi-msb.keep",
-  seedBranch: "pi-msb.seed-branch",
-  seedSha: "pi-msb.seed-sha",
 } as const;
 
 export interface SandboxLabelInput {
   sessionId: string;
-  mode: StorageMode;
   cwd: string;
+  root: string;
+  guestRoot: string;
   pid: number;
   image: string;
-  volumeName?: string;
-  seedBranch?: string | null;
-  seedSha?: string | null;
-}
-export interface VolumeLabelInput {
-  sessionId: string;
-  cwd: string;
-  seedBranch?: string | null;
-  seedSha?: string | null;
 }
 export interface ManagedSandboxRecord {
   name: string;
@@ -171,29 +149,18 @@ export interface ManagedSandboxRecord {
 }
 export interface ValidatedManagedSandbox extends ManagedSandboxRecord {
   sessionId: string;
-  mode: StorageMode;
   cwd: string;
-  volumeName?: string;
-}
-export interface VolumeRecord {
-  name: string;
-  hostPath: string;
-  labels: Record<string, string>;
-  kind?: string;
-  usedBytes?: number;
-  createdAt?: number;
+  root: string;
+  guestRoot: string;
 }
 export interface PersistedSandboxState {
   version: typeof STATE_SCHEMA_VERSION;
   sessionId: string;
   sandboxName: string;
-  mode: StorageMode;
   cwd: string;
+  root: string;
+  guestRoot: string;
   image: string;
-  volumeName?: string;
-  volumeHostPath?: string;
-  seedBranch?: string | null;
-  seedSha?: string | null;
   enabled: boolean;
   createdAt: number;
 }
@@ -204,9 +171,8 @@ export interface LockInfo {
   version: typeof LOCKFILE_VERSION;
   sessionId: string;
   sandboxName: string;
-  volumeName?: string;
-  mode: StorageMode;
   cwd: string;
+  root: string;
   pid: number;
   createdAt: number;
 }
@@ -218,52 +184,18 @@ export interface LocksPort {
   tryAcquire(sessionId: string): Promise<LockHandle | null>;
 }
 
-// ------------------------------------------------------------- git/storage ----
+// -------------------------------------------------------------- workspace ----
 
-export interface GitRepoInfo {
-  isGitRepo: boolean;
-  /** Canonical host source for direct binds; guest paths remain lexical. */
-  hostCwd?: string;
-  /** Canonical host source used only for Git reads and seed bundle creation. */
-  repoRoot: string | null;
-  /** Lexical guest namespace where the retained volume must be mounted. */
-  guestRepoRoot?: string | null;
-  branch: string | null;
-  headSha: string | null;
-  unborn: boolean;
-  isLinkedWorktree: boolean;
+/** One path-preserving read/write bind used by every sandbox. */
+export interface Workspace {
+  /** Canonical host directory supplied to the bind mount. */
+  hostRoot: string;
+  /** Lexical absolute path used as the guest mount point. */
+  guestRoot: string;
+  /** Original lexical absolute cwd retained as the sandbox workdir. */
+  cwd: string;
+  fromGit: boolean;
 }
-export interface GitSeedBundle {
-  hostPath: string;
-  branch: string | null;
-  headSha: string;
-  cleanup(): Promise<void>;
-}
-export interface GitVolumePlan {
-  kind: "git-volume";
-  sessionId: string;
-  volumeName: string;
-  volumeQuotaMiB: number;
-  repoRoot: string;
-  mountGuestPath: string;
-  workdir: string;
-  branch: string | null;
-  headSha: string | null;
-  unborn: boolean;
-  depth: number | "unlimited";
-  seedRequired: boolean;
-}
-export type StoragePlan =
-  | GitVolumePlan
-  | { kind: "direct-mount"; hostPath: string; guestPath: string; workdir: string }
-  | { kind: "none"; guestPath: string; workdir: string };
-export interface PreparedStorage {
-  plan: StoragePlan;
-  volume?: VolumeRecord;
-  bundle?: GitSeedBundle | null;
-  createdVolume: boolean;
-}
-export interface SeedResult { headSha: string | null }
 
 // ------------------------------------------------------------- transport ----
 
@@ -306,8 +238,6 @@ export interface SandboxTransport {
   exists(path: string): Promise<boolean>;
   stat(path: string): Promise<StatResult>;
   list(path: string): Promise<FsEntry[]>;
-  copyFromHost(hostPath: string, guestPath: string): Promise<void>;
-  copyToHost(guestPath: string, hostPath: string): Promise<void>;
   exec(command: string, args: string[], options?: ExecOptions): Promise<TransportExecResult>;
   execStream(command: string, args: string[], options?: ExecStreamOptions): Promise<{ exitCode: number }>;
   dispose(): Promise<void>;
@@ -382,14 +312,10 @@ export interface RuntimePreparation {
 export interface SandboxInfo {
   name: string;
   displayId: string;
-  mode: StorageMode;
   image: string;
   pid: number;
   cwd: string;
-  volumeName?: string;
-  volumeHostPath?: string;
-  seedBranch?: string | null;
-  seedSha?: string | null;
+  root: string;
   createdAt: number;
   docker: DockerCapabilityStatus;
 }
@@ -401,6 +327,7 @@ export interface RuntimeState {
 export interface BootRequest {
   sessionId: string;
   cwd: string;
+  workspace: Workspace;
   config: Config;
   restored: PersistedSandboxState | null;
 }
@@ -429,22 +356,11 @@ export type ExecFn = (
 
 // ------------------------------------------------------- command/control ----
 
-export interface ExportResult { source: string; destination: string }
 export interface MsbControl {
   getState(): RuntimeState;
   setEnabled(enabled: boolean): Promise<void>;
   reload(): Promise<void>;
   pruneNow(): Promise<PruneReport>;
-  listVolumes(): Promise<VolumeRecord[]>;
-  describeVolume(name: string): Promise<{
-    volume: VolumeRecord;
-    branch?: string;
-    lastCommit?: string;
-    dirtyCount?: number;
-    mounted: boolean;
-  }>;
-  removeVolume(name: string): Promise<void>;
-  exportPaths(paths: string[], destination?: string): Promise<ExportResult[]>;
   getLogs(tailLines?: number): Promise<string>;
   getEffectiveConfig(): ResolvedConfig;
   getEffectiveConfigToml(): string;

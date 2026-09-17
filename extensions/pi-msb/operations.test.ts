@@ -27,8 +27,6 @@ function fakeTransport(overrides: Partial<SandboxTransport> = {}) {
       { name: ".env", kind: "file" },
       { name: "src", kind: "directory" },
     ],
-    copyFromHost: async () => {},
-    copyToHost: async () => {},
     exec: async (command, args) => {
       calls.push({ command, args });
       return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };

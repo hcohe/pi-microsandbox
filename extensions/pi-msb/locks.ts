@@ -47,18 +47,17 @@ async function lockOperations(opts: LocksOptions): Promise<LockOperations> {
 function normalizeLockInfo(value: unknown): LockInfo | null {
   if (typeof value !== "object" || value === null) return null;
   const candidate = value as Partial<LockInfo>;
-  const { version, sessionId, sandboxName, volumeName, mode, cwd, pid, createdAt } = candidate;
+  const { version, sessionId, sandboxName, cwd, root, pid, createdAt } = candidate;
   if (version !== LOCKFILE_VERSION
     || typeof sessionId !== "string" || sessionId.length === 0
     || typeof sandboxName !== "string" || sandboxName.length === 0
-    || (volumeName !== undefined && (typeof volumeName !== "string" || volumeName.length === 0))
-    || (mode !== "git" && mode !== "direct" && mode !== "none")
     || typeof cwd !== "string" || !isAbsolute(cwd)
+    || typeof root !== "string" || !isAbsolute(root)
     || typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0
     || typeof createdAt !== "number" || !Number.isFinite(createdAt)) {
     return null;
   }
-  return { version, sessionId, sandboxName, volumeName, mode, cwd, pid, createdAt };
+  return { version, sessionId, sandboxName, cwd, root, pid, createdAt };
 }
 
 function validLockInfo(value: unknown): value is LockInfo {
@@ -72,12 +71,11 @@ function lockInfoJson(info: LockInfo): string {
     version: LOCKFILE_VERSION,
     sessionId: info.sessionId,
     sandboxName: info.sandboxName,
-    mode: info.mode,
     cwd: info.cwd,
+    root: info.root,
     pid: info.pid,
     createdAt: info.createdAt,
   };
-  if (info.volumeName !== undefined) value.volumeName = info.volumeName;
   return `${JSON.stringify(value)}\n`;
 }
 

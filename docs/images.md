@@ -66,12 +66,13 @@ can install current packages at runtime.
 
 ## Build a custom image
 
-A custom image must provide `bash`, `sh`, `git`, `rg`, `file`, `cat`, `mkdir`,
-and `rm`. Docker is optional for custom images. The default `docker.mode =
-"auto"` records it as missing and continues; use `docker.mode = "require"` when
-the image contract must include a working daemon. pi-microsandbox does not
-install Docker during sandbox startup. Install CA certificates if the guest
-will use Git over HTTPS. With
+A custom image must provide `bash`, `sh`, `rg`, `file`, `cat`, `mkdir`, and
+`rm`. Git is a useful developer tool and remains in the published images, but
+workspace setup no longer requires it inside the guest. Docker is optional for
+custom images. The default `docker.mode = "auto"` records it as missing and
+continues; use `docker.mode = "require"` when the image contract must include a
+working daemon. pi-microsandbox does not install Docker during sandbox startup.
+Install Git and CA certificates if guest commands need Git over HTTPS. With
 `bootstrap_tools = "auto"`, pi-microsandbox can install missing required
 commands through `apt-get` when the network policy permits it. A prepared image
 is required when bootstrap is disabled or package repositories are unavailable.

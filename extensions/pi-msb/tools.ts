@@ -22,7 +22,6 @@ import type {
   HostReadAccess,
   RuntimeState,
   SandboxGrepExecute,
-  StorageMode,
   ToolOpsProvider,
 } from "./types.ts";
 
@@ -81,24 +80,16 @@ export function hostApprovalMessage(
   tool: string,
   input: Record<string, unknown>,
   cwd: string,
-  mode?: StorageMode,
 ): string {
-  const lines = [
+  return [
     `Tool: ${tool}`,
     `Working directory: ${cwd}`,
-    ...(mode ? [`Storage mode: ${mode}`] : []),
     "",
     "Exact arguments:",
     JSON.stringify(sortForFingerprint(withoutExecutionTarget(input)), null, 2),
     "",
-    "This operation will run outside the selected pi-microsandbox environment with the host process's permissions and environment.",
-  ];
-  if (mode === "git") {
-    lines.push(
-      "Warning: host-targeted execution bypasses the retained git volume and can mutate the host working tree.",
-    );
-  }
-  return lines.join("\n");
+    "Warning: this operation runs on the host and bypasses VM, process, and network isolation.",
+  ].join("\n");
 }
 
 export interface RegisterToolsDeps {
@@ -122,9 +113,8 @@ function stateOf(deps: RegisterToolsDeps): RuntimeState {
   return deps.provider.getState();
 }
 
-function isHostMode(state: RuntimeState, config: Config): boolean {
-  return state.status === "off" || state.status === "disabled" || state.status === "host-fallback" ||
-    (state.status === "unavailable" && config.fallbackMode === "host");
+function isHostMode(state: RuntimeState): boolean {
+  return state.status === "off" || state.status === "host-fallback";
 }
 
 function isSandboxActive(state: RuntimeState, provider: ToolOpsProvider): boolean {
@@ -214,7 +204,6 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     tool: string,
     id: string,
     input: Record<string, unknown>,
-    mode: StorageMode | undefined,
   ): void => {
     const approved = approvedHostCalls.get(id);
     approvedHostCalls.delete(id);
@@ -222,8 +211,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       throw new Error("Host execution was not approved for this exact tool call.");
     }
     // Approval is deliberately consumed here rather than cached; a runtime
-    // mode change must never extend a one-call host escape.
-    void mode;
+    // state change must never extend a one-call host escape.
   };
 
   const executeHost = async (
@@ -234,13 +222,12 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     onUpdate: any,
     ctx: ExtensionContext,
     active: boolean,
-    mode: StorageMode | undefined,
   ): Promise<any> => {
     if (active) {
       if (!deps.config.allowHostExecution) {
         throw new Error("Host execution is disabled by pi-microsandbox configuration.");
       }
-      requireApprovedHostExecution(definition.name, id, input, mode);
+      requireApprovedHostExecution(definition.name, id, input);
     }
     return definition.execute(id, withoutExecutionTarget(input), signal, onUpdate, ctx);
   };
@@ -253,17 +240,17 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       execute: async (id, rawParams, signal, onUpdate, ctx) => {
         const params = rawParams as ToolParams;
         const state = stateOf(deps);
-        const hostMode = isHostMode(state, deps.config);
+        const hostMode = isHostMode(state);
         const active = isSandboxActive(state, deps.provider);
         const targetHost = isHostTarget(params);
 
         if (!deps.config.routeTools.includes(name)) throw routeError(name);
         if (hostMode) {
-          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, false, undefined);
+          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, false);
         }
         if (!active) throw unavailableError(state);
         if (targetHost) {
-          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, true, state.info?.mode);
+          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, true);
         }
 
         if (name === "read" && deps.config.allowSkillReads) {
@@ -314,7 +301,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
 
   pi.on("tool_call", async (event, ctx) => {
     const state = stateOf(deps);
-    const hostMode = isHostMode(state, deps.config);
+    const hostMode = isHostMode(state);
     const active = isSandboxActive(state, deps.provider);
     const tool = event.toolName;
     const input = asRecord(event.input);
@@ -339,7 +326,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       }
       const approved = await ctx.ui.confirm(
         "Allow host execution?",
-        hostApprovalMessage(tool, input, deps.cwd, state.info?.mode),
+        hostApprovalMessage(tool, input, deps.cwd),
       );
       if (!approved) {
         clearApproval(event.toolCallId);
@@ -375,7 +362,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
 
   pi.on("user_bash", (): UserBashEventResult | undefined => {
     const state = stateOf(deps);
-    if (isHostMode(state, deps.config)) return undefined;
+    if (isHostMode(state)) return undefined;
     if (!isSandboxActive(state, deps.provider)) {
       const error = unavailableError(state);
       const operations: BashOperations = {

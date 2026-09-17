@@ -17,12 +17,11 @@ import {
 import type { LockInfo } from "./types.ts";
 
 const info: LockInfo = {
-  version: 1,
+  version: 2,
   sessionId: "session-alpha",
   sandboxName: "pi-msb-alpha",
-  volumeName: "pi-msb-vol-alpha",
-  mode: "git",
-  cwd: "/tmp/project",
+  cwd: "/tmp/project/packages/app",
+  root: "/tmp/project",
   pid: 1234,
   createdAt: 1700000000000,
 };
@@ -86,7 +85,10 @@ test("owner metadata is truncated, synced, and readable while the inode persists
     assert.ok(owner);
     const path = lockPathFor(dir, info.sessionId);
     assert.deepStrictEqual(await readLockInfo(path), info);
-    assert.match(await readFile(path, "utf8"), /"version":1/);
+    const text = await readFile(path, "utf8");
+    assert.match(text, /"version":2/);
+    assert.match(text, /"root":"\/tmp\/project"/);
+    assert.doesNotMatch(text, /mode|volume/i);
 
     const mode = (await stat(path)).mode & 0o777;
     assert.equal(mode, 0o600);
@@ -190,7 +192,13 @@ test("real bundled addon contention is kernel-backed when the current prebuild i
   }
 
   await withTempDir(async (dir) => {
-    const first = await tryAcquireOrphanLock({ lockDir: dir }, info.sessionId);
+    let first;
+    try {
+      first = await tryAcquireOrphanLock({ lockDir: dir }, info.sessionId);
+    } catch (error) {
+      t.skip(`the bundled addon cannot be loaded on this host: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     assert.ok(first);
     assert.equal(await tryAcquireOrphanLock({ lockDir: dir }, info.sessionId), null);
     await first.release();

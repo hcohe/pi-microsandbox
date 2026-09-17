@@ -4,24 +4,35 @@
 
 The default is fail-closed:
 
-- A valid, trusted project configuration is resolved before a sandbox is
-  started. A boot or image/tool failure blocks the seven routed tools (`read`,
-  `write`, `edit`, `ls`, `find`, `grep`, and `bash`).
-- `mode = "auto"` is retained as an alias for `"direct"`; both use a
-  same-absolute-path read/write bind. `mode = "git"`, `"direct"`, and
-  `"none"` select those behaviors explicitly.
+- A valid, trusted project configuration is resolved before a sandbox starts. A
+  boot, image, configuration, or tool failure blocks the seven routed tools
+  (`read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash`). Failure never
+  silently falls back to host execution.
 - `execution_target = "host"` is an opt-in escape for routed tool calls. While
-  a sandbox is active it requires an interactive approval for the exact tool,
-  working directory, and recursively sorted arguments. It is not available in
+  a sandbox is active it requires interactive approval for the exact tool,
+  working directory, and recursively sorted arguments. It is unavailable in
   headless operation and is never silently selected.
 - `/msb off` is an explicit host-mode handoff and does not prompt. This is
   different from `fallback_mode = "host"`, which automatically uses host tools
-  after a sandbox failure and is shown as `MSB host fallback`.
+  after a sandbox failure and is shown as `MSB host fallback`. Both are
+  unsandboxed controls, not workspace settings.
 - A project cannot replace another process's sandbox: ownership is a
-  non-blocking kernel `flock` acquired before any sandbox or volume mutation.
-  The small bundled POSIX addon is loaded lazily, has no install script, and
-  never falls back to a racy PID check. Stale sandbox pruning never removes
-  volumes.
+  non-blocking kernel `flock` acquired before sandbox mutation. The small
+  bundled POSIX addon is loaded lazily, has no install script, and never falls
+  back to a racy PID check.
+
+There are no workspace modes. Inside a Git worktree, pi-microsandbox
+bind-mounts the entire worktree root read/write at the same lexical guest path.
+Outside Git, it bind-mounts the current directory. Commands start in the
+original current directory, but their path boundary is the selected root.
+
+This mount deliberately exposes host files. A Git worktree mount includes
+`.git`, untracked files, secrets such as `.env`, and sibling directories even
+when Pi starts in a subdirectory. Writes are immediately visible on the host,
+and separate sessions using the same checkout can read or overwrite one
+another's work. Use separate host worktrees or checkouts for isolation between
+sessions. Unsafe root mappings fail startup rather than falling back to a
+narrower mount.
 
 The extension entry point does not import the native SDK or load the flock
 addon. Unsupported hosts can still load Pi and remain blocked or explicitly
@@ -35,15 +46,15 @@ socket. Access to that socket is root-equivalent inside the guest, not on the
 host. Readiness probes explicitly select that socket and reject unverified
 socket ownership. Docker and process-control environment variables are cleared
 for preparation, and configuration cannot forward them. Mounts that shadow
-protected guest executables or Docker runtime paths are rejected. The extension never mounts the host Docker
-socket, starts a host daemon, or copies host Docker configuration and registry
-credentials into the guest.
+protected guest executables or Docker runtime paths are rejected. The extension
+never mounts the host Docker socket, starts a host daemon, or copies host Docker
+configuration and registry credentials into the guest.
 
-A container can still reach anything already mounted into the microVM. In
-`direct` mode that includes the host project directory; in Git mode it includes
-the retained workspace; explicitly configured mounts are visible too. Treat a
-Dockerfile or Compose file as guest-root code and use read-only mounts where
-possible. Container egress remains behind the Microsandbox network policy.
+A nested container can still reach anything mounted into the microVM, including
+the entire selected workspace and explicitly configured mounts. Treat a
+Dockerfile or Compose file as guest-root code and use read-only extra mounts
+where possible. Container egress remains behind the Microsandbox network
+policy.
 
 ## Host-read exceptions
 
@@ -56,4 +67,5 @@ become readable.
 
 ## Reporting vulnerabilities
 
-Report suspected vulnerabilities privately. See the [security policy](../SECURITY.md); do not open a public issue.
+Report suspected vulnerabilities privately. See the
+[security policy](../SECURITY.md); do not open a public issue.

@@ -56,7 +56,6 @@ extensions/pi-msb/config.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/footer.ts required
 extensions/pi-msb/flock.ts required
-extensions/pi-msb/git.ts required
 extensions/pi-msb/index.ts required
 extensions/pi-msb/labels.ts required
 extensions/pi-msb/locks.ts required
@@ -65,8 +64,8 @@ extensions/pi-msb/operations.ts required
 extensions/pi-msb/prune.ts required
 extensions/pi-msb/sandbox-manager.ts required
 extensions/pi-msb/skill-access.ts required
-extensions/pi-msb/storage.ts required
 extensions/pi-msb/tools.ts required
+extensions/pi-msb/workspace.ts required
 extensions/pi-msb/transport.ts required
 extensions/pi-msb/types.ts required
 native/flock/prebuilds/darwin-arm64/flock.node required
