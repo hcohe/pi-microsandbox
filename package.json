@@ -55,7 +55,7 @@
     "release-check": "npm run check && npm audit --omit=dev"
   },
   "dependencies": {
-    "microsandbox": "0.6.16"
+    "microsandbox": "0.6.18"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
