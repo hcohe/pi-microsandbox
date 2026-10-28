@@ -43,5 +43,8 @@ fetch_verified() {
     install_downloader
     curl --fail --location --proto '=https' --show-error --silent \
         "${url}" --output "${destination}"
-    printf '%s  %s\n' "${sha256}" "${destination}" | sha256sum --check --status
+    if ! printf '%s  %s\n' "${sha256}" "${destination}" | sha256sum --check; then
+        printf 'SHA-256 verification failed for %s (expected %s)\n' "${url}" "${sha256}" >&2
+        return 1
+    fi
 }

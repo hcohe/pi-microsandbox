@@ -167,8 +167,12 @@ lowercase letter, then use only lowercase letters, digits, and hyphens. Do not
 use path syntax, underscores, or the reserved names `base`, `default`,
 `dispatch`, or a name beginning with `_`.
 
-Pin downloaded tool versions. Record and verify SHA-256 checksums for both AMD64
-and ARM64 artifacts, using the helpers in `install/_common.sh`. Do not pipe
+Pin downloaded tool versions, including bootstrap installers such as rustup
+(currently 1.29.1). Use versioned archive URLs rather than mutable latest-download
+URLs so the artifact continues to match its pinned checksum. Checksum failures
+report the download URL and expected SHA-256 and stop the build; do not bypass
+verification to fix a failed download. Record and verify SHA-256 checksums for
+both AMD64 and ARM64 artifacts, using the helpers in `install/_common.sh`. Do not pipe
 network downloads into a shell. The verifier must test native functionality,
 not only version output. For example, compile and run a native extension or a
 small program. Add the language to the `default` variant's `toolchains` only if

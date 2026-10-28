@@ -7,6 +7,7 @@ install_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${install_dir}/_common.sh"
 
 rust_version="1.98.0"
+rustup_version="1.29.1"
 export CARGO_HOME=/usr/local/cargo
 export RUSTUP_HOME=/usr/local/rustup
 export PATH="${CARGO_HOME}/bin:${PATH}"
@@ -37,7 +38,7 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 rustup_init="${tmp_dir}/rustup-init"
 fetch_verified \
-    "https://static.rust-lang.org/rustup/dist/${rust_arch}-unknown-linux-gnu/rustup-init" \
+    "https://static.rust-lang.org/rustup/archive/${rustup_version}/${rust_arch}-unknown-linux-gnu/rustup-init" \
     "${rustup_sha256}" \
     "${rustup_init}"
 chmod 0755 "${rustup_init}"
