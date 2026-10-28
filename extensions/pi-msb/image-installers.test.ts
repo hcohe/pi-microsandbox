@@ -13,8 +13,7 @@ const common = fileURLToPath(new URL("../../default-image/install/_common.sh", i
 test("rustup uses an archived release matching both pinned platform checksums", () => {
   const installer = readFileSync(new URL("../../default-image/install/rust.sh", import.meta.url), "utf8");
   assert.match(installer, /^rustup_version="1\.29\.1"$/m);
-  assert.ok(installer.includes("https://static.rust-lang.org/rustup/archive/${rustup_version}/${rust_arch}-unknown-linux-gnu/rustup-init"));
-  assert.ok(!installer.includes("https://static.rust-lang.org/rustup/dist/"));
+  assert.match(installer, /^    "https:\/\/static\.rust-lang\.org\/rustup\/archive\/\$\{rustup_version\}\/\$\{rust_arch\}-unknown-linux-gnu\/rustup-init" \\$/m);
   assert.match(installer, /amd64\)[\s\S]*?rustup_sha256="dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71"/);
   assert.match(installer, /arm64\)[\s\S]*?rustup_sha256="15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"/);
 });
@@ -39,8 +38,9 @@ curl() {
     done
     return 1
 }
-# macOS ships shasum, whereas the Ubuntu image ships sha256sum.
-if ! command -v sha256sum >/dev/null 2>&1; then
+# The image uses GNU sha256sum. macOS's BSD command has a different
+# checksum-file CLI, so use the real shasum verifier there even if it exists.
+if [[ "$OSTYPE" == darwin* ]] || ! command -v sha256sum >/dev/null 2>&1; then
     sha256sum() { shasum -a 256 "$@"; }
 fi
 fetch_verified "$2" "$3" "$4"
