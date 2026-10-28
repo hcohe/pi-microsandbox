@@ -33,12 +33,12 @@ pi -e npm:pi-microsandbox
 You still review what the agent produces. The point is to spend your attention
 on the results rather than supervise every step along the way.
 
-## One workspace behavior
+## Workspace behavior
 
-There are no workspace modes. If Pi starts inside a Git worktree,
-pi-microsandbox mounts the whole worktree root read/write at the same lexical
-path in the guest. If Pi starts outside Git, it mounts the current working
-directory itself. Commands start in the original current working directory.
+If Pi starts inside a Git worktree, pi-microsandbox mounts the whole worktree
+root read/write at the same lexical path in the guest. If Pi starts outside
+Git, it mounts the current working directory itself. Commands start in the
+original current working directory.
 
 This is a VM boundary, not checkout isolation. The selected root is fully
 visible, including `.git`, secrets such as `.env`, untracked files, and sibling
