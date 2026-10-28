@@ -57,10 +57,16 @@ project needs, allow only the network hosts it should reach, and configure its
 extra file mounts and secrets. Another project can have a different setup,
 including no network access.
 
-Keep everyday defaults in global config and project-specific settings in
-`.pi-msb.toml`. Trusted project config layers over those defaults; environment
-variables and session overrides let you adjust a run without rewriting the
-project setup.
+Keep host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml` and
+shared project settings in `.pi-msb.toml`. For host-owned per-project overrides, use
+`~/.pi/agent/pi-microsandbox/projects/<home-relative-project-path>/.pi-msb.toml`.
+For example, `~/Code/pi-microsandbox` uses
+`~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml`.
+Host-owned defaults and project overrides take precedence over local config,
+environment variables, and session settings; project overrides win over the
+host defaults, and configured lists replace lower-layer lists. Pi's custom agent
+directory is respected. See [Configuration](docs/configuration.md#host-owned-project-overrides)
+for details and security-sensitive settings to pin.
 
 The agent gets an environment built for the job. Image cohorts built from this
 version include Docker Engine 29.8.0, Buildx 0.37.1, and Compose 5.5.1. The

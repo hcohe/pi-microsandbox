@@ -4,8 +4,9 @@
 
 The default is fail-closed:
 
-- A valid, trusted project configuration is resolved before a sandbox starts. A
-  boot, image, configuration, or tool failure blocks the seven routed tools
+- Configuration, including trusted local settings, host-owned defaults, and
+  project overrides, is resolved before a sandbox starts. A boot, image,
+  configuration, or tool failure blocks the seven routed tools
   (`read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash`). Failure never
   silently falls back to host execution.
 - `execution_target = "host"` is an opt-in escape for routed tool calls. While
@@ -38,6 +39,25 @@ The extension entry point does not import the native SDK or load the flock
 addon. Unsupported hosts can still load Pi and remain blocked or explicitly
 off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64
 with KVM; Windows, Intel macOS, and musl Linux are not supported.
+
+## Host-owned configuration
+
+A trusted local `.pi-msb.toml` is writable guest input, not an immutable host
+policy. Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
+under Pi's agent directory to pin security-sensitive fields outside the worktree.
+`pi-microsandbox/default.toml` applies to all projects; a host-owned per-project
+file overrides it. Both take precedence over local, environment, and session
+settings, and their lists replace rather than extend lower-layer lists.
+Unspecified settings are **not** locked. Missing overrides preserve the usual
+configuration behavior; unreadable or invalid overrides fail closed.
+
+Policy files may not reside in or symlink into the mounted workspace. While a
+host policy is active, extra writable mounts may not overlap its directory,
+including locations for project overrides not yet created. Keep policy and
+credential files outside writable mounts. A project override applies to one
+canonical workspace identity, not to arbitrary other workspaces or host
+processes. Explicit user host-mode controls remain available. Project trust also permits Pi to load project-local extensions;
+this configuration layer does not sandbox such host-side code.
 
 ## Docker inside the guest
 
