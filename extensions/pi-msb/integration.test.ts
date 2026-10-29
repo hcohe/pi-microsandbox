@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { DEFAULT_CONFIG } from "./config.ts";
@@ -121,6 +121,59 @@ async function temp(t: test.TestContext, prefix: string): Promise<string> {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
+
+test("host defaults and project policy survive local edits, reload, session overrides, and off/on", async (t) => {
+  const root = await temp(t, "host-config");
+  const cwd = join(root, "Code", "app");
+  await mkdir(cwd, { recursive: true });
+  initRepo(cwd);
+  const agentDir = join(root, "agent");
+  const defaultFile = join(agentDir, "pi-microsandbox", "default.toml");
+  const projectFile = join(agentDir, "pi-microsandbox", "projects", "Code", "app", ".pi-msb.toml");
+  await mkdir(dirname(projectFile), { recursive: true });
+  await writeFile(defaultFile, `
+bootstrap_tools = false
+prune_on_start = false
+fallback_mode = "block"
+allow_host_execution = false
+auto_start = true
+cpus = 3
+[docker]
+mode = "disabled"
+`);
+  await writeFile(projectFile, "cpus = 2\nmemory_mib = 2048");
+  const calls: string[] = [];
+  const integration = createMsbIntegration({
+    sessionId: "host-policy", cwd, configDirName: ".pi", agentDir,
+    env: { HOME: root, PI_MSB_FALLBACK_MODE: "host" },
+    sdkLoader: async () => fakeSdk(calls),
+    locksPort: { tryAcquire: async () => ({ path: "unused", release: async () => undefined }) },
+    acquireOwnerLock: async () => ({ path: "unused", release: async () => undefined }),
+  });
+  t.after(() => integration.manager.shutdown());
+  const state = await integration.configureSession({ sessionId: "host-policy", cwd, projectTrusted: true });
+  assert.equal(state.status, "active");
+  assert.ok(calls.includes("cpus:2"));
+  assert.equal(integration.configRef.value.fallbackMode, "block");
+  assert.equal(integration.configRef.value.allowHostExecution, false);
+  await writeFile(join(cwd, ".pi-msb.toml"), 'cpus = 64\nauto_start = false\nfallback_mode = "host"\nallow_host_execution = true');
+  await integration.control.reload();
+  assert.equal(integration.control.getState().status, "active");
+  assert.equal(integration.configRef.value.cpus, 2);
+  assert.equal(integration.configRef.value.fallbackMode, "block");
+  assert.equal(integration.configRef.value.allowHostExecution, false);
+  await integration.control.setOverride("cpus", 64);
+  assert.equal(integration.configRef.value.cpus, 2);
+  await integration.control.setEnabled(false);
+  await integration.control.setEnabled(true);
+  assert.equal(integration.configRef.value.cpus, 2);
+  await rm(projectFile);
+  await integration.control.reload();
+  assert.equal(integration.configRef.value.cpus, 3);
+  await writeFile(defaultFile, "cpus = 0");
+  await assert.rejects(integration.control.reload(), /cpus/);
+  assert.equal(integration.configRef.value.fallbackMode, "block");
+});
 
 function initRepo(repo: string): void {
   execFileSync("git", ["-C", repo, "init", "-q"]);

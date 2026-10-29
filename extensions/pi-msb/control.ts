@@ -64,6 +64,7 @@ export interface MsbControlOptions {
   sessionId: string;
   cwd: string;
   configDirName: string;
+  agentDir?: string;
   env?: NodeJS.ProcessEnv;
   sdkLoader?: () => Promise<MicrosandboxModule>;
   locksPort?: LocksPort;
@@ -488,7 +489,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   const resolveForSession = async (setup: SessionSetup, selected: Workspace): Promise<ResolvedConfig> => {
     if (setup.config) return setup.config;
-    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted: setup.projectTrusted, configDirName: options.configDirName, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted: setup.projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
   };
 
   const configureSession = async (setup: SessionSetup): Promise<RuntimeState> => {
@@ -556,7 +557,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           workspace = await discoverWorkspace(cwd);
           cwd = workspace.cwd;
           activeProjectRoot = workspace.guestRoot;
-          const next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+          const next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
           resolved = next;
           configReady = true;
           Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
@@ -580,7 +581,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         workspace = await discoverWorkspace(cwd);
         cwd = workspace.cwd;
         activeProjectRoot = workspace.guestRoot;
-        next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+        next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
       } catch (error) {
         configReady = false;
         if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
