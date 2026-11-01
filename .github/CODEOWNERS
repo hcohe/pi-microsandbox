@@ -10,6 +10,8 @@
 /.github/workflows/ @hcohe
 
 # Release, publication, packaging, and bundled native-addon automation.
+/release-please-config.json @hcohe
+/.release-please-manifest.json @hcohe
 /native/ @hcohe
 /scripts/*release* @hcohe
 /scripts/*publish* @hcohe
