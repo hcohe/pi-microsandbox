@@ -96,6 +96,66 @@ test("App-published releases hand off to the existing exact-artifact OIDC publis
   assert.deepEqual(publishers, ["release.yml"]);
 });
 
+test("release.yml verify installs once after identity validation and before importing config", () => {
+  const verify = release.match(/^  verify:\n[\s\S]*?(?=^  \S)/m)?.[0];
+  assert.ok(verify, "verify job must exist");
+  const steps = verify.split(/^      - name: /m).slice(1);
+  const names = steps.map(step => step.split("\n")[0]);
+  const identity = names.indexOf("Verify repository, tag, and package identity");
+  const install = names.indexOf("Install dependencies without lifecycle scripts");
+  const config = names.indexOf("Resolve the configured default image release");
+  assert.ok(identity >= 0 && identity < install && install < config);
+  assert.equal(steps[install]!.trim(),
+    "Install dependencies without lifecycle scripts\n        run: npm ci --ignore-scripts=true");
+  assert.equal([...verify.matchAll(/\bnpm ci\b/g)].length, 1);
+  assert.match(steps[config]!, /import \{ DEFAULT_CONFIG \} from "\.\/extensions\/pi-msb\/config\.ts";/);
+
+  let previous = config;
+  for (const name of [
+    "Verify provenance for the immutable image cohort",
+    "Recheck public image tags are unchanged",
+    "Run release checks",
+    "Reject generated or dirty files",
+    "Pack the release artifact once",
+    "Smoke-test the exact release artifact",
+  ]) {
+    const index = names.indexOf(name);
+    assert.ok(index > previous, `${name} must remain a downstream release gate`);
+    previous = index;
+  }
+  assert.match(verify, /^        run: npm run release-check$/m);
+  assert.doesNotMatch(verify, /id-token: write|continue-on-error:/);
+});
+
+test("release.yml identity Node check needs no dependencies; config import runs with installed dependencies", () => {
+  const identity = release.match(/node <<'NODE'\n([\s\S]*?)^          NODE$/m)?.[1];
+  const config = release.match(/image_reference="\$\(node --experimental-strip-types --input-type=module <<'NODE'\n([\s\S]*?)^          NODE$/m)?.[1];
+  assert.ok(identity);
+  assert.ok(config);
+  const dir = mkdtempSync(join(tmpdir(), "release-identity-"));
+  try {
+    // Identity validation precedes npm ci, so it must work with only package.json.
+    const pkg = read("package.json");
+    writeFileSync(join(dir, "package.json"), pkg);
+    const output = join(dir, "output");
+    const result = spawnSync(process.execPath, ["--input-type=commonjs"], {
+      input: identity, cwd: dir, encoding: "utf8",
+      env: { ...process.env, RELEASE_TAG: `v${JSON.parse(pkg).version}`, GITHUB_OUTPUT: output },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(output, "utf8"), `name=pi-microsandbox\nversion=${JSON.parse(pkg).version}\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // Unlike identity validation, importing config loads runtime package imports.
+  // Exercise the actual workflow heredoc after install, without any image lookup.
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module"], {
+    input: config, cwd: root, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^ghcr\.io\/hcohe\/pi-microsandbox:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
+});
+
 const repo = "hcohe/pi-microsandbox";
 const appSlug = "pi-microsandbox-release";
 const head = "release-please--branches--main";
