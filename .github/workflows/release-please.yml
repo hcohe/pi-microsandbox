@@ -1,0 +1,58 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# All mutations use the repository-scoped App token, never GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-pi-microsandbox
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: >-
+      github.repository == 'hcohe/pi-microsandbox' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create repository-scoped release token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      # App-authored releases trigger release.yml; GITHUB_TOKEN releases do not.
+      - name: Update release PR or publish merged release
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          target-branch: main
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Execute only the trusted workflow commit, never the release PR checkout.
+      - name: Check out auto-merge helper from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Enable squash auto-merge for returned release PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: hcohe/pi-microsandbox
+          RELEASE_PLEASE_PRS: ${{ steps.release.outputs.prs }}
+          RELEASE_PLEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: node scripts/release-please-auto-merge.mjs

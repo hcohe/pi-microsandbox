@@ -181,16 +181,229 @@ they cannot be validated during a Dockerfile build.
 
 ## Releases
 
-[GitHub Releases](https://github.com/hcohe/pi-microsandbox/releases) are the
-canonical changelog. The first npm publication is a human-run local publish of
-the reviewed tarball with interactive npm 2FA. Subsequent releases publish
-directly to npm with OIDC only after a maintainer publishes the matching GitHub
-Release and approves the protected `npm` GitHub Environment. Release automation
-must not use a long-lived npm token. Release CI builds every flock artifact from
-the release commit, assembles a temporary staging tree, records each binary's
-SHA-256, smoke-tests the exact tarball on every supported target, and packs only
-once. The publish job downloads and publishes those verified bytes without
-repacking.
+[GitHub Releases](https://github.com/hcohe/pi-microsandbox/releases) remain the
+canonical changelog; Release Please also maintains a generated `CHANGELOG.md`.
+Package releases use `vX.Y.Z` tags without a component prefix.
+
+### One-time Release Please setup
+
+The following documents the required setup and recovery paths. Repository
+auto-merge, main protection, App credentials, and the creation-only App tag
+exception are configured. Verify existing settings rather than recreating them.
+Feature PRs remain a human merge gate; release PRs merge unattended once required
+CI passes. Do not weaken protections to test a release.
+
+#### Create and install the release App
+
+1. Open your GitHub avatar menu → **Settings** → **Developer settings** →
+   **GitHub Apps** → **New GitHub App**:
+   <https://github.com/settings/apps/new>.
+2. Choose a unique App name and set **Homepage URL** to
+   `https://github.com/hcohe/pi-microsandbox`. Under **Webhook**, clear **Active**;
+   this workflow needs no webhook or webhook secret. No callback URL or user
+   authorization is needed. Under **Repository permissions**, set **Contents**,
+   **Issues**, and **Pull requests** to **Read and write**; leave other optional
+   permissions unset. Choose **Only on this account** for installation scope,
+   then **Create GitHub App**.
+3. On the App's **General** page, record both **App ID** (numeric) and **Client
+   ID** (a different value, commonly beginning `Iv`). Under **Private keys**,
+   click **Generate a private key** and securely save the downloaded PEM. Never
+   commit it. The workflow variable takes the **Client ID**, not the numeric
+   App ID. Ruleset integration selection uses the installed App's name; its
+   underlying integration/actor ID is the numeric **App ID**, not Client ID or
+   installation ID. Find these again at
+   <https://github.com/settings/apps> → your App → **General**.
+4. In the App sidebar, click **Install App** → **Install** for `hcohe` →
+   **Only select repositories** → select **pi-microsandbox** → **Install**.
+   Do not install it on all repositories. Manage the installation later at
+   <https://github.com/settings/installations>.
+5. In the repository, **Settings** → **Secrets and variables** → **Actions**
+   (<https://github.com/hcohe/pi-microsandbox/settings/secrets/actions>):
+   - **Variables** → **New repository variable**: name
+     `RELEASE_PLEASE_APP_CLIENT_ID`, value the App's **Client ID**
+     (<https://github.com/hcohe/pi-microsandbox/settings/variables/actions>).
+   - **Secrets** → **New repository secret**: name
+     `RELEASE_PLEASE_APP_PRIVATE_KEY`, value the entire PEM, including the
+     `BEGIN`/`END` lines and line breaks.
+
+The workflow requests a short-lived App token restricted to this repository and
+those three permissions. Missing credentials fail closed; there is no
+`GITHUB_TOKEN` fallback. App-authored PRs run CI and App-published releases
+trigger the npm workflow. The Actions setting **Allow GitHub Actions to create
+and approve pull requests** governs `GITHUB_TOKEN`, not this App; it is not a
+substitute for installation, and self-approval is neither needed nor used.
+
+#### Repository merging and main protection
+
+The repository settings below are already applied; use these paths to verify
+or restore the intended policy, not to relax it.
+
+**Settings** → **Actions** → **General** uses a selected-actions allowlist.
+Keep GitHub-owned actions allowed and `googleapis/release-please-action@*` in the
+allowed patterns alongside the existing Docker actions. This entry has already
+been added; do not switch to allowing all actions. Workflow references remain
+pinned to full commit SHAs.
+
+1. **Settings** → **General** → **Pull Requests**
+   (<https://github.com/hcohe/pi-microsandbox/settings>): enable **Allow squash
+   merging** and **Allow auto-merge**. Auto-merge availability is repository-wide,
+   but this workflow enables it only for Release Please's explicitly returned
+   release PR. Maintainers continue to decide when feature PRs merge.
+2. **Settings** → **Branches** → the `main` protection rule → **Edit**
+   (<https://github.com/hcohe/pi-microsandbox/settings/branches>): keep **Require
+   a pull request before merging** enabled. For the solo-maintainer setup, clear
+   **Require approvals** (zero approvals); leave code-owner approval and approval
+   of the last push disabled. CODEOWNERS still records ownership.
+3. Keep **Require status checks to pass before merging** and **Require branches
+   to be up to date before merging** enabled. Preserve the GitHub Actions-sourced
+   required checks below; do not configure auto-merge with zero required checks:
+   - `Check (ubuntu-latest, Node 22.19.0)`
+   - `Check (ubuntu-latest, Node 24.x)`
+   - `Check (macos-latest, Node 22.19.0)`
+   - `Check (macos-latest, Node 24.x)`
+   - `Native flock (darwin-arm64)`
+   - `Native flock (linux-x64-gnu)`
+   - `Native flock (linux-arm64-gnu)`
+   - `Assemble and smoke-test package`
+   - `CodeQL (JavaScript/TypeScript)`
+   - `CodeQL (C flock addon)`
+   - `Dependency Review`
+4. Keep **Require linear history**, **Require conversation resolution before
+   merging**, and **Do not allow bypassing the above settings** enabled. Leave
+   force pushes and branch deletion disabled; do not add the App (or an admin)
+   to any branch bypass list or **Allow specified actors to bypass required pull
+   requests**. Save changes. The App must satisfy the same main protection as
+   the maintainer; it cannot push a release commit directly to `main`.
+
+#### Package-tag creation versus immutability
+
+Do this only after the App exists and is installed; never guess its numeric ID.
+Under **Settings** → **Rules** → **Rulesets**
+(<https://github.com/hcohe/pi-microsandbox/settings/rules>), keep two active tag
+rulesets targeting `v*` (API pattern `refs/tags/v*`, no exclusions):
+
+- **Package release tag creation**: only **Restrict creations**; bypass actors
+  are the existing human release owner plus the installed release App.
+- **Package release tags** (existing ID `23345899`): only **Restrict updates**
+  and **Restrict deletions**; preserve the existing human exception, with **no
+  App bypass**. This is immutability against automation, not against the human
+  release owner.
+
+The administrator has already split the original combined ruleset, preserving
+its exact human bypass (`hcohe`, not all admins). **Package release tag creation**
+is active, creation-only, ID `26100334`; **Package release tags** ID `23345899`
+is active, update/delete-only. The release App has an exception only in the
+creation ruleset. Do not recreate or split these again. The original combined
+rule blocked App creation;
+adding the App to that combined rule would also have allowed tag mutation.
+
+For future recreation only: create the active creation-only rule with the same
+exact human exception before removing creation from the old rule. Preserve
+update/delete protection continuously. If the UI cannot preserve the existing
+individual-user exception, an administrator must preserve it through the rulesets
+API rather than broadening it to an admin role. Never disable the immutability
+rule or grant the App its bypass.
+
+Once the human-preserving split is present, the App setup is entirely in the UI:
+
+1. Open **Package release tag creation**
+   (<https://github.com/hcohe/pi-microsandbox/rules/26100334>) → **Edit**
+   (or select it under **Settings** → **Rules** → **Rulesets**). Confirm
+   **Active**, target `v*`, and **Restrict creations** only.
+2. **Bypass list** → **Add bypass** → search for the installed App's name →
+   select the App → **Add Selected**. Keep **Always allow** (tag creation is not
+   a PR operation). Verify the selected integration is the release App recorded
+   above, not an admin role, and **Save changes**.
+3. Open **Package release tags**
+   (<https://github.com/hcohe/pi-microsandbox/settings/rules/23345899>).
+   Confirm **Restrict updates** and **Restrict deletions** remain enabled,
+   **Restrict creations** is off, and its bypass list still contains only the
+   existing human exception. Do not add the App here or to `main` protections.
+4. Leave **Sandbox image release tags** and all `image-v*` protection unchanged.
+   The package App does not need image-tag bypass.
+
+See GitHub's [ruleset UI guide](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
+Do not publish a real release merely to test these settings.
+
+#### npm trusted publishing and environment
+
+1. Open <https://www.npmjs.com/package/pi-microsandbox/access> (package
+   **Settings**) → **Trusted Publisher** → **GitHub Actions**. Keep the existing
+   publisher (edit rather than adding a different publishing path):
+   - **Organization or user**: `hcohe`
+   - **Repository**: `pi-microsandbox`
+   - **Workflow filename**: `release.yml` — filename only, **not**
+     `.github/workflows/release.yml`
+   - **Environment name**: `npm`
+   - If **Allowed actions** is shown, permit direct **npm publish**, as used by
+     this workflow (not only staged publishing).
+   Save/confirm the settings. See the
+   [npm trusted-publisher documentation](https://docs.npmjs.com/trusted-publishers/).
+2. GitHub repository **Settings** → **Environments** → **npm**
+   (<https://github.com/hcohe/pi-microsandbox/settings/environments>): under
+   **Deployment protection rules**, leave **Required reviewers** unset. Under
+   **Deployment branches and tags**, select **Selected branches and tags**;
+   keep a **Tag** rule `v*` only, with no branch rules or other tag patterns.
+   Keep the environment itself; do not change it to all branches/tags.
+
+The npm environment's reviewer gate has been removed for unattended publishing;
+verify the tag-only restriction remains. No npm token or `NODE_AUTH_TOKEN` is
+needed: the existing publisher uses OIDC from `release.yml`'s `npm` job.
+
+### Release flow and recovery
+
+Squash-merge PRs with accurate Conventional Commit titles: `fix: ...` bumps
+patch, `feat: ...` bumps minor, and `feat!: ...` (or a `BREAKING CHANGE:` footer)
+bumps minor before 1.0, major thereafter. Nonreleasable commits such as `chore:`
+and `test:` alone do not generate a release. On pushes to `main`, Release Please
+opens or updates a release PR containing `package.json`, `package-lock.json`,
+`.release-please-manifest.json`, and `CHANGELOG.md` updates. Review its version
+and notes before enabling this setup. Thereafter the workflow automatically
+enables squash auto-merge only for the new/updated PR returned by Release
+Please, after verifying its number, head branch, same-repository base/head,
+`main` base, open/non-draft state, the configured App's bot authorship, and current
+head SHA. GitHub waits for the
+required checks and up-to-date policy (or merges immediately if already
+satisfied); there is no polling, self-approval, or admin bypass. The merge is
+guarded by that observed head SHA when requested. Later authorized branch
+updates still require checks on the new head; auto-merge is not a permanent
+commit pin. The resulting push to `main` runs Release Please again; the App tags and publishes the GitHub Release, whose
+`release.published` event starts `release.yml`.
+After artifact and image verification passes, the `npm` environment allows OIDC
+publication automatically; no separate environment approval is required.
+The human gate is merging releasable feature/fix PRs, not manually merging each
+release PR. `docs:`, `chore:`, and `test:` changes alone do not publish; not every
+merge produces a package. Enabling release auto-merge authorizes real releases,
+so do not use a release PR to test the setup.
+
+Adoption starts from the existing `v0.3.0` release. Some unreleased commits have
+non-conventional messages and may be omitted. Review actual changes since that
+tag before enabling unattended release-PR merging; do not invent release notes.
+For an existing squash-merged PR, Release Please supports an accurate conventional
+message between `BEGIN_COMMIT_OVERRIDE` and `END_COMMIT_OVERRIDE` in its edited
+PR body; plain merge commits do not support this override. Review any remaining
+omissions explicitly in the generated release PR.
+
+For recovery, manually dispatch **Release Please** on `main` only; other branches
+and forks are guarded out. The pinned action emits `prs` for newly created or
+updated PRs, but emits no candidate for an unchanged existing PR. A dispatch
+therefore cannot re-enable auto-merge on an unchanged PR if the prior merge step
+failed or auto-merge was disabled. Inspect that exact release PR in the UI,
+verify its branches/version/notes and checks, then choose **Enable auto-merge**
+with **Squash and merge** as a human recovery action. Never scan all open PRs
+and auto-merge by title/label, weaken required checks, or use an admin bypass.
+A head change between verification and the merge request fails the workflow;
+inspect/recover rather than removing the head-SHA guard. If GitHub disables
+auto-merge after a later push, verify the new head and enable it again. If no
+release-published workflow appears, check the merged release PR and Release
+Please run on `main` first, then dispatch there to recover tagging/publication;
+never create a replacement tag/event with `GITHUB_TOKEN`. If npm publication
+fails, rerun the existing failed npm workflow/jobs when safe, preserving the
+verified artifact. Do not repack, move tags, or create a replacement release to retry; npm versions are immutable.
+Release CI builds every flock artifact from the release commit, assembles a
+temporary staging tree, records each binary's SHA-256, smoke-tests the exact
+tarball on every supported target, and packs only once. The publish job downloads
+and publishes those verified bytes without repacking.
 
 The sandbox image workflow publishes all six AMD64 and ARM64 variants to
 `ghcr.io/hcohe/pi-microsandbox`. An `image-vX.Y.Z` Git tag publishes the
@@ -201,11 +414,9 @@ only. The workflow refuses to overwrite an existing version tag.
 
 Image and package releases are independent. Publish and verify an image cohort
 before changing the extension default to its `VERSION@sha256:DIGEST` reference.
-For the initial release, publish `image-v1.0.0`, pin its default-image digest,
-then release package `v0.1.0`. The npm workflow requires that digest-qualified
-reference, checks it against the public default tag, checks every variant and
-both platforms against the image tag commit, and verifies image provenance
-before publishing. A package
+The npm workflow requires that digest-qualified reference, checks it against the
+public default tag, checks every variant and both platforms against the image
+tag commit, and verifies image provenance before publishing. A package
 administrator must make the GHCR package public before the package release so
 both release verification and Microsandbox can pull it without registry
 credentials.
