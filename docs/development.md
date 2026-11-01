@@ -398,8 +398,14 @@ auto-merge after a later push, verify the new head and enable it again. If no
 release-published workflow appears, check the merged release PR and Release
 Please run on `main` first, then dispatch there to recover tagging/publication;
 never create a replacement tag/event with `GITHUB_TOKEN`. If npm publication
-fails, rerun the existing failed npm workflow/jobs when safe, preserving the
-verified artifact. Do not repack, move tags, or create a replacement release to retry; npm versions are immutable.
+fails for a transient reason, rerun the existing failed npm workflow/jobs when
+safe, preserving the verified artifact. Do not repack, move tags, or create a
+replacement release merely to retry; npm versions are immutable.
+If a workflow or code defect caused the failure, land a reviewed fix and let
+Release Please create a fresh patch release instead of rerunning the unchanged
+bad tag. Keep the failed tag and GitHub Release immutable; do not retag or repack.
+A GitHub Release is not proof of npm publication: `v0.4.0` failed verification
+before packing, and npm `0.4.0` was not published.
 Release CI builds every flock artifact from the release commit, assembles a
 temporary staging tree, records each binary's SHA-256, smoke-tests the exact
 tarball on every supported target, and packs only once. The publish job downloads

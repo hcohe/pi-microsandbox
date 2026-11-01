@@ -260,6 +260,9 @@ jobs:
           );
           NODE
 
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts=true
+
       - name: Resolve the configured default image release
         id: image
         shell: bash
@@ -430,9 +433,6 @@ jobs:
               exit 1
             fi
           done < "$resolved"
-
-      - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts=true
 
       - name: Run release checks
         run: npm run release-check
