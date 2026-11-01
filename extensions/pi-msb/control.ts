@@ -5,6 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   applyOverride,
   DEFAULT_CONFIG,
+  ensureDefaultHostConfig,
   isDisabledByEnv,
   overridesToToml,
   resolveConfig,
@@ -487,9 +488,9 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     }
     return result;
   };
-  const resolveForSession = async (setup: SessionSetup, selected: Workspace): Promise<ResolvedConfig> => {
-    if (setup.config) return setup.config;
-    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted: setup.projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+  const resolveForWorkspace = async (selected: Workspace): Promise<ResolvedConfig> => {
+    await ensureDefaultHostConfig(selected.guestRoot, options.agentDir);
+    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
   };
 
   const configureSession = async (setup: SessionSetup): Promise<RuntimeState> => {
@@ -509,7 +510,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       workspace = await discoverWorkspace(cwd);
       cwd = workspace.cwd;
       activeProjectRoot = workspace.guestRoot;
-      next = await resolveForSession(setup, workspace);
+      next = setup.config ?? await resolveForWorkspace(workspace);
     } catch (error) {
       failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
       notifyState(failureState);
@@ -557,7 +558,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           workspace = await discoverWorkspace(cwd);
           cwd = workspace.cwd;
           activeProjectRoot = workspace.guestRoot;
-          const next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+          const next = await resolveForWorkspace(workspace);
           resolved = next;
           configReady = true;
           Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
@@ -581,7 +582,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         workspace = await discoverWorkspace(cwd);
         cwd = workspace.cwd;
         activeProjectRoot = workspace.guestRoot;
-        next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+        next = await resolveForWorkspace(workspace);
       } catch (error) {
         configReady = false;
         if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };

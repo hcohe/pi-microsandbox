@@ -70,7 +70,7 @@ allow_hosts = ["project.example"]
   assert.equal(result.provenance.memoryMiB, "host-default");
 });
 
-test("host defaults replace local lists and resolve their own relative secret references", async () => {
+test("host defaults ignore local lists and resolve their own relative secret references", async () => {
   const files = new Map([
     [localFile, `
 pass_through_tools = ["unsafe"]
@@ -182,7 +182,7 @@ test("host policy loads for untrusted projects and resolves relative secret file
   assert.equal(result.config.memoryMiB, 2048);
   assert.equal(result.config.cpus, 2);
   assert.equal(result.config.secrets[0]?.value, `$FILE:${dirname(policyFile)}/token`);
-  assert.match(result.warnings.join("\n"), /not trusted/);
+  assert.deepEqual(result.warnings, []);
 });
 
 test("missing host policy preserves existing precedence and unspecified fields", async () => {
@@ -192,7 +192,7 @@ test("missing host policy preserves existing precedence and unspecified fields",
   files.set(policyFile, "cpus = 2");
   const result = await resolveConfig(input);
   assert.equal(result.config.memoryMiB, 4096);
-  assert.equal(result.config.network.mode, "deny");
+  assert.equal(result.config.network.mode, "default");
   assert.equal(result.config.cpus, 2);
 });
 

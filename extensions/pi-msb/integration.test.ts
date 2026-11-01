@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -322,6 +322,65 @@ test("legacy same-session sandbox is removed and recreated, never reconnected", 
   assert.equal(calls.includes(`connect:${name}`), false);
   assert.equal(calls.some((call) => /Volume|volume-remove/.test(call)), false);
   await integration.manager.shutdown();
+});
+
+test("session setup bootstraps only on first enabled session and ignores obsolete local policy", async (t) => {
+  const root = await temp(t, "bootstrap-lifecycle");
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const file = join(agentDir, "pi-microsandbox/default.toml");
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  await writeFile(join(cwd, ".pi-msb.toml"), 'mode = "git"\n[[malformed');
+  await writeFile(join(cwd, ".pi/msb.toml"), 'cpus = 0\nfallback_mode = "host"');
+  let loads = 0;
+  const env = { PI_MSB_AUTO_START: "false", PI_MSB_CPUS: "3", PI_MSB_DISABLE: "1" };
+  const integration = createMsbIntegration({
+    sessionId: "bootstrap", cwd, agentDir, configDirName: ".pi", env,
+    sdkLoader: async () => { loads++; return fakeSdk([]); },
+  });
+  await assert.rejects(stat(file), { code: "ENOENT" });
+  assert.equal((await integration.configureSession({ sessionId: "bootstrap", cwd, projectTrusted: true })).status, "off");
+  await assert.rejects(stat(file), { code: "ENOENT" });
+  env.PI_MSB_DISABLE = "0";
+  assert.equal((await integration.configureSession({ sessionId: "bootstrap", cwd, projectTrusted: true })).status, "off");
+  const template = await readFile(file, "utf8");
+  assert.match(template, /pi-microsandbox host-owned configuration/);
+  assert.equal(integration.configRef.value.cpus, 3);
+  assert.equal(loads, 0);
+  await writeFile(file, "cpus = 2\n");
+  await integration.control.reload();
+  assert.equal(integration.configRef.value.cpus, 2);
+  assert.equal(await readFile(file, "utf8"), "cpus = 2\n");
+  await writeFile(file, "");
+  await integration.configureSession({ sessionId: "bootstrap-next", cwd, projectTrusted: false });
+  assert.equal(await readFile(file, "utf8"), "");
+  assert.equal(integration.configRef.value.cpus, 3);
+  assert.equal(loads, 0);
+});
+
+test("bootstrap failures block setup and explicit on even when environment requests host fallback", async (t) => {
+  const root = await temp(t, "bootstrap-failure");
+  const cwd = join(root, "project");
+  await mkdir(cwd);
+  const unusableAgent = join(root, "not-a-directory");
+  await writeFile(unusableAgent, "preserve this");
+  for (const agentDir of [unusableAgent, join(cwd, "agent")]) {
+    let loads = 0;
+    const integration = createMsbIntegration({
+      sessionId: "blocked-bootstrap", cwd, agentDir, configDirName: ".pi",
+      env: { PI_MSB_FALLBACK_MODE: "host" },
+      sdkLoader: async () => { loads++; return fakeSdk([]); },
+    });
+    const state = await integration.configureSession({ sessionId: "blocked-bootstrap", cwd, projectTrusted: true });
+    assert.equal(state.status, "unavailable");
+    assert.match(state.reason ?? "", /host configuration/);
+    await integration.control.setEnabled(true);
+    assert.equal(integration.provider.getState().status, "unavailable");
+    await assert.rejects(integration.provider.withRuntime(async () => undefined));
+    assert.equal(loads, 0);
+  }
+  assert.equal(await readFile(unusableAgent, "utf8"), "preserve this");
+  await assert.rejects(stat(join(cwd, "agent")), { code: "ENOENT" });
 });
 
 test("network and port behavior remains independent of workspace storage", async (t) => {

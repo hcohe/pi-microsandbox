@@ -37,11 +37,12 @@ test("defaults and precedence are deterministic", async () => {
   const result = await resolveConfig({
     cwd: "/repo/src", repoRoot: "/repo", projectTrusted: true, configDirName: "pi",
     xdgConfigHome: "/cfg", env: { PI_MSB_MEMORY_MIB: "3072" },
+    realpath: async (path) => path,
     readFile: async (path) => files.get(path) ?? null,
     exists: async (path) => files.has(path),
   });
   assert.equal(result.config.memoryMiB, 3072);
-  assert.equal(result.config.network.mode, "deny");
+  assert.equal(result.config.network.mode, "default");
   assert.deepEqual(result.config.routeTools, DEFAULT_CONFIG.routeTools);
   assert.equal(result.provenance.memoryMiB, "env");
   assert.equal("volumeQuotaMiB" in result.config, false);
@@ -103,22 +104,24 @@ test("default configuration is deeply immutable", () => {
   assert.equal(DEFAULT_CONFIG.routeTools.includes("malicious-tool"), false);
 });
 
-test("untrusted project configuration is skipped", async () => {
-  const result = await resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? "memory_mib = 9999" : null,
-  });
-  assert.equal(result.config.memoryMiB, DEFAULT_CONFIG.memoryMiB);
-  assert.match(result.warnings.join("\n"), /not trusted/);
-});
-
-test("removed workspace settings in untrusted project config still fail closed", async () => {
-  await assert.rejects(resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? '"\\u006dode" = "git"' : null,
-  }), /mode was removed.*bind-mounts.*read\/write/);
+test("worktree config is never probed or read regardless of trust, syntax, or removed selectors", async () => {
+  for (const projectTrusted of [false, true]) {
+    for (const text of ['memory_mib = 9999', '"\\u006dode" = "git"', '[[malformed', '__proto__.unsafe = true']) {
+      const files = new Map([
+        ["/repo/.pi-msb.toml", text], ["/repo/pi/msb.toml", text],
+        ["/repo/packages/app/.pi-msb.toml", text], ["/repo/packages/app/pi/msb.toml", text],
+        ["/.pi-msb.toml", text], ["/pi/msb.toml", text],
+      ]);
+      const result = await resolveConfig({
+        cwd: "/repo/packages/app", repoRoot: "/repo", projectTrusted, configDirName: "pi", env: {},
+        exists: async () => { assert.fail("worktree discovery must not run"); },
+        readFile: async (path) => { assert.equal(files.has(path), false, `must not read ${path}`); return null; },
+        realpath: async (path) => path,
+      });
+      assert.equal(result.config.memoryMiB, DEFAULT_CONFIG.memoryMiB);
+      assert.deepEqual(result.warnings, []);
+    }
+  }
 });
 
 test("identity arrays replace and remove safely", () => {
@@ -242,20 +245,19 @@ test("route fields reject unknown tools and the legacy host path env alias is ac
   assert.equal(resolved.config.mounts[0]?.guestPath, "/outside/one");
 });
 
-test("trusted project mounts use realpaths for repository containment", async () => {
-  const rejected = resolveConfig({
+test("host-side session mounts canonicalize sources and fail closed on missing sources", async () => {
+  const input = {
     cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? 'mounts = [{ host_path = "/repo/link", guest_path = "/outside/mount", readonly = false }]' : null,
-    realpath: async (path) => path === "/repo/link" ? "/outside/secret" : path,
-  });
-  await assert.rejects(rejected, (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("outside the repository")));
-  await assert.rejects(resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? 'mounts = [{ host_path = "/repo/link", guest_path = "/outside/mount" }]' : null,
-    realpath: async () => { throw new Error("cannot resolve"); },
-  }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("canonicalized")));
+    cliOverridesToml: 'mounts = [{ host_path = "/repo/link", guest_path = "/outside/mount", readonly = false }]',
+    readFile: async () => null,
+    realpath: async (path: string) => path === "/repo/link" ? "/outside/secret" : path,
+    stat: async () => ({ isSocket: () => false }),
+  };
+  assert.equal((await resolveConfig(input)).config.mounts[0]?.hostPath, "/outside/secret");
+  await assert.rejects(resolveConfig({ ...input, realpath: async (path) => {
+    if (path === "/repo/link") throw new Error("missing mount source");
+    return path;
+  } }), /canonicalized/);
 });
 
 test("mounts cannot shadow reserved tmp, Docker runtime, or the project mount", async () => {
@@ -411,37 +413,27 @@ test("overrides round trip and secret references never leak on errors", async ()
   await assert.rejects(() => resolveSecretValue("$ENV:MISSING", {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("MISSING"));
 });
 
-test("project-relative secret files use the canonical path approved by policy", async () => {
-  const projectConfig = "/repo/packages/app/.pi-msb.toml";
-  const referencedPath = "/repo/packages/app/secrets/token";
-  const canonicalPath = "/repo/private/token";
+test("explicit legacy global files remain supported only outside the workspace", async () => {
+  for (const file of ["/repo/.pi-msb.toml", "pi/msb.toml", "/host/link.toml"]) {
+    await assert.rejects(resolveConfig({
+      cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi",
+      env: { PI_MSB_CONFIG_FILE: file },
+      readFile: async (path) => path.endsWith("config.toml") ? null : '[[malformed',
+      realpath: async (path) => path === "/host/link.toml" ? "/repo/policy.toml" : path,
+    }), /global configuration must be outside.*migrate/);
+  }
   const result = await resolveConfig({
-    cwd: "/repo/packages/app/src", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    homedir: "/home/test", xdgConfigHome: "/cfg",
-    exists: async (path) => path === projectConfig,
-    readFile: async (path) => path === projectConfig
-      ? '[[secrets]]\nenv="TOKEN"\nvalue="$FILE:secrets/token"\nallow_hosts=["api.example"]'
-      : null,
-    realpath: async (path) => path === referencedPath ? canonicalPath : path,
+    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi",
+    env: { PI_MSB_CONFIG_FILE: "/host/policy.toml", PI_MSB_CPUS: "3" },
+    readFile: async (path) => path === "/host/policy.toml" ? 'cpus = 2\nmemory_mib = 2048' : null,
+    realpath: async (path) => path,
   });
-
-  assert.equal(result.config.secrets[0]?.value, `$FILE:${canonicalPath}`);
-  let readPath = "";
-  assert.equal(await resolveSecretValue(result.config.secrets[0]!.value, {}, async (path) => {
-    readPath = path;
-    return "secret-value";
-  }), "secret-value");
-  assert.equal(readPath, canonicalPath);
-});
-
-test("trusted project literal secrets warn without leaking their value", async () => {
-  const result = await resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? '[[secrets]]\nenv="TOKEN"\nvalue="super-secret-literal"\nallow_hosts=["api.example"]' : null,
-  });
-  assert.ok(result.warnings.some((warning) => /literal secret/i.test(warning)));
-  assert.doesNotMatch(result.warnings.join("\\n"), /super-secret-literal/);
+  assert.equal(result.config.cpus, 3);
+  assert.equal(result.config.memoryMiB, 2048);
+  await assert.rejects(resolveConfig({
+    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
+    xdgConfigHome: "/repo/config", readFile: async () => 'cpus = 0', realpath: async (path) => path,
+  }), /global configuration must be outside.*migrate/);
 });
 
 test("open mode warning and empty secret host hard fail", async () => {

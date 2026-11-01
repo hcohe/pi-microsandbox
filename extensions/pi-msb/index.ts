@@ -117,8 +117,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     currentContext = ctx;
     updateStatus(ctx, { status: "booting", info: null });
     try {
-      // configureSession discovers the workspace once before project config
-      // resolution, and passes that same identity through sandbox boot.
+      // Discover the workspace before host config bootstrap/resolution, then
+      // pass that same identity through sandbox boot. Bare loads never write.
       const state = await integration.configureSession({
         sessionId: ctx.sessionManager.getSessionId(),
         cwd: ctx.cwd,

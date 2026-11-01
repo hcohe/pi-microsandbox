@@ -53,6 +53,7 @@ docs/storage.md required
 docs/troubleshooting.md required
 extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
+extensions/pi-msb/config-template.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/footer.ts required
 extensions/pi-msb/flock.ts required

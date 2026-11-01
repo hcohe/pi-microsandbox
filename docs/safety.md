@@ -4,8 +4,8 @@
 
 The default is fail-closed:
 
-- Configuration, including trusted local settings, host-owned defaults, and
-  project overrides, is resolved before a sandbox starts. A boot, image,
+- Configuration, including host-owned defaults and project overrides, is
+  resolved before a sandbox starts. A boot, image,
   configuration, or tool failure blocks the seven routed tools
   (`read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash`). Failure never
   silently falls back to host execution.
@@ -22,8 +22,8 @@ The default is fail-closed:
   bundled POSIX addon is loaded lazily, has no install script, and never falls
   back to a racy PID check.
 
-There are no workspace modes. Inside a Git worktree, pi-microsandbox
-bind-mounts the entire worktree root read/write at the same lexical guest path.
+Inside a Git worktree, pi-microsandbox bind-mounts the entire worktree root
+read/write at the same lexical guest path.
 Outside Git, it bind-mounts the current directory. Commands start in the
 original current directory, but their path boundary is the selected root.
 
@@ -42,16 +42,20 @@ with KVM; Windows, Intel macOS, and musl Linux are not supported.
 
 ## Host-owned configuration
 
-A trusted local `.pi-msb.toml` is writable guest input, not an immutable host
-policy. Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
-under Pi's agent directory to pin security-sensitive fields outside the worktree.
+Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
+under Pi's agent directory to pin security-sensitive fields. Keep configuration
+outside the mounted worktree and all writable mounts.
+The first enabled session creates a missing `default.toml` as a fully commented
+reference, not an active policy; existing files (even empty ones) are preserved.
+New files use mode `0600`, new directories `0700`, and setup errors block startup.
 `pi-microsandbox/default.toml` applies to all projects; a host-owned per-project
-file overrides it. Both take precedence over local, environment, and session
-settings, and their lists replace rather than extend lower-layer lists.
+file overrides it. Both take precedence over environment and session settings,
+and their lists replace rather than extend lower-layer lists. `PI_MSB_*`
+environment variables and session `/msb` controls are also supported.
 Unspecified settings are **not** locked. Missing overrides preserve the usual
 configuration behavior; unreadable or invalid overrides fail closed.
 
-Policy files may not reside in or symlink into the mounted workspace. While a
+Keep policy files and their symlink targets outside the mounted workspace. While a
 host policy is active, extra writable mounts may not overlap its directory,
 including locations for project overrides not yet created. Keep policy and
 credential files outside writable mounts. A project override applies to one
