@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/hcohe/pi-microsandbox/compare/v0.4.0...v0.4.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **ci:** install dependencies before resolving release image ([#45](https://github.com/hcohe/pi-microsandbox/issues/45)) ([d62bb85](https://github.com/hcohe/pi-microsandbox/commit/d62bb854b08c286037c314dc8e105025b8ac73ff))
+
 ## [0.4.0](https://github.com/hcohe/pi-microsandbox/compare/v0.3.0...v0.4.0) (2026-11-01)
 
 
