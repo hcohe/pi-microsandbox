@@ -126,7 +126,7 @@ try {
         await choose("Status"); await key("h");
         if (launch === 1 && !savedScopes) {
           for (const [saveKey, value] of [["w", "false"], ["P", "true"], ["G", "false"]]) {
-            await expand("General"); await choose("Show Footer:"); await key("e"); await select(`Use ${value}`);
+            await expand("General"); await choose("Show Footer:"); await key("e"); await select(String(value));
             await key(saveKey); await select("Confirm");
             assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Result: Applied/);
             await key("\x1b");

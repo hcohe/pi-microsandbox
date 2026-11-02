@@ -351,6 +351,23 @@ test("long dangerous confirmations remain readable with arrows at short heights"
   assert.match(seen, /HOST/); assert.match(seen, /ephemeral/); assert.match(seen, /lost/);
 });
 
+test("edit choices omit Use and Back uses the muted theme color", async (t) => {
+  const colors: Array<[string, string]> = [];
+  const theme = { ...plainTheme, fg: (role: string, text: string) => { colors.push([role, text]); return text; } };
+  const f = await fixture(t, theme);
+  await f.edit("General", "Show Footer:");
+  assert.doesNotMatch(f.full(), /\bUse /);
+  await f.seek("false"); assert.equal(f.selected(), "false");
+  await f.seek("Back"); colors.length = 0; f.panel.render(80);
+  assert.ok(colors.some(([role, text]) => role === "muted" && text === "Back"));
+  assert.ok(colors.some(([role, text]) => role === "text" && text === "false"));
+  await f.key("\r");
+  await f.edit("General", "Sandbox name:");
+  assert.doesNotMatch(f.full(), /\bUse /);
+  await f.seek("Automatic session");
+  assert.match(f.selected(), /^Automatic session name/);
+});
+
 test("theme tokens color groups/values/origins/draft/selection, ANSI and Unicode bounded", async (t) => {
   const roles = new Set<string>(); const theme = { fg: (color: string, text: string) => { roles.add(color); return `\x1b[32m${text}\x1b[39m`; }, bold: (text: string) => `\x1b[1m${text}\x1b[22m`, inverse: (text: string) => `\x1b[7m${text}\x1b[27m` } as any;
   const f = await fixture(t, theme); f.paths.project = "/東京/🌱/e\u0301/\x1b[2Jhost-policy/config.toml"; await f.number("2"); await f.node("Sources & warnings");
@@ -362,7 +379,7 @@ test("theme tokens color groups/values/origins/draft/selection, ANSI and Unicode
 });
 
 test("native auto_start remains live, never implicit host handoff", async (t) => {
-  const f = await fixture(t, plainTheme, true); f.calls.length = 0; await f.edit("General", "Auto Start:"); await f.choose("Use false"); await f.save(); assert.doesNotMatch(f.full(), /RESTART/); await f.choose("Confirm");
+  const f = await fixture(t, plainTheme, true); f.calls.length = 0; await f.edit("General", "Auto Start:"); await f.choose("false"); await f.save(); assert.doesNotMatch(f.full(), /RESTART/); await f.choose("Confirm");
   assert.equal(f.control.getState().status, "active"); assert.equal(f.integration!.provider.isActive(), true); assert.equal(f.integration!.configRef.value.autoStart, false);
   assert.equal(f.integration!.configRef.value.fallbackMode, "block"); assert.equal(f.integration!.configRef.value.allowHostExecution, false); assert.ok(!f.calls.some((call) => /^(stop|remove|create):/.test(call)));
   const { registerSandboxTools } = await import("./tools.ts"); const tools = new Map<string, any>();
@@ -375,7 +392,7 @@ test("native auto_start remains live, never implicit host handoff", async (t) =>
 test("Reload and Enable preserve deliberate unsaved edits", async (t) => {
   const f = await fixture(t, plainTheme, true); await f.number("2");
   for (const action of ["Reload settings", "Enable sandbox"]) { await f.action(action); await f.choose("Confirm"); assert.doesNotMatch(f.text(), /Draft refresh failed/); }
-  await f.edit("General", "Show Footer:"); await f.choose("Use false"); await f.save(); await f.choose("Confirm");
+  await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(); await f.choose("Confirm");
   assert.equal(f.integration!.configRef.value.cpus, 2); assert.equal(f.integration!.configRef.value.showFooter, false); assert.match(f.text(), /Applied/);
 });
 
@@ -389,7 +406,7 @@ test("Runtime snapshot is actual, immutable, frozen provenance; failed apply is 
   f.sdk.Sandbox.builder = (name: string) => { const result = builder(name); if (fail) result.create = async () => { throw new Error("PRIVATE_REJECTED_CANDIDATE"); }; return result; };
   await f.save(); await f.choose("Confirm"); assert.match(f.text(), /Saved.*runtime failed/); assert.equal(f.control.getState().status, "unavailable"); assert.deepEqual(f.control.getRuntimePolicy!(), original);
   await f.node("Status"); assert.match(f.full(), /Last known policy \(not running\)/); assert.doesNotMatch(f.full(), /PRIVATE_REJECTED_CANDIDATE/);
-  await f.edit("General", "Show Footer:"); await f.choose("Use false"); fail = false; await f.action("Reload settings"); await f.choose("Confirm"); assert.equal(f.control.getState().status, "active");
+  await f.edit("General", "Show Footer:"); await f.choose("false"); fail = false; await f.action("Reload settings"); await f.choose("Confirm"); assert.equal(f.control.getState().status, "active");
   await f.save(); await f.choose("Confirm"); const adopted = f.control.getRuntimePolicy!()!; assert.equal(parseTomlConfig(adopted.effectiveToml, "global").value.cpus, 2); assert.equal(adopted.provenance.cpus, "temporary");
   await f.control.setEnabled(false); await f.tree(); assert.match(f.full(), /Last known policy \(not running\)/);
   f.integration!.endSession(); assert.equal(f.control.getRuntimePolicy!(), undefined);
@@ -441,7 +458,7 @@ test("uppercase bindings support Kitty shifted codes/modifyOtherKeys, lowercase 
 
 test("scalar d inherits at chosen save scope and ephemeral automatic name stays scope-limited", async (t) => {
   const f = await fixture(t); await mkdir(dirname(f.paths.global!), { recursive: true }); await writeFile(f.paths.global!, 'sandbox_name = "lower-name"\ncpus = 3\n');
-  await f.action("Reload settings"); await f.choose("Confirm"); await f.edit("General", "Sandbox name:"); await f.choose("Use automatic session");
+  await f.action("Reload settings"); await f.choose("Confirm"); await f.edit("General", "Sandbox name:"); await f.choose("Automatic session");
   await f.save(1); assert.match(f.full(), /ephemeral-only override/); assert.match(await readFile(f.paths.global!, "utf8"), /lower-name/);
   await f.save(); await f.choose("Confirm"); assert.equal(f.settings.temporary().sandboxName, null); assert.equal((await f.settings.open("temporary")).snapshot().automaticSandboxName, true);
   await f.node("Resources", "Virtual CPUs:"); await f.key("d"); assert.match(f.full(), /inherit on save/); await f.save(2); await f.choose("Confirm"); assert.doesNotMatch(await readFile(f.paths.global!, "utf8"), /cpus/);
@@ -467,7 +484,7 @@ test("project list saves reconcile raw removal controls without unrelated edits"
 test("failed native reset discards explicitly confirmed draft and permits new edits", async (t) => {
   const f = await fixture(t, plainTheme, true); await f.number("2"); await f.save(); await f.choose("Confirm");
   const builder = f.sdk.Sandbox.builder; let fail = true; f.sdk.Sandbox.builder = (name: string) => { const result = builder(name); if (fail) result.create = async () => { throw new Error("test reset failure"); }; return result; };
-  await f.edit("General", "Show Footer:"); await f.choose("Use false"); await f.action("Reset ephemeral"); await f.choose("Confirm");
+  await f.edit("General", "Show Footer:"); await f.choose("false"); await f.action("Reset ephemeral"); await f.choose("Confirm");
   assert.match(f.text(), /Action failed/); assert.doesNotMatch(f.text(), /unsaved|Draft refresh failed/); assert.deepEqual(f.settings.temporary(), {});
   fail = false; await f.number("3"); await f.save(); await f.choose("Confirm"); assert.equal(f.control.getState().status, "active"); assert.equal(f.integration!.configRef.value.cpus, 3); assert.equal(f.integration!.configRef.value.showFooter, true);
 });
@@ -581,7 +598,7 @@ test("same-name reconnect downgrades known VM policy; live/no-op cannot silently
     await f.integration!.manager.withRuntime(async () => {});
     assert.equal(f.control.getRuntimePolicy!()!.verification, "reconnected"); assert.ok(!f.control.getRuntimePolicy!()!.knownFields.includes("cpus"));
     await f.action("Reload settings"); await f.choose("Confirm"); assert.ok(!f.control.getRuntimePolicy!()!.knownFields.includes("cpus"));
-    await f.edit("General", "Show Footer:"); await f.choose("Use false"); await f.save(); await f.choose("Confirm"); assert.ok(!f.control.getRuntimePolicy!()!.knownFields.includes("cpus"));
+    await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(); await f.choose("Confirm"); assert.ok(!f.control.getRuntimePolicy!()!.knownFields.includes("cpus"));
     await f.number("2"); await f.save(); await f.choose("Confirm"); assert.equal(f.control.getRuntimePolicy!()!.verification, "created"); assert.ok(f.control.getRuntimePolicy!()!.knownFields.includes("cpus"));
   }
 });

@@ -154,8 +154,8 @@ export class ControlPanel implements Component, Focusable {
     const input = () => this.#input(field.path, String(value ?? ""), false, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text));
     if (field.choices || field.path === "sandbox_name") this.#page([
       { id: "description", label: fieldLabel(field.path), detail: `${field.description} Source: ${this.#owner(field.path)}` },
-      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: `Use ${choice}`, action: () => set(choice) })) : [
-        { id: "automatic-name", label: "Use automatic session name (ephemeral only)", action: () => set(null) },
+      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: String(choice), action: () => set(choice) })) : [
+        { id: "automatic-name", label: "Automatic session name (ephemeral only)", action: () => set(null) },
         { id: "edit", label: "Edit value", action: input },
       ]),
       { id: "back", label: "Back", action: () => this.#home() },
@@ -490,7 +490,7 @@ export class ControlPanel implements Component, Focusable {
         const rowStart = body.length;
         if (active) focusedLine = rowStart;
         const prefix = `${active ? ">" : " "} ${"  ".repeat(row.depth ?? 0)}${row.children ? this.#expanded.has(row.id) ? "▾ " : "▸ " : this.#tree ? "  " : ""}`;
-        const label = prefix + this.#theme.fg(row.children ? "accent" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", safeText(row.label))
+        const label = prefix + this.#theme.fg(row.children ? "accent" : row.id === "back" ? "muted" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", safeText(row.label))
           + (row.value !== undefined ? this.#theme.fg(row.id === "configuration/status/state" ? this.#control.getState().status === "active" ? "success" : ["unavailable", "host-fallback"].includes(this.#control.getState().status) ? "error" : "warning" : "syntaxString", `: ${safeText(row.value)}`) : "")
           + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "")
           + (row.dirty ? this.#theme.fg("warning", ` * ${row.dirty}`) : "");
