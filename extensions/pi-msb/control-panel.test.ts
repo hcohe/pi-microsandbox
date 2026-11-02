@@ -131,15 +131,17 @@ test("masked input supports split paste, cursor edits and cleanup without plaint
   input.handleInput("hidden"); input.clear(); assert.doesNotMatch(input.render(24).join(""), /\*/);
 });
 
-test("bare /msb opens native full-viewport overlay once; teardown and errors clean up", async (t) => {
-  const f = await fixture(t); f.panel.dispose(); let component: any; let done: (() => void) | undefined;
+test("bare /msb opens native full-viewport overlay once; teardown and errors clean up", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t); f.panel.dispose(); let component: any;
+  let signalMounted!: () => void;
+  const mounted = new Promise<void>((resolve) => { signalMounted = resolve; });
   f.ctx.hasUI = true; f.ctx.mode = "tui";
   f.ctx.ui.custom = async (factory: any, options: any) => {
     assert.equal(options.overlay, true); assert.deepEqual(options.overlayOptions, { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 });
-    return new Promise<void>((resolve) => { done = resolve; component = factory({ terminal: f.terminal, requestRender() {} }, plainTheme, {}, () => { component.dispose(); resolve(); }); });
+    return new Promise<void>((resolve) => { component = factory({ terminal: f.terminal, requestRender() {} }, plainTheme, {}, () => { component.dispose(); resolve(); }); signalMounted(); });
   };
   const opening = createCommandHandler(f.control)("", f.ctx);
-  for (let i = 0; i < 100 && !done; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  await Promise.race([mounted, opening]);
   assert.ok(component); assert.equal(component.render(24).length, 24);
   await assert.rejects(openControlPanel(f.ctx, f.control), /already open/);
   closeControlPanel(); await opening;
@@ -149,7 +151,7 @@ test("bare /msb opens native full-viewport overlay once; teardown and errors cle
   await openControlPanel(f.ctx, f.control); // error path did not retain global ownership
 });
 
-test("native regular and viewport renderers cover the whole viewport and restore input/focus", async (t) => {
+test("native regular and viewport renderers cover the whole viewport and restore input/focus", { timeout: 30_000 }, async (t) => {
   const { TuiMainScreen, TuiAltScreen } = await import("@earendil-works/pi-tui");
   for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
     const f = await fixture(t);
@@ -165,12 +167,14 @@ test("native regular and viewport renderers cover the whole viewport and restore
     tui.addChild(base); if (tui instanceof TuiAltScreen) tui.setLayoutRoot(base);
     tui.setFocus(base); tui.start();
     let finish: (() => void) | undefined;
+    let signalMounted!: () => void;
+    const mounted = new Promise<void>((resolve) => { signalMounted = resolve; });
     f.ctx.ui.custom = async (factory: any, options: any) => new Promise<void>((resolve) => {
       const panel = factory(tui, plainTheme, {}, () => { tui.hideOverlay(); panel.dispose(); resolve(); });
-      tui.showOverlay(panel, options.overlayOptions); finish = () => closeControlPanel();
+      tui.showOverlay(panel, options.overlayOptions); finish = () => closeControlPanel(); signalMounted();
     });
     const opening = openControlPanel(f.ctx, f.control);
-    for (let i = 0; i < 100 && !finish; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+    await Promise.race([mounted, opening]);
     assert.ok(finish);
     for (const width of [24, 32, 40, 80, 120]) for (const height of [1, 3, 6, 24]) {
       terminal.columns = width; terminal.rows = height; output = "";
