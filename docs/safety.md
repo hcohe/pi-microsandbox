@@ -35,6 +35,20 @@ another's work. Use separate host worktrees or checkouts for isolation between
 sessions. Unsafe root mappings fail startup rather than falling back to a
 narrower mount.
 
+### Local files and secrets are your responsibility
+
+pi-microsandbox does not manage local-file security: it does not hide, filter,
+or restrict access to `.env` files or other sensitive information inside the
+mounted workspace. Git ignore rules do not prevent the sandbox from reading
+those files.
+
+We recommend [Worktrunk](https://worktrunk.dev/) for managing separate worktrees
+and automating per-project or per-worktree setup with hooks. Use that workflow
+to prepare a dedicated `.env` containing only credentials the agent may access,
+and review it before starting Pi. Avoid copying production secrets into agent
+worktrees. Worktrunk is workflow tooling, not a secret-filtering security boundary;
+any sensitive file placed in the mounted workspace remains accessible.
+
 The extension entry point does not import the native SDK or load the flock
 addon. Unsupported hosts can still load Pi and remain blocked or explicitly
 off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64

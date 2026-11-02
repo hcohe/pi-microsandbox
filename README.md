@@ -67,6 +67,12 @@ worktree—even when Pi starts in a subdirectory. Writes reach the host immediat
 Sessions sharing a checkout share its files, and nested containers can reach the
 mount too. Use separate host worktrees when you need independent changes.
 
+**Local secrets are your responsibility.** The extension does not hide or protect
+`.env` files or other sensitive information in the mounted directory. We recommend
+[Worktrunk](https://worktrunk.dev/) for managing separate worktrees and setup hooks,
+including preparing a dedicated `.env` per project or worktree. Only put credentials
+the agent is allowed to access there; worktree management is not secret isolation.
+
 Sandbox failures stop routed tools by default. `/msb off` explicitly switches to
 unsandboxed host tools; `fallback_mode = "host"` opts into automatic host execution
 after failure. Keep the default `"block"` for untrusted work.

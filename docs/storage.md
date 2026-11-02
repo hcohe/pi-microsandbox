@@ -22,6 +22,13 @@ directories, and files such as `.env`. Separate Pi sessions that use the same
 checkout also use the same files, so their edits can conflict. Use separate
 host worktrees or checkouts when tasks need independent workspaces.
 
+Local-file security is up to you: pi-microsandbox does not hide `.env` files or
+other sensitive information in that read/write mount. We recommend
+[Worktrunk](https://worktrunk.dev/) for managing worktrees and setup hooks, such as
+preparing a dedicated `.env` per project or worktree. Include only credentials
+the agent may access; neither worktree separation nor Git ignore rules protect
+secrets placed inside the mounted tree. See the [safety model](safety.md#local-files-and-secrets-are-your-responsibility).
+
 The extension creates one project bind mount. Linked-worktree or submodule Git
 metadata stored outside the selected worktree root is not mounted separately.
 An unsupported path or symlink layout fails startup instead of silently
