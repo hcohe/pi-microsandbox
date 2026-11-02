@@ -9,7 +9,7 @@ import { DEFAULT_CONFIG, resolveConfig, toEffectiveToml, type ResolveConfigInput
 const home = "/home/test";
 const root = `${home}/Code/pi-microsandbox`;
 const agentDir = `${home}/.pi/agent`;
-const policyFile = `${agentDir}/pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml`;
+const policyFile = `${agentDir}/pi-microsandbox/projects/Code/pi-microsandbox/config.toml`;
 const localFile = `${root}/.pi-msb.toml`;
 const defaultFile = `${agentDir}/pi-microsandbox/default.toml`;
 
@@ -199,11 +199,39 @@ test("missing host policy preserves existing precedence and unspecified fields",
 test("non-Git projects use their cwd and outside-home projects use a distinct absolute namespace", async () => {
   for (const [cwd, expected] of [
     [root, policyFile],
-    ["/srv/app", `${agentDir}/pi-microsandbox/projects-absolute/srv/app/.pi-msb.toml`],
-    [`${home}/srv/app`, `${agentDir}/pi-microsandbox/projects/srv/app/.pi-msb.toml`],
+    ["/srv/app", `${agentDir}/pi-microsandbox/projects-absolute/srv/app/config.toml`],
+    [`${home}/srv/app`, `${agentDir}/pi-microsandbox/projects/srv/app/config.toml`],
   ]) {
     const result = await resolveConfig(fixture(new Map([[expected, "cpus = 3"]]), { cwd, repoRoot: null }));
     assert.equal(result.config.cpus, 3);
+  }
+});
+
+test("old host project filenames are never read; only config.toml applies", async () => {
+  for (const [cwd, file] of [
+    [root, policyFile],
+    ["/srv/app", `${agentDir}/pi-microsandbox/projects-absolute/srv/app/config.toml`],
+  ] as const) {
+    const oldFile = join(dirname(file), ".pi-msb.toml");
+    for (const text of ["cpus = 64", "[[malformed"]) {
+      const files = new Map([[oldFile, text]]);
+      const input = fixture(files, {
+        cwd, repoRoot: cwd,
+        readFile: async (path) => {
+          assert.notEqual(path, oldFile, "old host filename must not be read");
+          return files.get(path) ?? null;
+        },
+      });
+      const missing = await resolveConfig(input);
+      assert.equal(missing.config.cpus, DEFAULT_CONFIG.cpus);
+      assert.deepEqual(missing.warnings, []);
+      files.set(file, "cpus = 3");
+      const configured = await resolveConfig(input);
+      assert.equal(configured.config.cpus, 3);
+      assert.equal(configured.provenance.cpus, "host-project");
+      files.delete(file);
+      assert.equal((await resolveConfig(input)).config.cpus, DEFAULT_CONFIG.cpus);
+    }
   }
 });
 
@@ -217,7 +245,7 @@ test("canonical project identity prevents symlink aliases from bypassing host po
 });
 
 test("the default policy directory comes from Pi getAgentDir, including PI_CODING_AGENT_DIR", async () => {
-  const file = join(getAgentDir(), "pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml");
+  const file = join(getAgentDir(), "pi-microsandbox/projects/Code/pi-microsandbox/config.toml");
   const result = await resolveConfig(fixture(new Map([[file, "cpus = 3"]]), { agentDir: undefined }));
   assert.equal(result.config.cpus, 3);
 });
@@ -286,7 +314,7 @@ test("real filesystem policy changes are re-read and unreadable policies fail cl
   t.after(() => rm(dir, { recursive: true, force: true }));
   const project = join(dir, "home", "Code", "app");
   const agent = join(dir, "agent");
-  const policy = join(agent, "pi-microsandbox/projects/Code/app/.pi-msb.toml");
+  const policy = join(agent, "pi-microsandbox/projects/Code/app/config.toml");
   await mkdir(project, { recursive: true });
   await mkdir(dirname(policy), { recursive: true });
   const input: ResolveConfigInput = { cwd: project, repoRoot: project, projectTrusted: true, configDirName: ".pi", homedir: join(dir, "home"), agentDir: agent, env: {} };

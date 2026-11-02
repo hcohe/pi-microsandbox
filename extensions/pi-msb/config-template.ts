@@ -18,16 +18,16 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ##
 ## Per-project configuration (create manually; not automatically generated):
 ## Use the canonical Git worktree root, or canonical cwd for a non-Git project.
-## For ~/Code/app, create <agentDir>/pi-microsandbox/projects/Code/app/.pi-msb.toml.
+## For ~/Code/app, create <agentDir>/pi-microsandbox/projects/Code/app/config.toml.
 ## For /srv/app outside home, use
-## <agentDir>/pi-microsandbox/projects-absolute/srv/app/.pi-msb.toml.
-## A project at home itself uses projects/.pi-msb.toml. Subdirectories of a Git
+## <agentDir>/pi-microsandbox/projects-absolute/srv/app/config.toml.
+## A project at home itself uses projects/config.toml. Subdirectories of a Git
 ## worktree share its override. agentDir is Pi's getAgentDir(): ~/.pi/agent unless
 ## PI_CODING_AGENT_DIR is set. Paths are canonicalized (symlink aliases share policy).
 ## Example host shell commands (adjust paths; never overwrite an existing file):
 ##   agent_dir="\u0024{PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 ##   mkdir -p -m 700 "$agent_dir/pi-microsandbox/projects/Code/app"
-##   (umask 077; set -C; printf 'cpus = 2\\n' > "$agent_dir/pi-microsandbox/projects/Code/app/.pi-msb.toml")
+##   (umask 077; set -C; printf 'cpus = 2\\n' > "$agent_dir/pi-microsandbox/projects/Code/app/config.toml")
 ## Review mounts, secrets, and host permissions before enabling settings.
 ## Run /msb reload after editing configuration.
 

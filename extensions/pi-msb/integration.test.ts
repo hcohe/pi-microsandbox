@@ -129,7 +129,7 @@ test("host defaults and project policy survive local edits, reload, session over
   initRepo(cwd);
   const agentDir = join(root, "agent");
   const defaultFile = join(agentDir, "pi-microsandbox", "default.toml");
-  const projectFile = join(agentDir, "pi-microsandbox", "projects", "Code", "app", ".pi-msb.toml");
+  const projectFile = join(agentDir, "pi-microsandbox", "projects", "Code", "app", "config.toml");
   await mkdir(dirname(projectFile), { recursive: true });
   await writeFile(defaultFile, `
 bootstrap_tools = false

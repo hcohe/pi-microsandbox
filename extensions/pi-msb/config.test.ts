@@ -18,7 +18,7 @@ import {
 
 const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ name, value, warnings: [] });
 
-test("defaults and precedence are deterministic", async () => {
+test("defaults and precedence are deterministic and ignore worktree config", async () => {
   assert.equal("mode" in DEFAULT_CONFIG, false);
   assert.equal(
     DEFAULT_CONFIG.image,
@@ -438,8 +438,8 @@ test("explicit legacy global files remain supported only outside the workspace",
 
 test("open mode warning and empty secret host hard fail", async () => {
   await assert.rejects(() => resolveConfig({
-    cwd: "/tmp", projectTrusted: true, configDirName: "pi", env: { PI_MSB_NETWORK__MODE: "open" },
+    cwd: "/repo", agentDir: "/host/agent", projectTrusted: true, configDirName: "pi", env: { PI_MSB_NETWORK__MODE: "open" },
     cliOverridesToml: '[[secrets]]\nenv="TOKEN"\nvalue="$ENV:TOKEN"\nallow_hosts=[]',
-    readFile: async () => null, exists: async () => false,
+    readFile: async () => null, realpath: async (path) => path,
   }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("allowHosts")));
 });

@@ -65,7 +65,7 @@ default for a fail-closed setup. `fallback_mode = "host"` is an explicit,
 visibly labelled opt-in to automatic unsandboxed execution.
 
 The public package is named `pi-microsandbox`. Current technical interfaces
-retain the shorter `msb` name, including `/msb`, `PI_MSB_*`, host-owned per-project `.pi-msb.toml`,
+retain the shorter `msb` name, including `/msb`, `PI_MSB_*`,
 configuration directories, and managed-resource labels.
 
 ## Workspace mounting

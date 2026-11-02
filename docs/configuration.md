@@ -47,11 +47,11 @@ Keep settings the agent must not change outside the mounted worktree:
 
 ```text
 <agent-dir>/pi-microsandbox/default.toml
-<agent-dir>/pi-microsandbox/projects/<home-relative-project-path>/.pi-msb.toml
+<agent-dir>/pi-microsandbox/projects/<home-relative-project-path>/config.toml
 ```
 
 `default.toml` supplies a host-owned baseline for **all projects**. A host-owned
-per-project `.pi-msb.toml` overrides that baseline. Both layers take precedence
+per-project `config.toml` overrides that baseline. Both layers take precedence
 over environment variables and session settings.
 For example, pin `fallback_mode = "block"` in `default.toml` and set a project's
 `memory_mib` in its host-owned override.
@@ -62,16 +62,16 @@ The default baseline location is `~/.pi/agent/pi-microsandbox/default.toml`.
 For a project at `~/Code/pi-microsandbox`, the project override location is:
 
 ```text
-~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml
+~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/config.toml
 ```
 
 The project identity is the canonical Git worktree root, or the canonical cwd
 outside Git. Starting inside a Git subdirectory or through a symlink uses the
 same host file. Linked worktrees have separate identities. Projects outside
-home use `<agent-dir>/pi-microsandbox/projects-absolute/<absolute-project-path-without-leading-slash>/.pi-msb.toml`
+home use `<agent-dir>/pi-microsandbox/projects-absolute/<absolute-project-path-without-leading-slash>/config.toml`
 instead, so `/srv/app` cannot collide with `~/srv/app`. There is no parent-policy
 search: each workspace has one exact host override location. A project whose
-root is home itself uses `projects/.pi-msb.toml`.
+root is home itself uses `projects/config.toml`.
 
 For `~/Code/app`, create the override from a **host shell** (not sandbox bash):
 
@@ -80,7 +80,7 @@ agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 mkdir -p -m 700 "$agent_dir/pi-microsandbox/projects/Code/app"
 # noclobber preserves an existing override; umask protects new files.
 (umask 077; set -C; printf 'cpus = 2\nmemory_mib = 2048\n' > \
-  "$agent_dir/pi-microsandbox/projects/Code/app/.pi-msb.toml")
+  "$agent_dir/pi-microsandbox/projects/Code/app/config.toml")
 ```
 
 Run `/msb reload` after editing. Keep the agent directory outside the mounted
@@ -99,7 +99,7 @@ For example, a host-owned npm policy can pin the relevant execution, host-access
 and network settings as well as the secret:
 
 ```toml
-# ~/.pi/agent/pi-microsandbox/projects/Code/app/.pi-msb.toml
+# ~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml
 fallback_mode = "block"
 auto_start = true
 allow_host_execution = false

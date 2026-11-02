@@ -774,8 +774,8 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   // Keep out-of-home paths in a separate namespace, without '..' traversal or
   // collisions with home-relative projects. Git subdirectories share one policy.
   const hostProjectFile = isInside(projectRoot, home)
-    ? join(agentDir, "pi-microsandbox", "projects", relative(home, projectRoot), ".pi-msb.toml")
-    : join(agentDir, "pi-microsandbox", "projects-absolute", relative(parse(projectRoot).root, projectRoot), ".pi-msb.toml");
+    ? join(agentDir, "pi-microsandbox", "projects", relative(home, projectRoot), "config.toml")
+    : join(agentDir, "pi-microsandbox", "projects-absolute", relative(parse(projectRoot).root, projectRoot), "config.toml");
   const hostLayers: ParsedConfigLayer[] = [];
   const hostPolicyPaths: string[] = [];
   for (const [name, file] of [

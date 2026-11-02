@@ -48,7 +48,7 @@ alone.
 Want a different setup for `~/Code/app`? Create this host-owned override:
 
 ```text
-~/.pi/agent/pi-microsandbox/projects/Code/app/.pi-msb.toml
+~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml
 ```
 
 `PI_MSB_*` environment variables and session `/msb` controls work too. Effective
