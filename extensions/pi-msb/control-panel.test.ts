@@ -109,7 +109,7 @@ test("secret CRUD is nested, masked, metadata-retaining and entry-level draft la
 
 test("network list CRUD and uppercase project sparse persistence", async (t) => {
   const f = await fixture(t); await f.list("Network", "Allowed hosts:"); await f.key("a"); await f.key("api.example.com"); await f.key("\r");
-  await f.key("d"); assert.doesNotMatch(f.full(), /api.example.com/);
+  await f.key("d"); assert.doesNotMatch(f.full(), /api\.example\.com/);
   await f.key("a"); await f.key("new.example.com"); await f.key("\r"); await f.save(1); await f.choose("Confirm");
   const text = await readFile(f.paths.project!, "utf8"); assert.match(text, /new\.example\.com/); assert.doesNotMatch(text, /cpus|memory|secret|image/);
   assert.deepEqual(f.calls, ["idle", "reload"]);
