@@ -29,7 +29,7 @@ try {
   const { loadExtensions } = await mod("core/extensions/loader");
   const { ExtensionRunner } = await mod("core/extensions/runner");
   const { InteractiveMode } = await mod("modes/interactive/interactive-mode");
-  const { initTheme } = await mod("modes/interactive/theme/theme");
+  const { initTheme, theme } = await mod("modes/interactive/theme/theme");
   initTheme("dark");
   const require = createRequire(join(pkg, "package.json"));
   const tui = await import(pathToFileURL(require.resolve("@earendil-works/pi-tui")));
@@ -78,11 +78,20 @@ try {
         assert.equal(ui.hasOverlay(), true);
         assert.equal(panel.focused, true);
         assert.equal(editor.focused, false);
-        for (const [width, height] of [[80, 24], [24, 6], [40, 10], [1, 1]]) {
+        const initial = tui.stripTerminalSequences(panel.render(80).join("\n"));
+        assert.match(initial, /▸ Status: read-only \[runtime\]/);
+        assert.doesNotMatch(initial, /Runtime|State:|No running policy adopted/);
+        assert.equal(initial.split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 1);
+        for (const [width, height] of [[80, 24], [24, 2], [24, 6], [32, 12], [40, 10], [120, 20], [1, 1]]) {
           terminal.columns = width; terminal.rows = height;
           const lines = panel.render(width);
           assert.equal(lines.length, height);
           assert.ok(lines.every((line) => tui.visibleWidth(line) === width));
+          if (height >= 2) {
+            assert.match(tui.stripTerminalSequences(lines.at(-1)), /q close.*(?:w\/P\/G|w ephemeral)/);
+            assert.ok(lines.at(-1).includes(theme.bold(theme.fg("accent", "q")) + theme.fg("muted", " close")));
+            assert.doesNotMatch(tui.stripTerminalSequences(lines.slice(0, -1).join("\n")), /q close|w\/P\/G|w ephemeral/);
+          }
           output = ""; ui.renderNow(true);
           const frame = ui instanceof tui.TuiMainScreen ? ui.captureRenderState().previousLines.slice(-height).join("\n") : output;
           assert.doesNotMatch(frame, /UNDERLYING|RUNTIME_PRIVATE_SENTINEL/);
@@ -106,6 +115,15 @@ try {
           if (line.includes("▸")) await key("l");
         };
         assert.doesNotMatch(tui.stripTerminalSequences(panel.render(80).join("\n")), /Section:|Search all settings/);
+        await expand("Status:");
+        const status = tui.stripTerminalSequences(panel.render(80).join("\n"));
+        assert.match(status, /State: off \[runtime\]/);
+        assert.match(status, /No running policy adopted: No current policy \[runtime\]/);
+        assert.doesNotMatch(status, /Guest image:|Virtual CPUs:|Docker mode:/);
+        await choose("State:");
+        for (const commandKey of ["e", "a", "d"]) await key(commandKey);
+        assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> .*State: off \[runtime\]/);
+        await choose("Status:"); await key("h");
         if (launch === 1 && !savedScopes) {
           for (const [saveKey, value] of [["w", "false"], ["P", "true"], ["G", "false"]]) {
             await expand("General"); await choose("Show Footer:"); await key("e"); await select(`Use ${value}`);
@@ -118,7 +136,8 @@ try {
         }
         await expand("Secrets"); await expand("Secrets:"); await expand("TOKEN:");
         await choose("Value / reference:"); await key("e"); await select("Replace value / reference:");
-        await key("RAW_INPUT_SENTINEL");
+        assert.match(tui.stripTerminalSequences(panel.render(80).at(-1)), /Enter keep.*Esc cancel.*q literal text/);
+        await key("qeadwPGRAW_INPUT_SENTINEL");
         assert.doesNotMatch(output + panel.render(80).join("\n"), /RAW_INPUT_SENTINEL|RUNTIME_PRIVATE_SENTINEL/);
         // Escape the masked input, then q closes directly from the clean entry form.
         await key("\x1b"); await key("q");

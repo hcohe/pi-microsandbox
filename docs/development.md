@@ -50,9 +50,11 @@ Run `just dev-image` by itself when you only need to refresh the local image.
 
 ### Control-panel integration and testing
 
-`/msb` is the only command surface. `control-panel.ts` owns one collapsible tree
-with Configuration (editable desired policy) and Runtime (read-only adopted policy),
-stable node identity/expansion and compact transient forms. Normal keys are
+`/msb` is the only command surface. `control-panel.ts` owns one Configuration
+tree with editable desired settings, a collapsed read-only Status subtree labeled
+`[runtime]`, stable node identity/expansion and compact transient forms. The
+single-line footer stays at the bottom with accented keys and muted action labels;
+narrow terminals use compact hints. Normal keys are
 j/k move, h/l fold/parent/child, e/a/d edit/add/delete-or-inherit, w/P/G scoped
 save + reload, q close; input dispatch precedes all command bindings.
 `settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
@@ -61,8 +63,9 @@ never renders plaintext or uses an Input undo/kill ring. The settings backend
 keeps raw credentials/references private; do not stringify effective Config.
 The manager's successful boot/live-adoption observer captures a redacted runtime
 policy and frozen provenance, separate from resolved desired config/configRef.
-Failed/canceled/pending changes must never appear as current Runtime policy;
-inactive snapshots are last-known, and session teardown clears them. Successful
+The UI uses this snapshot for Status/adoption metadata and pending comparisons,
+not a second policy tree. Failed/canceled/pending changes must never appear as
+adopted policy; inactive snapshots are last-known, and session teardown clears them. Successful
 fresh creation verifies all fields. Revalidation of an existing guest or transport replacement
 have no trustworthy instance ID or verified actual image metadata, so snapshots
 include only live extension-policy fields; image and all other VM fields are unknown. Live/no-op adoption must

@@ -32,7 +32,7 @@ export class ControlPanel implements Component, Focusable {
   #done: () => void;
   #tree = true;
   #treeFocus = "configuration";
-  #expanded = new Set(["configuration", "runtime"]);
+  #expanded = new Set(["configuration"]);
   #entryChanges = new Set<string>();
   #rows: Row[] = [];
   #focus = 0;
@@ -117,8 +117,20 @@ export class ControlPanel implements Component, Focusable {
         return row;
       }),
     }));
+    const statusRow = (id: string, label: string, value?: string, detail?: string): Row => ({ id: `configuration/status/${id}`, label, value, detail, origin: "runtime", readonly: true });
+    const status: Row = { id: "configuration/status", label: "Status", value: "read-only", origin: "runtime", readonly: true, children: [
+      statusRow("state", "State", state.status, state.reason),
+      ...((this.#dirty || policy && SETTINGS_FIELDS.some((field) => policy.knownFields.includes(normalizeConfigPath(field.path)[0] as keyof Config) && JSON.stringify(valueAt(this.#values, field.path)) !== JSON.stringify(valueAt(runtimeValues, field.path)))) ? [statusRow("pending", "Desired changes pending (not running)")] : []),
+      statusRow("adoption", policy ? state.status === "active" ? "Actually adopted policy" : "Last known policy (not running)" : this.#control.getRuntimePolicy ? "No running policy adopted" : "Policy snapshot unavailable", policy ? new Date(policy.adoptedAt).toISOString() : "No current policy"),
+      ...(policy?.verification === "reconnected" ? [statusRow("verification", "VM instance not verified", "Existing/reconnected guest: image and other VM settings are unverified.")] : []),
+      ...(state.info ? [
+        ...(["name", "displayId", "pid", "cwd", "root", "createdAt"] as const).map((key) => statusRow(`info/${key}`, key, display(state.info![key]))),
+        ...(["readiness", "version", "storageDriver", "reason"] as const).filter((key) => state.info!.docker[key] !== undefined).map((key) => statusRow(`docker/${key}`, `Docker ${key}`, display(state.info!.docker[key]))),
+      ] : []),
+    ] };
     const configuration: Row = { id: "configuration", label: "Configuration", children: [
       ...fields("configuration", this.#values, this.#provenance, false),
+      status,
       { id: "configuration/sources", label: "Sources & warnings", children: [
         ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${originLabel(scope)} target`, value: path })),
         { id: "precedence", label: "Inheritance", value: "default → environment → global → project → ephemeral", detail: "Draft is intent, not an adopted policy. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
@@ -126,18 +138,9 @@ export class ControlPanel implements Component, Focusable {
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
     ] };
-    const runtime: Row = { id: "runtime", label: "Runtime", value: `${state.status} · read-only`, readonly: true, children: [
-      { id: "runtime/status", label: "Status", value: state.status, detail: state.reason, readonly: true },
-      ...((this.#dirty || policy && SETTINGS_FIELDS.some((field) => policy.knownFields.includes(normalizeConfigPath(field.path)[0] as keyof Config) && JSON.stringify(valueAt(this.#values, field.path)) !== JSON.stringify(valueAt(runtimeValues, field.path)))) ? [{ id: "runtime/pending", label: "Desired changes pending (not running)", readonly: true }] : []),
-      { id: "runtime/adoption", label: policy ? state.status === "active" ? "Actually adopted policy" : "Last known policy (not running)" : this.#control.getRuntimePolicy ? "No running policy adopted" : "Policy snapshot unavailable", value: policy ? new Date(policy.adoptedAt).toISOString() : "No current policy", readonly: true },
-      ...(policy?.verification === "reconnected" ? [{ id: "runtime/verification", label: "VM instance not verified", value: "Existing/reconnected guest: only identity and live extension policy are known; image and other VM settings are unverified.", readonly: true }] : []),
-      ...(state.info ? Object.entries(state.info).filter(([key]) => key !== "docker" && key !== "image").map(([key, value]) => ({ id: `runtime/info/${key}`, label: key, value: display(value), readonly: true })) : []),
-      ...(state.info ? [{ id: "runtime/docker", label: "Docker readiness", value: display(state.info.docker), readonly: true }] : []),
-      ...(policy ? fields("runtime", runtimeValues, policy.provenance, true) : []),
-    ] };
     const rows: Row[] = [];
     const flatten = (node: Row, parent?: string, depth = 0) => { node.parent = parent; node.depth = depth; rows.push(node); if (node.children && this.#expanded.has(node.id)) for (const child of node.children) flatten(child, node.id, depth + 1); };
-    flatten(configuration); flatten(runtime);
+    flatten(configuration);
     this.#rows = rows;
     let index = rows.findIndex((row) => row.id === this.#treeFocus);
     while (index < 0 && this.#treeFocus.includes("/")) { this.#treeFocus = this.#treeFocus.slice(0, this.#treeFocus.lastIndexOf("/")); index = rows.findIndex((row) => row.id === this.#treeFocus); }
@@ -281,7 +284,7 @@ export class ControlPanel implements Component, Focusable {
           await this.#control.reload({ allowRestart: preview.effect === "restart" });
           if (this.#closed) return;
           message = `${saved ? "Applied" : "No changes"}${result.shadowed.length ? `; shadowed: ${result.shadowed.join(", ")}` : ""}. Runtime: ${this.#control.getState().status}`;
-        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Runtime and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
+        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Configuration → Status and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
         finally {
           pending.discard(); this.#pending = undefined;
           if (!this.#closed) {
@@ -348,7 +351,7 @@ export class ControlPanel implements Component, Focusable {
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
       { id: "seal", label: "Seal network in draft", detail: "Sets deny mode; save with w, P or G.", action: () => { this.#set("network.mode", "deny"); this.#home(); } },
       dangerous("Reset ephemeral settings", "Discard current memory-only overrides, then reconfigure. Restart may lose guest state. Unsaved panel edits will also be discarded.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Configuration is editable desired policy; Runtime is read-only adopted policy (or last known when inactive). j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the eventual save scope. w saves ephemeral session memory, P project, G global; all preview and reload. q closes (dirty discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origin, * marks draft intent. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Configuration is editable desired policy; its collapsed Status subtree shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the eventual save scope. w saves ephemeral session memory, P project, G global; all preview and reload. q closes (dirty discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origin, * marks draft intent. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
@@ -431,6 +434,37 @@ export class ControlPanel implements Component, Focusable {
     if (this.#tree && !this.#closed) this.#treeFocus = this.#rows[this.#focus]!.id;
     this.#refresh();
   }
+  #footer(width: number, selected?: Row): string {
+    if (this.#busy) return this.#theme.fg("muted", width >= 32 ? "Working · keys after completion" : "Working · please wait");
+    type Hint = [key: string, action: string];
+    const close: Hint = ["q", "close"];
+    const navigation: Hint = ["j/k h/l", ""];
+    const save: Hint = ["w/P/G", "save"];
+    const edits: Hint[] = [
+      ...(selected?.edit ? [["e", "edit"] as Hint] : []),
+      ...(selected?.add ? [["a", "add"] as Hint] : []),
+      ...(selected?.remove ? [["d", selected.removeLabel ?? "delete"] as Hint] : []),
+      ...(selected?.action ? [["Enter", "run"] as Hint] : []),
+    ];
+    const grouped: Hint[] = edits.length ? [[edits.map(([key]) => key).join("/"), ""]] : [];
+    const candidates: { hints: Hint[]; separator: string }[] = (this.#editing ? [
+      { hints: [["Enter", "keep"], ["Esc", "cancel"], ["q", "literal text"]], separator: " · " },
+      { hints: [["Enter", "keep"], ["Esc", "cancel"]], separator: " " },
+    ] : this.#tree ? [
+      { hints: [close, ["j/k", "move"], ["h/l", "fold"], ...edits, ["w", "ephemeral"], ["P", "project"], ["G", "global"]], separator: " · " },
+      { hints: [close, navigation, ...edits, ["w", "ephemeral"], ["P", "project"], ["G", "global"]], separator: " " },
+      { hints: [close, navigation, ...edits, save], separator: " · " },
+      { hints: [close, navigation, ...grouped, save], separator: " " },
+      { hints: [close, ["↑↓←→", ""], ...grouped, ["w/P/G", ""]], separator: " " },
+    ] : [
+      { hints: [close, ["Enter", "select"], ["Esc", "back"], ["↑/↓", "scroll"], ["Tab", "next"]], separator: " · " },
+      { hints: [close, ["↵", ""], ["Esc", "back"], ["↑↓", ""], ["Tab", ""]], separator: " " },
+      { hints: [close, ["↵", ""], ["Esc", ""], ["↑↓", ""], ["Tab", ""]], separator: " " },
+    ]);
+    const text = ([key, action]: Hint) => key + (action ? ` ${action}` : "");
+    const candidate = candidates.find(({ hints, separator }) => visibleWidth(hints.map(text).join(separator)) <= width) ?? candidates[candidates.length - 1]!;
+    return candidate.hints.map(([key, action]) => this.#theme.bold(this.#theme.fg("accent", key)) + (action ? this.#theme.fg("muted", ` ${action}`) : "")).join(this.#theme.fg("muted", candidate.separator));
+  }
   render(width: number): string[] {
     width = Math.max(1, Math.floor(width));
     const height = Math.max(1, Math.floor(this.#tui.terminal.rows));
@@ -439,17 +473,16 @@ export class ControlPanel implements Component, Focusable {
     const title = this.#theme.bold(this.#theme.fg("accent", "MICROSANDBOX")) + (this.#dirty ? this.#theme.fg("warning", " · unsaved draft") : "");
     if (height >= 8) lines.push(truncateToWidth(title, width));
     const selected = this.#rows[this.#focus];
-    const capabilities = this.#tree ? [selected?.edit ? "e edit" : "", selected?.add ? "a add" : "", selected?.remove ? `d ${selected.removeLabel}` : "", selected?.action ? "Enter run" : "", selected?.readonly ? "read-only" : ""].filter(Boolean).join(" · ") : "Enter select · q close · Esc back";
-    const hints = this.#editing ? ["Enter keep · Esc cancel", "Typing (q is text)"] : this.#tree ? ["j/k h/l fold · q close", capabilities, ...(width < 32 ? ["w ephemeral", "P project G global"] : ["w ephemeral P project G global"])] : [capabilities, "↑/↓ scroll · Tab next"];
-    const footer = hints.filter(Boolean).flatMap((hint) => wrapTextWithAnsi(this.#theme.fg("muted", hint), width));
-    const footerCount = height >= 6 ? Math.min(footer.length, height - lines.length - 2) : height >= 2 ? 1 : 0;
+    const footer = this.#footer(width, selected);
+    // One physical row cannot show both content/error and hints: content wins.
+    const footerCount = height >= 2 ? 1 : 0;
     const capacity = Math.max(1, height - lines.length - footerCount); this.#capacity = capacity;
     if (this.#editing) {
       const edit = this.#editing;
       const prompt = wrapTextWithAnsi(safeText(edit.label), width);
       lines.push(...prompt.slice(0, Math.max(0, capacity - 1)));
       edit.input.focused = this.focused;
-      lines.push(...edit.input.render(width).map((line) => truncateToWidth(line, width)));
+      lines.push(...edit.input.render(width).slice(0, 1).map((line) => truncateToWidth(line, width)));
     } else {
       const body: string[] = []; let focusedLine = 0; this.#rowHeights = [];
       for (let index = 0; index < this.#rows.length; index++) {
@@ -458,12 +491,12 @@ export class ControlPanel implements Component, Focusable {
         if (active) focusedLine = rowStart;
         const prefix = `${active ? ">" : " "} ${"  ".repeat(row.depth ?? 0)}${row.children ? this.#expanded.has(row.id) ? "▾ " : "▸ " : this.#tree ? "  " : ""}`;
         const label = prefix + this.#theme.fg(row.children ? "accent" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", safeText(row.label))
-          + (row.value !== undefined ? this.#theme.fg(row.id === "runtime" || row.id === "runtime/status" ? this.#control.getState().status === "active" ? "success" : ["unavailable", "host-fallback"].includes(this.#control.getState().status) ? "error" : "warning" : "syntaxString", `: ${safeText(row.value)}`) : "")
+          + (row.value !== undefined ? this.#theme.fg(row.id === "configuration/status/state" ? this.#control.getState().status === "active" ? "success" : ["unavailable", "host-fallback"].includes(this.#control.getState().status) ? "error" : "warning" : "syntaxString", `: ${safeText(row.value)}`) : "")
           + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "")
           + (row.dirty ? this.#theme.fg("warning", ` * ${row.dirty}`) : "");
         const labelLines = wrapTextWithAnsi(label, width);
         body.push(...labelLines.map((line) => active ? this.#theme.inverse(line) : line));
-        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "runtime/status")) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));
+        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "configuration/status/state")) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));
         this.#rowHeights.push(body.length - rowStart);
       }
       this.#detailOffset = Math.min(this.#detailOffset, Math.max(0, (this.#rowHeights[this.#focus] ?? 1) - capacity));
@@ -476,7 +509,7 @@ export class ControlPanel implements Component, Focusable {
     }
     if (footerCount) {
       while (lines.length < height - footerCount) lines.push("");
-      lines.push(...(footerCount === 1 ? [this.#theme.fg("muted", truncateToWidth(this.#busy ? "Working · q after completion" : this.#editing ? "Enter keep · Esc cancel" : "q close · Esc back", width))] : footer.slice(0, footerCount)));
+      lines.push(footer);
     }
     while (lines.length < height) lines.push("");
     // Pad opaque full viewport, so the native overlay never exposes underlying chat.

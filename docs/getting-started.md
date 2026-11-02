@@ -61,8 +61,9 @@ The panel opens even when virtualization is disabled. Canonical workspace
 discovery is still required for correct project identity, but disabled startup
 creates no configuration and loads no SDK. PI_MSB_DISABLE remains authoritative:
 saving never enables the sandbox; remove the variable and restart Pi to enable.
-The Runtime tree reports actual adopted policy (or no running policy), while
-Configuration groups editable desired settings. Use j/k and h/l (or arrows),
+The Configuration tree groups editable desired settings. Its collapsed Status
+subtree contains read-only `[runtime]` metadata, not duplicated settings; a
+single-line contextual footer stays at the bottom. Use j/k and h/l (or arrows),
 e/a/d to edit/add/delete-or-inherit, w/P/G to save ephemeral/project/global and
 reload, and q to close. Review the target and restart warning before confirming.
 Configuration → Actions contains enable/off/reload/logs/prune. This panel requires

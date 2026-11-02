@@ -60,16 +60,18 @@ test("settings inventory describes every public schema leaf", () => {
   assert.ok(SETTINGS_FIELDS.every((field) => field.description?.length > 10));
 });
 
-test("exactly two roots, tree hierarchy h/l and arrow parity, no old section selector", async (t) => {
+test("one Configuration root with collapsed runtime Status, tree h/l and arrow parity", async (t) => {
   const f = await fixture(t); assert.doesNotMatch(f.full(), /Section:|Search all|Apply temporarily/);
   assert.equal(f.selected(), "Configuration"); await f.key("h"); assert.equal(f.selected(), "Configuration");
   assert.match(f.full(), /▸ Configuration/); await f.key("l"); assert.equal(f.selected(), "Configuration");
   await f.key("l"); assert.equal(f.selected(), "General"); await f.key("\x1b[D"); assert.equal(f.selected(), "Configuration");
   await f.key("\x1b[C"); assert.equal(f.selected(), "General"); await f.key("l"); await f.key("l"); assert.match(f.selected(), /Guest image/);
   await f.key("h"); assert.equal(f.selected(), "General"); await f.key("h"); assert.match(f.full(), /▸ General/);
-  await f.key("h"); await f.key("h"); await f.key("j"); assert.match(f.selected(), /^Runtime:/);
-  await f.key("k"); assert.equal(f.selected(), "Configuration"); await f.key("\x1b[B"); assert.match(f.selected(), /^Runtime:/);
-  assert.equal(f.full().split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 2);
+  await f.node("Status"); await f.key("h"); assert.match(f.full(), /▸ Status: read-only \[runtime\]/);
+  assert.doesNotMatch(f.full(), /State:|Runtime|Actually adopted|Policy snapshot unavailable/);
+  assert.equal(f.full().split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 1);
+  await f.key("h"); assert.equal(f.selected(), "Configuration"); await f.key("h"); await f.key("j"); assert.equal(f.selected(), "Configuration");
+  await f.key("\x1b[B"); assert.equal(f.selected(), "Configuration");
   assert.deepEqual(f.calls, []);
 });
 
@@ -81,7 +83,102 @@ test("responsive render is opaque, bounded and focused at 24/32/40/80/120 and ti
     const lines = f.panel.render(width); assert.equal(lines.length, height);
     assert.ok(lines.every((line) => visibleWidth(line) === width), `${width}x${height}`);
     assert.ok(lines.some((line) => line.startsWith("> ")), `${width}x${height}: focus visible`);
-    if (height >= 8) { assert.match(f.text(), /q close/); assert.match(f.text(), /w ephemeral/); assert.match(f.text(), /P project/); assert.match(f.text(), /G global/); }
+    if (height >= 2) {
+      const footer = stripTerminalSequences(lines.at(-1)!); assert.match(footer, /q close/);
+      assert.match(footer, /w\/P\/G|w ephemeral/); assert.match(footer, /e/); assert.match(footer, /d/);
+      assert.match(footer, /j\/k h\/l|↑↓←→|j\/k move/);
+      assert.doesNotMatch(lines.slice(0, -1).join("\n"), /q close|w\/P\/G|w ephemeral/);
+    }
+  }
+});
+
+test("footer is one pinned row on short trees, with full labels or lossless compact keys", async (t) => {
+  const f = await fixture(t);
+  for (const width of [24, 32, 40, 80, 120]) for (const height of [2, 3, 6, 12, 20, 40]) {
+    f.terminal.columns = width; f.terminal.rows = height;
+    await f.seek("Configuration"); await f.key("h");
+    const lines = f.panel.render(width).map(stripTerminalSequences);
+    assert.match(lines.at(-1)!, /q close/); assert.match(lines.at(-1)!, /w\/P\/G|w ephemeral/);
+    assert.equal(lines.filter((line) => line.includes("q close")).length, 1);
+    assert.ok(lines.slice(height >= 8 ? 2 : 1, -1).every((line) => !line.trim()), `${width}x${height}: footer below padding`);
+    await f.node("Secrets", "Secrets:"); await f.key("a");
+    await f.choose("Environment name:"); await f.key("TOKEN"); await f.key("\r");
+    await f.choose("Allowed hosts:"); await f.key("a.example"); await f.key("\r");
+    await f.choose("Replace value"); await f.key("private"); await f.key("\r"); await f.choose("Keep draft entry");
+    const entryFooter = f.text().split("\n").at(-1)!;
+    if (width >= 120) for (const hint of ["e edit", "a add", "d delete", "w ephemeral", "P project", "G global"]) assert.ok(entryFooter.includes(hint), hint);
+    if (width <= 32) assert.match(entryFooter, /e\/a\/d.*w\/P\/G/);
+    await f.key("d");
+  }
+});
+
+test("footer separates bold accent keys from muted actions in actual ANSI output", async (t) => {
+  const theme = { fg: (role: string, text: string) => `\x1b[${role === "accent" ? 36 : role === "muted" ? 90 : 37}m${text}\x1b[39m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m`, inverse: (text: string) => `\x1b[7m${text}\x1b[27m` } as any;
+  const f = await fixture(t, theme); f.terminal.columns = 120;
+  await f.node("Resources", "Virtual CPUs:");
+  let footer = f.panel.render(120).at(-1)!;
+  assert.ok(footer.includes("\x1b[1m\x1b[36mq\x1b[39m\x1b[22m\x1b[90m close\x1b[39m"));
+  assert.ok(footer.includes("\x1b[1m\x1b[36me\x1b[39m\x1b[22m\x1b[90m edit\x1b[39m"));
+  assert.ok(footer.includes("\x1b[1m\x1b[36mw\x1b[39m\x1b[22m\x1b[90m ephemeral\x1b[39m"));
+  f.terminal.columns = 24; footer = f.panel.render(24).at(-1)!;
+  assert.ok(footer.includes("\x1b[1m\x1b[36me/d\x1b[39m\x1b[22m"));
+  assert.ok(footer.includes("\x1b[1m\x1b[36mw/P/G\x1b[39m\x1b[22m"));
+});
+
+test("editor, transient and busy footers are mode-correct and never displace content", async (t) => {
+  const f = await fixture(t);
+  await f.list("Network", "Allowed hosts:"); await f.key("a");
+  for (const width of [24, 32, 40, 80, 120]) for (const height of [1, 2, 3, 12]) {
+    f.terminal.columns = width; f.terminal.rows = height;
+    const lines = f.panel.render(width).map(stripTerminalSequences);
+    if (height >= 2) { assert.match(lines.at(-1)!, /Enter keep.*Esc cancel/); assert.doesNotMatch(lines.at(-1)!, /q close|w\/P\/G/); }
+    if (height >= 2 && width >= 40) assert.match(lines.at(-1)!, /q literal text/);
+    assert.equal(lines.length, height); assert.ok(lines.every((line) => visibleWidth(line) === width));
+  }
+  await f.key("qeadwPG"); await f.key("\r"); assert.match(f.selected(), /qeadwPG/); assert.equal(f.closed(), false);
+  f.terminal.columns = 80; f.terminal.rows = 20;
+  await f.action("Help"); assert.match(f.text().split("\n").at(-1)!, /q close.*Enter select.*Esc back.*scroll.*Tab next/);
+  for (const width of [24, 32, 40, 80, 120]) {
+    const footer = stripTerminalSequences(f.panel.render(width).at(-1)!);
+    assert.match(footer, /q close/); assert.match(footer, /Esc/); assert.match(footer, /Tab/); assert.doesNotMatch(footer, /…/);
+  }
+  await f.tree(); await f.save(); await f.seek("Confirm");
+  let release!: () => void; f.ctx.waitForIdle = () => new Promise<void>((resolve) => { release = resolve; });
+  f.panel.handleInput("\r"); await tick();
+  assert.match(f.text().split("\n").at(-1)!, /Working.*keys after completion/);
+  assert.doesNotMatch(f.text().split("\n").at(-1)!, /q close|w ephemeral/);
+  release(); await f.panel.waitForIdle();
+});
+
+test("Status metadata is runtime-only, collapsed, truthful when inactive/unknown/pending", async (t) => {
+  const f = await fixture(t, plainTheme, true);
+  assert.match(f.full(), /▸ Status: read-only \[runtime\]/);
+  assert.doesNotMatch(f.full(), /Actually adopted|State:/);
+  const snapshot = f.control.getRuntimePolicy!()!;
+  await f.node("Status"); assert.match(f.full(), /State: active \[runtime\]/);
+  assert.ok(f.full().includes(`${new Date(snapshot.adoptedAt).toISOString()} [runtime]`));
+  assert.doesNotMatch(f.full(), /Virtual CPUs:|Network mode:|Guest image:|Docker mode:/);
+  await f.number("2"); assert.match(f.full(), /Desired changes pending \(not running\) \[runtime\]/);
+  f.control.getState = () => ({ status: "off", info: null });
+  assert.match(f.full(), /State: off \[runtime\]/); assert.match(f.full(), /Last known policy \(not running\)/);
+  f.control.getRuntimePolicy = () => undefined;
+  assert.match(f.full(), /No running policy adopted: No current policy \[runtime\]/);
+  delete f.control.getRuntimePolicy;
+  assert.match(f.full(), /Policy snapshot unavailable: No current policy \[runtime\]/);
+});
+
+test("Status state reasons remain safe and scrollable on one/short-row screens", async (t) => {
+  const f = await fixture(t);
+  f.control.getState = () => ({ status: "unavailable", info: null, reason: "Sandbox unavailable. \x1b[2JRepair host-owned policy and retry Reload; no automatic host escape." });
+  await f.node("Status", "State:");
+  for (const height of [1, 2, 3]) {
+    f.terminal.rows = height; f.terminal.columns = 24; let seen = "";
+    for (let n = 0; n < 30; n++) {
+      const lines = f.text().split("\n"); seen += (height >= 2 ? lines.slice(0, -1) : lines).join("\n") + "\n";
+      await f.key("\x1b[6~");
+    }
+    assert.match(seen.replace(/\s+/g, " "), /no automatic host escape/); assert.doesNotMatch(seen, /\x1b\[2J/);
+    for (let n = 0; n < 30; n++) await f.key("\x1b[5~");
   }
 });
 
@@ -290,17 +387,27 @@ test("Runtime snapshot is actual, immutable, frozen provenance; failed apply is 
   const builder = f.sdk.Sandbox.builder; let fail = true;
   f.sdk.Sandbox.builder = (name: string) => { const result = builder(name); if (fail) result.create = async () => { throw new Error("PRIVATE_REJECTED_CANDIDATE"); }; return result; };
   await f.save(); await f.choose("Confirm"); assert.match(f.text(), /Saved.*runtime failed/); assert.equal(f.control.getState().status, "unavailable"); assert.deepEqual(f.control.getRuntimePolicy!(), original);
-  await f.tree(); await f.expand("Runtime:"); assert.match(f.full(), /Last known policy \(not running\)/); assert.doesNotMatch(f.full(), /PRIVATE_REJECTED_CANDIDATE/);
+  await f.node("Status"); assert.match(f.full(), /Last known policy \(not running\)/); assert.doesNotMatch(f.full(), /PRIVATE_REJECTED_CANDIDATE/);
   await f.edit("General", "Show Footer:"); await f.choose("Use false"); fail = false; await f.action("Reload settings"); await f.choose("Confirm"); assert.equal(f.control.getState().status, "active");
   await f.save(); await f.choose("Confirm"); const adopted = f.control.getRuntimePolicy!()!; assert.equal(parseTomlConfig(adopted.effectiveToml, "global").value.cpus, 2); assert.equal(adopted.provenance.cpus, "temporary");
   await f.control.setEnabled(false); await f.tree(); assert.match(f.full(), /Last known policy \(not running\)/);
   f.integration!.endSession(); assert.equal(f.control.getRuntimePolicy!(), undefined);
 });
 
-test("Runtime e/a/d unavailable, save from Runtime still targets Configuration only", async (t) => {
+test("Status e/a/d unavailable, save from Status still targets Configuration draft only", async (t) => {
   const f = await fixture(t, plainTheme, true); const original = f.control.getRuntimePolicy!(); await f.number("2");
-  await f.tree(); await f.expand("Runtime:"); await f.seek("Runtime:"); await f.key("l");
-  for (const key of ["e", "a", "d"]) await f.key(key); assert.deepEqual(f.control.getRuntimePolicy!(), original); assert.match(f.text(), /read-only/);
+  await f.node("Status");
+  const labels = f.full().split("\n").filter((line) => line.includes("[runtime]"));
+  assert.ok(labels.length >= 9);
+  for (let n = 0; n < labels.length; n++) {
+    const selected = f.selected();
+    assert.match(selected, /\[runtime\]/);
+    for (const key of ["e", "a", "d"]) { await f.key(key); assert.equal(f.selected(), selected); }
+    assert.doesNotMatch(f.text().split("\n").at(-1)!, /e edit|a add|d inherit|d delete/);
+    await f.key("j");
+  }
+  assert.deepEqual(f.control.getRuntimePolicy!(), original);
+  await f.seek("Status:"); assert.match(f.selected(), /read-only/);
   await f.key("w"); await f.choose("Confirm"); assert.equal(f.settings.temporary().cpus, 2); assert.equal(parseTomlConfig(f.control.getRuntimePolicy!()!.effectiveToml, "global").value.cpus, 2);
 });
 
@@ -341,7 +448,8 @@ test("diagnostics preserve log-tail validation, prune errors and Docker reasons"
   const f = await fixture(t); let tail: number | undefined; f.control.getLogs = async (value) => { tail = value; return "selected log"; };
   f.control.pruneNow = async () => ({ inspected: 1, removed: [], kept: ["live"], errors: ["Test diagnostic: owner conflict"] });
   f.control.getState = () => ({ status: "active", info: { name: "guest", displayId: "guest", image: "test", pid: 1, createdAt: Date.now(), root: "/repo", cwd: "/repo", docker: { mode: "auto", readiness: "missing", reason: "Docker components not present" } } });
-  await f.expand("Runtime:"); await f.seek("Docker readiness:"); assert.match(f.full(), /Docker components not present/);
+  await f.node("Status", "Docker readiness:"); assert.match(f.full(), /Docker components not present/);
+  assert.doesNotMatch(f.full(), /Docker mode:|image: test/);
   await f.action("Recent logs"); await f.key("\x15"); await f.key("25"); await f.key("\r"); assert.equal(tail, 25); assert.match(f.text(), /selected log/);
   await f.action("Prune stale"); await f.choose("Confirm"); assert.match(f.text(), /Test diagnostic: owner conflict/);
   await f.action("Recent logs"); await f.key("\x15"); await f.key("-1"); f.terminal.columns = 24; f.terminal.rows = 3; await f.key("\r"); assert.match(f.text(), /Result: Invalid log/); assert.equal(tail, 25);
@@ -451,11 +559,14 @@ test("reconnect with missing or conflicting actual image never guesses disk VM p
     const snapshot = integration.control.getRuntimePolicy!()!; assert.equal(snapshot.verification, "reconnected"); assert.ok(!snapshot.knownFields.includes("image")); assert.ok(snapshot.knownFields.includes("fallbackMode"));
     assert.ok(!snapshot.knownFields.includes("cpus")); assert.ok(!snapshot.knownFields.includes("network")); assert.doesNotMatch(snapshot.effectiveToml, /image|cpus|memory_mib|network|mounts|secrets/); assert.equal(snapshot.provenance.image, undefined);
     f.control.getRuntimePolicy = () => snapshot; f.control.getState = integration.control.getState;
-    await f.tree(); await f.seek("Configuration"); await f.key("h"); await f.expand("Runtime:");
-    assert.doesNotMatch(f.full(), /image: ghcr|verified inspection/); // request-derived info.image is not a verified Runtime row
-    await f.expand("General"); await f.seek("Guest image:"); assert.match(f.selected(), /unknown — not verified \[unverified\]/);
-    await f.expand("Resources"); await f.seek("Virtual CPUs:"); assert.match(f.selected(), /unknown — not verified \[unverified\]/); assert.match(f.full(), /VM instance not verified/);
-    await f.key("e"); await f.key("a"); await f.key("d"); assert.match(f.selected(), /unknown — not verified/);
+    await f.node("Status");
+    assert.match(f.full(), /VM instance not verified/);
+    assert.doesNotMatch(f.full(), /image: ghcr|verified inspection|Virtual CPUs:|Guest image:|Docker mode:/);
+    await f.seek("VM instance not verified:");
+    for (const key of ["e", "a", "d"]) await f.key(key);
+    assert.match(f.selected(), /VM instance not verified:.*\[runtime\]/);
+    await f.node("Resources", "Virtual CPUs:"); assert.equal(f.selected(), `Virtual CPUs: ${DEFAULT_CONFIG.cpus} [default]`);
+    assert.equal(f.full().split("\n").filter((line) => line.includes("Virtual CPUs:")).length, 1);
   }
 });
 
