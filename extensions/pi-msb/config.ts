@@ -698,9 +698,13 @@ export async function canonicalPolicyLocation(path: string, realpath = defaultRe
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && dirname(path) !== path) {
       let missing = false;
-      try { await fs.lstat(path); }
+      let appeared = false;
+      try { appeared = !(await fs.lstat(path)).isSymbolicLink(); }
       catch (error) { missing = (error as NodeJS.ErrnoException).code === "ENOENT"; }
       if (missing) return join(await canonicalPolicyLocation(dirname(path), realpath), basename(path));
+      // Concurrent bootstrap can create a directory after realpath observed ENOENT.
+      // Retry once for an existing non-link; never treat a dangling link as missing.
+      if (appeared) { try { return await realpath(path); } catch {} }
     }
     throw new ConfigError(["host configuration path could not be canonicalized"]);
   }

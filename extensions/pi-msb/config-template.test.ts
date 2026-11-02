@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_CONFIG, ensureDefaultHostConfig, parseTomlConfig, resolveConfig, validateConfig } from "./config.ts";
+import { canonicalPolicyLocation, DEFAULT_CONFIG, ensureDefaultHostConfig, parseTomlConfig, resolveConfig, validateConfig } from "./config.ts";
 import { defaultConfigTemplate } from "./config-template.ts";
 
 const uncomment = (text: string): string => text.replace(/^# /gm, "");
@@ -71,6 +71,23 @@ test("config-template independent uncommented examples parse and validate withou
   assert.equal(inPlace.value.secrets?.length, 2);
   assert.equal(inPlace.value.mounts?.length, 4);
   assert.doesNotThrow(() => validateConfig(inPlace.value));
+});
+
+test("policy canonicalization retries concurrent directory creation but rejects dangling links", async (t) => {
+  const { root, agentDir } = await fixture(t);
+  let attempts = 0;
+  const canonical = await canonicalPolicyLocation(agentDir, async (path) => {
+    if (path === agentDir && attempts++ === 0) {
+      await mkdir(agentDir);
+      throw Object.assign(new Error("directory appeared after the missing-path lookup"), { code: "ENOENT" });
+    }
+    return realpath(path);
+  });
+  assert.equal(canonical, await realpath(agentDir));
+  assert.equal(attempts, 2);
+  const dangling = join(root, "dangling-agent");
+  await symlink(join(root, "missing-agent"), dangling);
+  await assert.rejects(canonicalPolicyLocation(dangling), /could not be canonicalized/);
 });
 
 test("config-template bootstrap creates private files only if missing and is idempotent", async (t) => {
