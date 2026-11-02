@@ -38,9 +38,9 @@ test("config-template is fully commented and covers current default settings", (
 
 test("config-template describes host-owned configuration without compatibility guidance", () => {
   const template = defaultConfigTemplate(DEFAULT_CONFIG);
-  assert.match(template, /Precedence: built-ins < environment < session overrides < this default\.toml\n## < host-owned per-project override/);
+  assert.match(template, /Precedence: built-ins < environment < this default\.toml\n## < host-owned per-project override < temporary panel settings/);
   assert.match(template, /projects\/Code\/app\/config\.toml/);
-  assert.match(template, /PI_MSB_\* environment settings and session \/msb overrides/);
+  assert.match(template, /PI_MSB_\* environment settings and the \/msb control panel/);
   assert.doesNotMatch(template, /legacy|deprecated|migrat|PI_MSB_CONFIG_FILE|CONFIG_DIR_NAME/i);
 });
 

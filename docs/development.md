@@ -45,6 +45,35 @@ just dev "Run docker info and report the storage driver"
 
 Run `just dev-image` by itself when you only need to refresh the local image.
 
+### Control-panel integration and testing
+
+`/msb` is the only command surface. `control-panel.ts` owns draft navigation/forms,
+`settings-fields.ts` is the complete searchable inventory, `settings-input.ts`
+retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
+never renders plaintext or uses an Input undo/kill ring. The settings backend
+keeps raw credentials/references private; do not stringify effective Config.
+Native `ctx.ui.custom` with a 100%-width/height overlay covers and pads the whole
+terminal viewport, including regular and alternate-screen renderers. This uses
+public Pi 0.84.4 APIs, not a second TUI, private layoutRoot access, render patches,
+or manually emitted screen-switch escapes. Pi owns overlay focus/restoration.
+Opening is exclusive; cancel, errors and shutdown dispose drafts and entry buffers.
+
+`control-panel.test.ts` exercises keyboard-only CRUD/apply/cancel, exact widths
+24/32/40/80/120 and heights 1/3/6/10/24/40, and actual native renderer composition
+with terminal doubles (including an installed viewport layout root). Runtime tests
+use an injected SDK to verify live adoption versus guarded resource recreation.
+Regressions also drive the panel through the native integration with the shared
+`test/fake-msb-sdk.ts` fixture: startup-preference safety, draft refresh/recovery,
+short-height feedback, repeated secret editing and removal reconciliation.
+These are not live-VM or human-terminal tests. Before release, manually verify
+both native modes, themes, IME, bracketed paste, rapid resizing, and session
+switch/shutdown. Do not enable terminal input recording when entering secrets.
+
+Changed saves preserve sparse parsed raw data, not TOML comments/layout. Ordinary
+external edits and unsafe paths fail validation; portable Node APIs cannot provide
+an atomic compare-and-swap rename against a malicious host process. Keep policy
+outside every writable workspace/mount. See [backend contract](settings-backend.md).
+
 ### Bundled flock addon
 
 Consumers receive prebuilt lock addons and do not need native build tools. Only

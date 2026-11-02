@@ -105,6 +105,8 @@ export interface ResolveConfigInput {
   xdgConfigHome?: string;
   agentDir?: string;
   cliOverridesToml?: string;
+  /** Memory-only, authoritative layer above host policy. */
+  temporaryOverrides?: DeepPartial<Config>;
   readFile?: (path: string) => Promise<string | null>;
   exists?: (path: string) => Promise<boolean>;
   realpath?: (path: string) => Promise<string>;
@@ -176,7 +178,7 @@ function camel(key: string): string {
   return input.replace(/_([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase()).replace(/Mib$/, "MiB");
 }
 function snake(key: string): string {
-  return key.replace(/MiB/g, "mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  return key.replace(/MiB/g, "Mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
 function removedWorkspaceIssues(value: Record<string, unknown>): string[] {
   return Object.keys(value)
@@ -490,7 +492,7 @@ function mergeObject(target: Record<string, any>, source: Record<string, any>, p
     if (CONTROL_KEYS.has(key) || value === undefined) continue;
     // Host policy lists are authoritative, never additive. Drop stale identity
     // provenance too, so replaced project mounts/secrets cannot retain authority.
-    if ((layer === "host-default" || layer === "host-project") && Array.isArray(value)) {
+    if ((layer === "host-default" || layer === "host-project" || layer === "temporary") && Array.isArray(value)) {
       target[key] = [];
       const field = pathKey(path);
       for (const prior of Object.keys(provenance)) if (prior.startsWith(`${field}[`)) delete provenance[prior];
@@ -595,6 +597,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   const config = mergeWithDefaults(raw);
   const issues: string[] = [];
   const n = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+  if (typeof config.lockDir !== "string" || !config.lockDir.trim()) issues.push(issueForPath("lockDir", "must be a non-empty string"));
   if (!config.image || typeof config.image !== "string") issues.push(issueForPath("image", "must be a non-empty string"));
   if (!["always", "if-missing", "never"].includes(config.pullPolicy)) issues.push(issueForPath("pullPolicy", "must be always, if-missing, or never"));
   if (!n(config.cpus) || config.cpus < 1 || config.cpus > 64) issues.push(issueForPath("cpus", "must be between 1 and 64"));
@@ -690,7 +693,7 @@ function layerFromText(name: ConfigLayerName, text: string, source: string): Par
 }
 
 /** Resolve missing policy locations through existing ancestors; dangling links fail closed. */
-async function canonicalPolicyLocation(path: string, realpath = defaultRealpath): Promise<string> {
+export async function canonicalPolicyLocation(path: string, realpath = defaultRealpath): Promise<string> {
   try { return await realpath(path); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && dirname(path) !== path) {
@@ -704,7 +707,7 @@ async function canonicalPolicyLocation(path: string, realpath = defaultRealpath)
 }
 
 /** A workspace must not be able to retarget any ancestor of a host policy path. */
-async function assertPolicyOutsideWorkspace(path: string, workspaceRoots: readonly string[], realpath = defaultRealpath): Promise<void> {
+export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots: readonly string[], realpath = defaultRealpath): Promise<void> {
   let current = resolve(path);
   while (true) {
     const canonical = await canonicalPolicyLocation(current, realpath);
@@ -742,6 +745,26 @@ export async function ensureDefaultHostConfig(workspaceRoot: string, agentDir = 
   }
 }
 
+/** Canonical host-owned targets; shared by resolution and the settings editor. */
+export async function hostConfigPaths(input: ResolveConfigInput): Promise<{ global: string; project: string }> {
+  const realpath = input.realpath ?? defaultRealpath;
+  const env = input.env ?? process.env;
+  const root = await realpath(input.repoRoot ?? input.cwd);
+  const home = await realpath(input.homedir ?? env.HOME ?? osHomedir());
+  const directory = join(resolve(input.agentDir ?? getAgentDir()), "pi-microsandbox");
+  return {
+    global: join(directory, "default.toml"),
+    project: isInside(root, home)
+      ? join(directory, "projects", relative(home, root), "config.toml")
+      : join(directory, "projects-absolute", relative(parse(root).root, root), "config.toml"),
+  };
+}
+
+/** Raw, non-normalized source data. Never expose this to a rendering/logging surface. */
+export function readRawConfig(text: string): Record<string, unknown> {
+  try { return readToml(text); } catch { throw new ConfigError(["invalid raw configuration"]); }
+}
+
 export async function resolveConfig(input: ResolveConfigInput): Promise<ResolvedConfig> {
   const env = input.env ?? process.env;
   const readFile = input.readFile ?? defaultRead;
@@ -769,17 +792,12 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     }
     layers.push(layerFromText("global", text, file));
   }
-  const home = await canonicalPath(input.homedir ?? env.HOME ?? osHomedir());
+  const { global: hostDefaultFile, project: hostProjectFile } = await hostConfigPaths(input);
   const agentDir = resolve(input.agentDir ?? getAgentDir());
-  // Keep out-of-home paths in a separate namespace, without '..' traversal or
-  // collisions with home-relative projects. Git subdirectories share one policy.
-  const hostProjectFile = isInside(projectRoot, home)
-    ? join(agentDir, "pi-microsandbox", "projects", relative(home, projectRoot), "config.toml")
-    : join(agentDir, "pi-microsandbox", "projects-absolute", relative(parse(projectRoot).root, projectRoot), "config.toml");
   const hostLayers: ParsedConfigLayer[] = [];
   const hostPolicyPaths: string[] = [];
   for (const [name, file] of [
-    ["host-default", join(agentDir, "pi-microsandbox", "default.toml")],
+    ["host-default", hostDefaultFile],
     ["host-project", hostProjectFile],
   ] as const) {
     // Protect even missing policy locations, including symlinked parents, so a
@@ -804,7 +822,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   // Reserve the whole policy directory while any host policy is active. A
   // writable child mount must not be able to create a higher-priority project
   // override that does not exist yet.
-  const hostPolicyRoot = hostLayers.length ? await canonicalPath(join(agentDir, "pi-microsandbox"), true) : undefined;
+  const hostPolicyRoot = hostLayers.length ? await canonicalPolicyLocation(join(agentDir, "pi-microsandbox"), realpath) : undefined;
   if (hostPolicyRoot) {
     if (isInside(projectRoot, hostPolicyRoot) || hostPolicyPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
@@ -814,6 +832,13 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   layers.push(parseEnvConfig(env));
   if (input.cliOverridesToml !== undefined) layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
   layers.push(...hostLayers);
+  if (input.temporaryOverrides) {
+    const temporary = clone(input.temporaryOverrides);
+    if (Array.isArray(temporary.secrets)) for (const secret of temporary.secrets) {
+      if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) secret.value = `$FILE:${await canonicalPath(resolve(input.cwd, secret.value.slice(6)), true)}`;
+    }
+    layers.push({ name: "temporary", value: temporary, warnings: [] });
+  }
   const merged = mergeConfigLayers(layers);
   warnings.push(...merged.warnings);
   let config = validateConfig(merged.value);
@@ -882,6 +907,13 @@ function setAt(base: any, parts: string[], value: unknown): any {
   current[parts[parts.length - 1]!] = clone(value);
   return out;
 }
+export function normalizeConfigPath(path: string): string[] {
+  const parts = path.split(".");
+  if (parts.some((part) => !part)) throw new ConfigError(["invalid setting path"]);
+  assertSafeConfigPath(parts);
+  return parts.map(camel);
+}
+
 export function applyOverride(base: DeepPartial<Config>, dottedSnakeKey: string, value: unknown): DeepPartial<Config> {
   const rawParts = dottedSnakeKey.split(".").filter(Boolean);
   assertSafeConfigPath(rawParts);

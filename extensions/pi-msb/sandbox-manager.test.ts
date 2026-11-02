@@ -314,3 +314,20 @@ test("off persists direct identity and on boots again", async () => {
   assert.equal((await manager.setEnabled(true)).status, "active");
   await manager.shutdown();
 });
+
+test("live routing/footer settings adopt without disposal; forced recreation never reconnects matching resource", async () => {
+  const events: string[] = [];
+  const req = request();
+  let inspected: InspectedSandbox | null = null;
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => inspected,
+    createSandbox: async () => { events.push("create"); inspected = { name: sandboxNameFor(req.sessionId), status: "running", labels: labels(req) }; return {}; },
+  }));
+  await manager.boot(req); events.length = 0;
+  await manager.boot({ ...req, config: config({ showFooter: false }) });
+  assert.equal(events.length, 0);
+  await manager.boot({ ...req, forceRecreate: true, config: config({ cpus: 2 }) });
+  assert.ok(events.includes("stop-remove")); assert.ok(events.includes("create")); assert.ok(!events.includes("connect"));
+  assert.ok(events.indexOf("lock") < events.lastIndexOf("stop-remove"));
+  await manager.shutdown();
+});

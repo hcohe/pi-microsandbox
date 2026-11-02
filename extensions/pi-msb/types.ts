@@ -98,7 +98,7 @@ export type DeepReadonly<T> = T extends (...args: any[]) => unknown
     : T extends object
       ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
       : T;
-export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project";
+export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "temporary";
 export interface ParsedConfigLayer {
   name: ConfigLayerName;
   value: DeepPartial<Config>;
@@ -330,6 +330,8 @@ export interface BootRequest {
   workspace: Workspace;
   config: Config;
   restored: PersistedSandboxState | null;
+  /** Recreate only after ownership validation, even when inspected labels match. */
+  forceRecreate?: boolean;
 }
 export interface SandboxManager extends ToolOpsProvider {
   boot(request: BootRequest): Promise<RuntimeState>;
@@ -357,9 +359,13 @@ export type ExecFn = (
 // ------------------------------------------------------- command/control ----
 
 export interface MsbControl {
+  /** Present on the native integration; optional for third-party control adapters. */
+  readonly settings?: import("./settings.ts").SettingsEditor;
   getState(): RuntimeState;
   setEnabled(enabled: boolean): Promise<void>;
-  reload(): Promise<void>;
+  reload(options?: { allowRestart?: boolean }): Promise<void>;
+  /** Native facade compares candidate to the actual adopted runtime configuration privately. */
+  previewSettings?(draft: import("./settings.ts").SettingsDraft): Promise<import("./settings.ts").SettingsPreview>;
   pruneNow(): Promise<PruneReport>;
   getLogs(tailLines?: number): Promise<string>;
   getEffectiveConfig(): ResolvedConfig;

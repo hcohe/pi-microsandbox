@@ -5,10 +5,13 @@
 Configure host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml`,
 created if missing as a fully commented reference on the first enabled session.
 Use host-owned per-project files for project-specific overrides, `PI_MSB_*`
-environment variables for launch settings, and `/msb` controls for session settings.
+environment variables for launch settings, and the [`/msb` control panel](commands.md)
+for temporary, project or global changes. There are no `/msb` subcommands.
 
-Effective precedence is built-ins < environment < session settings
-< **host-owned defaults** < **host-owned project overrides**.
+Settings take precedence in this order: built-ins < environment
+< **host-owned defaults** < **host-owned project overrides** < **temporary settings**.
+Temporary settings are memory-only and authoritative, including empty lists;
+they are cleared when switching sessions or shutting down.
 Keep configuration and credential files outside the mounted workspace and all
 writable mounts.
 
@@ -52,7 +55,7 @@ Keep settings the agent must not change outside the mounted worktree:
 
 `default.toml` supplies a host-owned baseline for **all projects**. A host-owned
 per-project `config.toml` overrides that baseline. Both layers take precedence
-over environment variables and session settings.
+over environment variables, but not deliberate temporary changes.
 For example, pin `fallback_mode = "block"` in `default.toml` and set a project's
 `memory_mib` in its host-owned override.
 
@@ -83,12 +86,17 @@ mkdir -p -m 700 "$agent_dir/pi-microsandbox/projects/Code/app"
   "$agent_dir/pi-microsandbox/projects/Code/app/config.toml")
 ```
 
-Run `/msb reload` after editing. Keep the agent directory outside the mounted
+Open `/msb` → Actions → Reload settings after external edits. Keep the agent directory outside the mounted
 workspace.
 
 Both host-owned files are loaded regardless of Pi's project trust state. They
-are applied last, including after `/msb set` and restored session
-overrides, with the project-specific file after `default.toml`.
+are applied after launch settings, with the project-specific file after `default.toml`.
+The **Apply temporarily** button places memory-only changes above both files,
+never in the transcript. They reset on session switch/end, including resuming the
+same session. **Inherit** removes the chosen scope assignment; Actions → Reset
+temporary settings clears memory overrides. The project/global buttons save only
+dirty raw fields, preserving unedited references without copying inherited
+credentials. See [save scopes and restart confirmation](commands.md#three-save-buttons).
 Only explicitly configured fields override lower layers; omitted fields inherit
 from the preceding layers, including the host-owned default. Nested tables
 override individual fields. **Lists in both host-owned layers replace the entire
@@ -126,8 +134,8 @@ Make `MY_PROJECT_NPM_TOKEN` available to the host Pi process before launch.
 Alternatively, `$FILE:token` reads a host file beside the file declaring it
 (`default.toml` or the project override); absolute file references are also
 supported. Neither the policy nor the secret
-file needs to be mounted into the guest. `/msb config` shows effective redacted
-settings; `/msb reload` re-reads the policy.
+file needs to be mounted into the guest. `/msb` → Actions shows effective redacted
+configuration and re-reads policy with Reload settings.
 
 On the first enabled session (and on reload), setup creates `default.toml`
 **exclusively if missing**, with a comprehensive fully commented reference:
@@ -138,7 +146,8 @@ chmodded. Newly created directories use mode `0700` and the file uses `0600`
 (subject to a more restrictive umask). No configuration is written by a bare
 extension import, factory registration, or the model-list smoke command;
 `PI_MSB_DISABLE=1` also skips setup. Creation failures block sandbox startup
-rather than falling back to host execution. Per-project files are manual;
+rather than falling back to host execution. Per-project files are created by the
+project save button or manually from the host;
 without one, host defaults still apply.
 An unreadable or invalid host file fails closed rather than silently dropping
 that layer. Both host files must remain outside the workspace, including through
@@ -146,7 +155,7 @@ symlinks. While a host policy is active, writable extra mounts may not overlap
 the host policy directory, including paths for project overrides not yet created.
 Keep the agent directory and secret files outside all writable mounts. Setting only `secrets` does **not** lock other
 permissions: pin those fields explicitly, as above. This feature does not disable
-explicit user controls such as `/msb off` or `PI_MSB_DISABLE`, and is not isolation
+explicit user controls such as Actions → Turn off or `PI_MSB_DISABLE`, and is not isolation
 from host code you independently choose to load or execute.
 
 ## Other configuration behavior
@@ -192,7 +201,7 @@ from host code you independently choose to load or execute.
   outer mapping.
 - Secrets require a non-empty `allow_hosts` list. `$ENV:NAME` and `$FILE:path`
   references are resolved only while constructing the SDK builder. Effective
-  config, warnings, errors, and `/msb config` redact literal values. Process
+  config, warnings, errors, and the control panel redact literal values. Process
   control variables such as `DOCKER_HOST`, `DOCKER_CONTEXT`, `PATH`,
   `BASH_ENV`, and `LD_PRELOAD` cannot be forwarded with `host_env` or injected
   as secrets.
@@ -221,5 +230,5 @@ PI_MSB_SHOW_FOOTER=false         # hide the MSB status from Pi's footer
 PI_MSB_ROUTE_TOOLS='read,write'  # POSIX delimiter for simple arrays
 ```
 
-Do not put resolved secret values in session overrides, logs, issue reports, or
+Do not put resolved secret values in logs, issue reports, or
 shell history.

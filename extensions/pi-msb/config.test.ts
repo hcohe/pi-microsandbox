@@ -443,3 +443,9 @@ test("open mode warning and empty secret host hard fail", async () => {
     readFile: async () => null, realpath: async (path) => path,
   }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("allowHosts")));
 });
+
+test("memory_mib round trips without losing its word separator", () => {
+  const text = overridesToToml({ memoryMiB: 1024 });
+  assert.match(text, /memory_mib = 1024/);
+  assert.equal(parseTomlConfig(text, "cli").value.memoryMiB, 1024);
+});

@@ -1,3 +1,4 @@
+import { classifySettingsEffect } from "./settings.ts";
 import {
   displayId,
   sandboxNameFor,
@@ -282,12 +283,23 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       runtime &&
       previousRequest &&
       sandboxName === requestSandboxName(request) &&
+      !request.forceRecreate &&
       sameBootRequest(previousRequest, request)
     ) {
       return state;
     }
+    if (state.status === "active" && runtime && previousRequest && !request.forceRecreate &&
+        previousRequest.sessionId === request.sessionId && previousRequest.cwd === request.cwd &&
+        previousRequest.workspace.hostRoot === request.workspace.hostRoot &&
+        previousRequest.workspace.guestRoot === request.workspace.guestRoot &&
+        requestSandboxName(previousRequest) === requestSandboxName(request) &&
+        classifySettingsEffect(previousRequest.config, request.config) !== "restart") {
+      lastRequest = request;
+      return state;
+    }
     if (state.status === "active" && runtime) {
       await shutdownInternal(false);
+      if (manager.getState().status === "unavailable") return state;
     }
 
     lastRequest = request;
@@ -337,7 +349,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         raw = await deps.createSandbox(request);
       } else if (!isManagedOwner(inspected, request)) {
         throw new Error(`sandbox name conflict: ${name}`);
-      } else if (!matchesWorkspace(inspected, request)) {
+      } else if (request.forceRecreate || !matchesWorkspace(inspected, request)) {
         // The labels prove this is ours, but its configuration is stale. Only
         // that proven ownership permits a replacement.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);

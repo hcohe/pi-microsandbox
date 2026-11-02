@@ -36,7 +36,9 @@ cd /path/to/project
 pi
 ```
 
-Inside Pi, `/msb status` shows the sandbox and selected workspace root.
+Inside Pi, **`/msb`** opens a responsive full-screen control panel: status,
+resources, networking, masked secrets, mounts, sources and maintenance actions.
+Use arrows/Tab, Enter and Esc; search every setting by name or description.
 
 ## Your project, your sandbox
 
@@ -45,15 +47,18 @@ The first enabled session creates
 examples, and safety guidance. Uncomment what you need; existing files are left
 alone.
 
-Want a different setup for `~/Code/app`? Create this host-owned override:
+Use **Apply temporarily**, **Apply to project settings**, or **Apply to global
+settings** to apply only your dirty fields. Restarting settings ask before losing
+guest ephemeral state; temporary changes reset on session switch/end. Project
+settings for `~/Code/app` live outside the worktree:
 
 ```text
 ~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml
 ```
 
-`PI_MSB_*` environment variables and session `/msb` controls work too. Effective
-precedence is built-ins < environment < session settings < host defaults < project
-overrides. Lists in host-owned files replace lower-layer lists.
+`PI_MSB_*` environment variables work too. Settings take precedence in this order:
+built-ins < environment < host defaults < project overrides < temporary changes.
+Lists in host-owned files replace lower-layer lists.
 
 Keep configuration and credentials outside the workspace and all writable mounts.
 [Configuration](docs/configuration.md) covers project paths, Pi's custom agent
@@ -73,8 +78,8 @@ mount too. Use separate host worktrees when you need independent changes.
 including preparing a dedicated `.env` per project or worktree. Only put credentials
 the agent is allowed to access there; worktree management is not secret isolation.
 
-Sandbox failures stop routed tools by default. `/msb off` explicitly switches to
-unsandboxed host tools; `fallback_mode = "host"` opts into automatic host execution
+Sandbox failures stop routed tools by default. `/msb` → Actions → **Turn off**
+explicitly switches to unsandboxed host tools after confirmation; `fallback_mode = "host"` opts into automatic host execution
 after failure. Keep the default `"block"` for untrusted work.
 [Know the boundary →](docs/safety.md)
 
@@ -86,7 +91,7 @@ after failure. Keep the default `"block"` for untrusted work.
 | Understand the workspace mount | [Storage](docs/storage.md) |
 | Pick or build an image | [Images](docs/images.md) |
 | Tune networking, secrets, and mounts | [Configuration](docs/configuration.md) |
-| Find an `/msb` command | [Commands](docs/commands.md) |
+| Use the `/msb` control panel | [Commands](docs/commands.md) |
 | Understand host access | [Safety model](docs/safety.md) |
 | Unstick a sandbox | [Troubleshooting](docs/troubleshooting.md) |
 | Hack on the extension | [Development](docs/development.md) |

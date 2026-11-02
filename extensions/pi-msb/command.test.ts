@@ -55,65 +55,27 @@ test("status and prompt report the mounted root without mode or volume language"
   assert.doesNotMatch(note, /mode|volume|seed/i);
 });
 
-test("status includes current identity and Docker capability", async () => {
+test("headless /msb is actionable and never mutates runtime", async () => {
   const f = fixture();
+  f.ctx.hasUI = false; f.ctx.mode = "print";
   await createCommandHandler(f.control)("", f.ctx);
-  const message = f.notices.at(-1)?.message ?? "";
-  assert.match(message, /Name: pi-msb-0123456789abcdef0123/);
-  assert.match(message, /Workspace root: \/repo/);
-  assert.match(message, /Workdir: \/repo\/packages\/app/);
-  assert.match(message, /Docker mode: auto/);
-  assert.match(message, /Docker readiness: ready/);
-  assert.match(message, /Docker version: 29\.8\.0/);
-  assert.doesNotMatch(message, /volume|seed|workspace mode/i);
+  assert.match(f.notices.at(-1)?.message ?? "", /interactive terminal mode/);
+  assert.deepEqual(f.calls, []);
 });
 
-test("on, off, and reload wait for idle before handing off", async () => {
+test("every legacy public subcommand is rejected without side effects", async () => {
   const f = fixture();
-  const handler = createCommandHandler(f.control);
-  await handler("off", f.ctx);
-  await handler("on", f.ctx);
-  await handler("reload", f.ctx);
-  assert.deepEqual(
-    f.calls.filter((call) => ["waitForIdle", "setEnabled", "reload"].includes(call.method)).map((call) => call.method),
-    ["waitForIdle", "setEnabled", "waitForIdle", "setEnabled", "waitForIdle", "reload"],
-  );
-});
-
-test("prune, config, logs, and overrides use the control facade", async () => {
-  const f = fixture();
-  const handler = createCommandHandler(f.control);
-  await handler("prune", f.ctx);
-  assert.match(f.notices.at(-1)?.message ?? "", /Removed: old/);
-  await handler("config", f.ctx);
-  assert.match(f.notices.at(-1)?.message ?? "", /redacted/);
-  assert.doesNotMatch(f.notices.at(-1)?.message ?? "", /secret-value/);
-  await handler("logs 25", f.ctx);
-  await handler("set network.mode deny", f.ctx);
-  await handler("unset network.mode", f.ctx);
-  await handler("reset", f.ctx);
-  assert.deepEqual(f.calls.slice(-4), [
-    { method: "getLogs", args: [25] },
-    { method: "setOverride", args: ["network.mode", "deny"] },
-    { method: "unsetOverride", args: ["network.mode"] },
-    { method: "resetOverrides", args: [] },
-  ]);
-});
-
-test("removed mode, volume, export, and copy commands are unavailable", async () => {
-  const f = fixture();
-  const handler = createCommandHandler(f.control);
-  for (const command of ["volumes ls", "export a", "copy a b", "mode git"]) {
-    await handler(command, f.ctx);
-    assert.match(f.notices.at(-1)?.message ?? "", /unknown \/msb command/);
-    assert.equal(f.notices.at(-1)?.type, "error");
+  for (const command of ["status", "on", "off", "reload", "prune", "logs 25", "config", "set cpus 2", "unset cpus", "reset", "network deny", "seal", "mount add a b", "help", "volumes ls", "export a"]) {
+    await createCommandHandler(f.control)(command, f.ctx);
+    assert.match(f.notices.at(-1)?.message ?? "", /has no subcommands/);
   }
+  assert.deepEqual(f.calls, []);
 });
 
-test("registerMsbCommand registers the facade-backed handler", () => {
-  const f = fixture();
-  let registration: any;
-  registerMsbCommand({ registerCommand: (_name: string, options: any) => { registration = options; } } as any, f.control);
-  assert.equal(registration.description, "Manage pi-microsandbox");
+test("registerMsbCommand exposes only panel opening and no completions", () => {
+  const f = fixture(); let registration: any;
+  registerMsbCommand({ registerCommand: (name: string, options: any) => { assert.equal(name, "msb"); registration = options; } } as any, f.control);
+  assert.equal(registration.description, "Open Microsandbox control panel");
   assert.equal(typeof registration.handler, "function");
+  assert.equal(registration.getArgumentCompletions, undefined);
 });

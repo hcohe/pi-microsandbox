@@ -13,7 +13,8 @@ The default is fail-closed:
   a sandbox is active it requires interactive approval for the exact tool,
   working directory, and recursively sorted arguments. It is unavailable in
   headless operation and is never silently selected.
-- `/msb off` is an explicit host-mode handoff and does not prompt. This is
+- `/msb` → Actions → Turn off is an explicit host-mode handoff and asks for
+  confirmation before stopping/removing the guest. This is
   different from `fallback_mode = "host"`, which automatically uses host tools
   after a sandbox failure and is shown as `MSB host fallback`. Both are
   unsandboxed controls, not workspace settings.
@@ -63,9 +64,21 @@ The first enabled session creates a missing `default.toml` as a fully commented
 reference, not an active policy; existing files (even empty ones) are preserved.
 New files use mode `0600`, new directories `0700`, and setup errors block startup.
 `pi-microsandbox/default.toml` applies to all projects; a host-owned per-project
-file overrides it. Both take precedence over environment and session settings,
-and their lists replace rather than extend lower-layer lists. `PI_MSB_*`
+file overrides it. Both take precedence over launch environment/CLI settings;
+deliberate temporary panel changes sit above both files, last only for the current
+session and are not written to its transcript. Host lists replace rather than
+extend lower-layer lists. `PI_MSB_*`
 environment variables and session `/msb` controls are also supported.
+Panel saves revalidate canonical host targets and workspace/mount guards, reject
+symlink targets/ancestors and external changes, and replace files atomically with
+mode 0600 (new directories 0700). Portable filesystem checks cannot prevent every
+host-process race; the policy directory must remain host-owned and inaccessible
+to guest writes. Save confirmation is a security decision: open networking,
+pass-through tools, host fallback and writable mounts widen the boundary.
+Secrets use masked entry and are never prefilled; unchanged raw references stay
+private. Configured secret bytes are redacted from recent log display, but guest
+application logs may contain other sensitive data. Do not share logs blindly.
+
 Unspecified settings are **not** locked. Missing overrides preserve the usual
 configuration behavior; unreadable or invalid overrides fail closed.
 

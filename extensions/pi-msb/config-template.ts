@@ -11,12 +11,12 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ## new configuration directories use mode 0700. Keep this outside any workspace.
 ## The workspace is mounted read/write, including the entire enclosing Git worktree.
 ## Sandbox failures block by default; never enable host fallback for untrusted code.
-## PI_MSB_* environment settings and session /msb overrides are also supported.
-## Precedence: built-ins < environment < session overrides < this default.toml
-## < host-owned per-project override. Host lists REPLACE lower lists (including
-## secrets/mounts); [] clears them.
+## PI_MSB_* environment settings and the /msb control panel are also supported.
+## Precedence: built-ins < environment < this default.toml
+## < host-owned per-project override < temporary panel settings.
+## Host lists REPLACE lower lists (including secrets/mounts); [] clears them.
 ##
-## Per-project configuration (create manually; not automatically generated):
+## Per-project configuration (panel project save button or manual host creation):
 ## Use the canonical Git worktree root, or canonical cwd for a non-Git project.
 ## For ~/Code/app, create <agentDir>/pi-microsandbox/projects/Code/app/config.toml.
 ## For /srv/app outside home, use
@@ -29,7 +29,8 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ##   mkdir -p -m 700 "$agent_dir/pi-microsandbox/projects/Code/app"
 ##   (umask 077; set -C; printf 'cpus = 2\\n' > "$agent_dir/pi-microsandbox/projects/Code/app/config.toml")
 ## Review mounts, secrets, and host permissions before enabling settings.
-## Run /msb reload after editing configuration.
+## Open /msb; choose Actions > Reload settings after external edits.
+## The panel saves dirty fields only to temporary, project or global scope.
 
 ## Defaults: resource identity and lifecycle
 ## Digest-pinned image; custom images must supply the required runtime tools.
@@ -45,7 +46,8 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ## Timeouts in milliseconds, >0.
 # stop_timeout_ms = 10000
 # detached = true
-## replace=true can replace an existing sandbox; leave false unless intentional.
+## Replacement is owner-guarded and coordinated by the panel.
+## These replacement preference fields are retained; cleanup uses stop_timeout_ms.
 # replace = false
 # replace_timeout_ms = 10000
 ## sandbox_name defaults to null (automatic session-derived name); TOML has no null.
@@ -64,7 +66,8 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ## route_tools accepts only read, write, edit, ls, find, grep, bash.
 # route_tools = ${JSON.stringify(config.routeTools)}
 # pass_through_tools = ${JSON.stringify(config.passThroughTools)}
-## allow_host_execution allows explicit /msb off (host tools); !/!! are always host.
+## allow_host_execution permits explicit host-target tools; panel Turn off uses host tools.
+## !/!! are always host.
 # allow_host_execution = true
 ## allow_skill_reads permits only discovered skill files and generated prompt files.
 # allow_skill_reads = true
@@ -100,7 +103,7 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ## Use references, not literal credentials. env is a valid environment name;
 ## allow_hosts must be a non-empty list of destination hosts for secret injection.
 ## $ENV:NAME reads the host environment; $FILE:path reads a host file (relative
-## paths resolve beside this host policy file). Values are redacted in /msb config.
+## paths resolve beside this host policy file). Literal values are redacted in the panel; entry is always masked.
 # [[secrets]]
 # env = "API_TOKEN"
 # value = "$ENV:API_TOKEN"

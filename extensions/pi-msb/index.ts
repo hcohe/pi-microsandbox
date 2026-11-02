@@ -12,6 +12,7 @@ import { createHostReadAccess } from "./skill-access.ts";
 import { createSandboxGrepExecute } from "./operations-exec.ts";
 import { registerMsbCommand, systemPromptNote } from "./command.ts";
 import { createMsbIntegration } from "./control.ts";
+import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
 import { registerSandboxTools } from "./tools.ts";
 import type { ResolvedConfig, RuntimeState } from "./types.ts";
@@ -49,6 +50,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
   const currentProvider = integration.provider;
   let currentContext: ExtensionContext | undefined;
+  let currentSessionId: string | undefined;
+  let currentCwd: string | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
   let customFooterInstalled = false;
@@ -115,6 +118,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     currentContext = ctx;
+    currentSessionId = ctx.sessionManager.getSessionId();
+    currentCwd = ctx.cwd;
     updateStatus(ctx, { status: "booting", info: null });
     try {
       // Discover the workspace before host config bootstrap/resolution, then
@@ -137,6 +142,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    await closeControlPanel();
+    integration.endSession();
     stopBootAnimation();
     await integration.manager.shutdown();
     hostReads.clear();
@@ -146,10 +153,19 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     currentContext = undefined;
   });
 
-  // The tools module owns the skill capture hook. This handler only keeps the
-  // footer in sync after transitions initiated by commands or reload.
-  pi.on("session_info_changed", () => {
-    if (currentContext) updateStatus(currentContext, integration.control.getState());
+  // The tools module owns skill capture. Session identity changes must invalidate
+  // temporary settings before routing tools under the replacement session.
+  pi.on("session_info_changed", async (_event, ctx) => {
+    if (!currentContext) return;
+    if (ctx.sessionManager.getSessionId() !== currentSessionId || ctx.cwd !== currentCwd) {
+      await closeControlPanel();
+      integration.endSession();
+      currentContext = ctx;
+      currentSessionId = ctx.sessionManager.getSessionId();
+      currentCwd = ctx.cwd;
+      await integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+    }
+    updateStatus(ctx, integration.control.getState());
   });
 
   void lastConfig;
