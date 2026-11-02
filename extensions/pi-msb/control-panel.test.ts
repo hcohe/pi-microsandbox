@@ -67,7 +67,7 @@ test("one Configuration root with collapsed runtime Status, tree h/l and arrow p
   await f.key("l"); assert.equal(f.selected(), "General"); await f.key("\x1b[D"); assert.equal(f.selected(), "Configuration");
   await f.key("\x1b[C"); assert.equal(f.selected(), "General"); await f.key("l"); await f.key("l"); assert.match(f.selected(), /Guest image/);
   await f.key("h"); assert.equal(f.selected(), "General"); await f.key("h"); assert.match(f.full(), /▸ General/);
-  await f.node("Status"); await f.key("h"); assert.match(f.full(), /▸ Status: read-only \[runtime\]/);
+  await f.node("Status"); await f.key("h"); assert.equal(f.selected(), "Status"); assert.match(f.full(), /▸ Status *$/m);
   assert.doesNotMatch(f.full(), /State:|Runtime|Actually adopted|Policy snapshot unavailable/);
   assert.equal(f.full().split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 1);
   await f.key("h"); assert.equal(f.selected(), "Configuration"); await f.key("h"); await f.key("j"); assert.equal(f.selected(), "Configuration");
@@ -152,7 +152,8 @@ test("editor, transient and busy footers are mode-correct and never displace con
 
 test("Status metadata is runtime-only, collapsed, truthful when inactive/unknown/pending", async (t) => {
   const f = await fixture(t, plainTheme, true);
-  assert.match(f.full(), /▸ Status: read-only \[runtime\]/);
+  assert.match(f.full(), /▸ Status *$/m);
+  assert.doesNotMatch(f.full(), /Status: read-only|Status \[runtime\]/);
   assert.doesNotMatch(f.full(), /Actually adopted|State:/);
   const snapshot = f.control.getRuntimePolicy!()!;
   await f.node("Status"); assert.match(f.full(), /State: active \[runtime\]/);
@@ -399,6 +400,7 @@ test("Status e/a/d unavailable, save from Status still targets Configuration dra
   await f.node("Status");
   const labels = f.full().split("\n").filter((line) => line.includes("[runtime]"));
   assert.ok(labels.length >= 9);
+  await f.key("l"); // Only inner items carry runtime labels; enter the first child.
   for (let n = 0; n < labels.length; n++) {
     const selected = f.selected();
     assert.match(selected, /\[runtime\]/);
@@ -407,7 +409,8 @@ test("Status e/a/d unavailable, save from Status still targets Configuration dra
     await f.key("j");
   }
   assert.deepEqual(f.control.getRuntimePolicy!(), original);
-  await f.seek("Status:"); assert.match(f.selected(), /read-only/);
+  await f.seek("Status"); assert.equal(f.selected(), "Status");
+  for (const key of ["e", "a", "d"]) { await f.key(key); assert.equal(f.selected(), "Status"); }
   await f.key("w"); await f.choose("Confirm"); assert.equal(f.settings.temporary().cpus, 2); assert.equal(parseTomlConfig(f.control.getRuntimePolicy!()!.effectiveToml, "global").value.cpus, 2);
 });
 

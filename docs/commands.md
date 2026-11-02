@@ -14,8 +14,8 @@ files or `PI_MSB_*` before starting a session instead.
   committed origin: default, environment, global, project or ephemeral. Mixed
   collections show entry sources rather than claiming a single group owner.
   `* draft`, `draft entry` and `inherit on save` mark intent, not a saved origin.
-- **Configuration → Status** starts collapsed like other groups. Every node is
-  read-only and labeled **[runtime]**: state, adoption/last-known timestamp,
+- **Configuration → Status** starts collapsed with a plain heading. Its inner
+  items are read-only and labeled **[runtime]**: state, adoption/last-known timestamp,
   pending changes, identity (name/displayId/PID/cwd/root/createdAt), and Docker
   readiness/version/storage/reason when known. Configurable policy is not
   duplicated here. Drafts, external file edits, canceled saves and failed

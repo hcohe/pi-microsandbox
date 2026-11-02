@@ -118,7 +118,7 @@ export class ControlPanel implements Component, Focusable {
       }),
     }));
     const statusRow = (id: string, label: string, value?: string, detail?: string): Row => ({ id: `configuration/status/${id}`, label, value, detail, origin: "runtime", readonly: true });
-    const status: Row = { id: "configuration/status", label: "Status", value: "read-only", origin: "runtime", readonly: true, children: [
+    const status: Row = { id: "configuration/status", label: "Status", readonly: true, children: [
       statusRow("state", "State", state.status, state.reason),
       ...((this.#dirty || policy && SETTINGS_FIELDS.some((field) => policy.knownFields.includes(normalizeConfigPath(field.path)[0] as keyof Config) && JSON.stringify(valueAt(this.#values, field.path)) !== JSON.stringify(valueAt(runtimeValues, field.path)))) ? [statusRow("pending", "Desired changes pending (not running)")] : []),
       statusRow("adoption", policy ? state.status === "active" ? "Actually adopted policy" : "Last known policy (not running)" : this.#control.getRuntimePolicy ? "No running policy adopted" : "Policy snapshot unavailable", policy ? new Date(policy.adoptedAt).toISOString() : "No current policy"),

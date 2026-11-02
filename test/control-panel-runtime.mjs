@@ -79,7 +79,7 @@ try {
         assert.equal(panel.focused, true);
         assert.equal(editor.focused, false);
         const initial = tui.stripTerminalSequences(panel.render(80).join("\n"));
-        assert.match(initial, /▸ Status: read-only \[runtime\]/);
+        assert.match(initial, /▸ Status *$/m);
         assert.doesNotMatch(initial, /Runtime|State:|No running policy adopted/);
         assert.equal(initial.split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 1);
         for (const [width, height] of [[80, 24], [24, 2], [24, 6], [32, 12], [40, 10], [120, 20], [1, 1]]) {
@@ -115,7 +115,7 @@ try {
           if (line.includes("▸")) await key("l");
         };
         assert.doesNotMatch(tui.stripTerminalSequences(panel.render(80).join("\n")), /Section:|Search all settings/);
-        await expand("Status:");
+        await expand("Status");
         const status = tui.stripTerminalSequences(panel.render(80).join("\n"));
         assert.match(status, /State: off \[runtime\]/);
         assert.match(status, /No running policy adopted: No current policy \[runtime\]/);
@@ -123,7 +123,7 @@ try {
         await choose("State:");
         for (const commandKey of ["e", "a", "d"]) await key(commandKey);
         assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> .*State: off \[runtime\]/);
-        await choose("Status:"); await key("h");
+        await choose("Status"); await key("h");
         if (launch === 1 && !savedScopes) {
           for (const [saveKey, value] of [["w", "false"], ["P", "true"], ["G", "false"]]) {
             await expand("General"); await choose("Show Footer:"); await key("e"); await select(`Use ${value}`);
