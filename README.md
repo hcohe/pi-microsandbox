@@ -36,9 +36,10 @@ cd /path/to/project
 pi
 ```
 
-Inside Pi, **`/msb`** opens a responsive full-screen control panel: status,
-resources, networking, masked secrets, mounts, sources and maintenance actions.
-Use arrows/Tab, Enter and Esc; search every setting by name or description.
+Inside Pi, **`/msb`** opens one full-screen tree: **Configuration** for desired
+settings and **Runtime** for the read-only actually adopted policy. Expand with
+`l`/right, fold or go to parent with `h`/left, move with `j`/`k` or up/down.
+`e` edits, `a` adds, `d` deletes/inherits, and `q` closes. [All keys →](docs/commands.md)
 
 ## Your project, your sandbox
 
@@ -47,9 +48,9 @@ The first enabled session creates
 examples, and safety guidance. Uncomment what you need; existing files are left
 alone.
 
-Use **Apply temporarily**, **Apply to project settings**, or **Apply to global
-settings** to apply only your dirty fields. Restarting settings ask before losing
-guest ephemeral state; temporary changes reset on session switch/end. Project
+Use **`w` (ephemeral)**, **`P` (project)**, or **`G` (global)** to save and reload
+only your intended edits. Restarting settings ask before losing guest ephemeral
+state; ephemeral changes reset on session switch/end. Project
 settings for `~/Code/app` live outside the worktree:
 
 ```text
@@ -57,7 +58,7 @@ settings for `~/Code/app` live outside the worktree:
 ```
 
 `PI_MSB_*` environment variables work too. Settings take precedence in this order:
-built-ins < environment < host defaults < project overrides < temporary changes.
+built-ins < environment < host defaults < project overrides < ephemeral changes.
 Lists in host-owned files replace lower-layer lists.
 
 Keep configuration and credentials outside the workspace and all writable mounts.
@@ -78,7 +79,7 @@ mount too. Use separate host worktrees when you need independent changes.
 including preparing a dedicated `.env` per project or worktree. Only put credentials
 the agent is allowed to access there; worktree management is not secret isolation.
 
-Sandbox failures stop routed tools by default. `/msb` → Actions → **Turn off**
+Sandbox failures stop routed tools by default. `/msb` → Configuration → Actions → **Turn off**
 explicitly switches to unsandboxed host tools after confirmation; `fallback_mode = "host"` opts into automatic host execution
 after failure. Keep the default `"block"` for untrusted work.
 [Know the boundary →](docs/safety.md)

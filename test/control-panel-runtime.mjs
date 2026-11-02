@@ -94,26 +94,34 @@ try {
         const choose = async (label) => {
           for (let n = 0; n < 300; n++) {
             const text = tui.stripTerminalSequences(panel.render(80).join("\n"));
-            if (text.split("\n").some((line) => line.startsWith(`> ${label}`))) { await key("\r"); return; }
-            await key("\t");
+            if (text.split("\n").some((line) => line.startsWith("> ") && line.slice(2).replace(/^\s*[▾▸]?\s*/, "").startsWith(label))) { return; }
+            await key("j");
           }
           assert.fail(`Missing row: ${label}`);
         };
+        const select = async (label) => { await choose(label); await key("\r"); };
+        const expand = async (label) => {
+          await choose(label);
+          const line = tui.stripTerminalSequences(panel.render(80).join("\n")).split("\n").find((line) => line.startsWith("> "));
+          if (line.includes("▸")) await key("l");
+        };
+        assert.doesNotMatch(tui.stripTerminalSequences(panel.render(80).join("\n")), /Section:|Search all settings/);
         if (launch === 1 && !savedScopes) {
-          for (const [label, value] of [["Apply temporarily", "false"], ["Apply to project settings", "true"], ["Apply to global settings", "false"]]) {
-            await choose("Search all settings"); await key("show_footer"); await key("\r");
-            await choose("show_footer:"); await choose(`Use ${value}`);
-            await choose(label); await choose("Confirm");
+          for (const [saveKey, value] of [["w", "false"], ["P", "true"], ["G", "false"]]) {
+            await expand("General"); await choose("Show Footer:"); await key("e"); await select(`Use ${value}`);
+            await key(saveKey); await select("Confirm");
             assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Result: Applied/);
+            await key("\x1b");
           }
           savedScopes = true;
           await loaded.extensions[0].commands.get("msb-fixture-verify-origin").handler("", runner.createCommandContext());
         }
-        await choose("Search all settings"); await key("secrets"); await key("\r"); await choose("secrets:"); await choose("TOKEN:"); await choose("Replace value / reference:");
+        await expand("Secrets"); await expand("Secrets:"); await expand("TOKEN:");
+        await choose("Value / reference:"); await key("e"); await select("Replace value / reference:");
         await key("RAW_INPUT_SENTINEL");
         assert.doesNotMatch(output + panel.render(80).join("\n"), /RAW_INPUT_SENTINEL|RUNTIME_PRIVATE_SENTINEL/);
-        // Escape the masked editor, entry form, secret list, then panel.
-        for (let n = 0; n < 4; n++) await key("\x1b");
+        // Escape the masked input, then q closes directly from the clean entry form.
+        await key("\x1b"); await key("q");
         await opening;
         assert.equal(ui.hasOverlay(), false);
         assert.equal(editor.focused, true);

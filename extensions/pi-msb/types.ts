@@ -358,7 +358,19 @@ export type ExecFn = (
 
 // ------------------------------------------------------- command/control ----
 
+/** Redacted adopted policy; unverified VM fields are omitted rather than guessed. */
+export interface RuntimePolicySnapshot {
+  effectiveToml: string;
+  provenance: Record<string, string>;
+  /** Only these top-level Config keys are known; omitted VM policy is never guessed. */
+  knownFields: Array<keyof Config>;
+  verification: "created" | "reconnected";
+  /** TOML has no null; distinguish automatic naming from an empty string. */
+  automaticSandboxName: boolean;
+  adoptedAt: number;
+}
 export interface MsbControl {
+  getRuntimePolicy?(): RuntimePolicySnapshot | undefined;
   /** Present on the native integration; optional for third-party control adapters. */
   readonly settings?: import("./settings.ts").SettingsEditor;
   getState(): RuntimeState;

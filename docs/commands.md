@@ -2,104 +2,125 @@
 
 [Back to README](../README.md)
 
-Run **`/msb`** in interactive Pi to open the native full-screen control panel.
-There are no subcommands or argument completions. Headless/RPC/print invocations
-return an actionable error without executing lifecycle actions; configure the
-host-owned files or `PI_MSB_*` environment variables before starting a session.
+Run **`/msb`** in interactive Pi. It opens a full-screen collapsible tree with
+exactly two roots. Opening never writes settings or starts a sandbox.
+Headless/RPC/print invocations report an actionable error; configure host-owned
+files or `PI_MSB_*` before starting a session instead.
 
-If opening fails, the diagnostic identifies the settings/UI stage and a safe error
-class or known filesystem code, never raw config/error contents. Check the named
-host settings target's permissions and symlinks; a symlinked Pi agent root is
-supported, but policy descendants must be regular directories/files. Unexpected
-programming failures reach Pi's error handler as sanitized diagnostics. Opening
-applies no settings and never enables host execution.
+## One tree, two views
 
-## Navigate and edit
+- **Configuration** is the editable desired policy: General, Resources, Network,
+  Secrets, Mounts, Advanced, Sources & warnings, and Actions. Values show their
+  committed origin: default, environment, global, project or ephemeral. Mixed
+  collections show entry sources rather than claiming a single group owner.
+  `* draft`, `draft entry` and `inherit on save` mark intent, not a saved origin.
+- **Runtime** is read-only: status, identity, Docker readiness and the policy
+  captured at successful boot or live adoption. Drafts, external file edits,
+  canceled saves and failed activation do not replace that policy. Inactive
+  snapshots are explicitly **last known (not running)**; no successful adoption
+  or an unsupported adapter is shown honestly, without inventing running values.
+  An existing/reconnected guest has no trustworthy VM instance/config identity:
+  live extension policy is known, but image/CPU/RAM/network/secrets/mounts and other VM
+  settings show **unknown — not verified**, not desired disk values. Successful
+  fresh creation verifies the full policy. Subsequent instance revalidation or
+  reconnection conservatively drops VM certainty, even for the same name;
+  live/no-op reloads cannot restore it.
 
-Use arrows or Tab to move, Enter to select/edit, and Esc to go back. Long screens
-scroll automatically to the focused row; arrows also scroll long descriptions.
-The layout reflows on resize, including narrow terminals and very short heights.
-Save actions stack vertically and remain reachable with Tab. Results and failures
-become focused, scrollable rows even on one- or three-row terminals; Enter opens
-the full result text. Esc in a field
-cancels that entry; closing a dirty panel asks before discarding changes.
+Secrets and mounts expand into child fields; lists expand into individual entries.
+Secret values/references are always masked, never prefilled. Blank replacement
+retains the private credential, including its FILE reference origin. Compact entry
+forms keep a record together; cancel clears secret buffers.
 
-- **Overview**: runtime state, full sandbox identity, workspace/workdir, image,
-  PID, age, resources, network and Docker readiness/version/storage.
-- **General / Resources**: image, boot policy, CPU/RAM, timeouts and presentation.
-  `auto_start` only controls automatic boot on startup; changing it never stops a
-  running guest or hands tools to the host. Sandbox naming has an explicit automatic
-  session-name override for temporary scope; use Inherit for persistent files.
-- **Network**: mode, DNS, allowed-host and published-port list add/edit/delete.
-- **Secrets**: add/edit/delete environment names, destination hosts and masked
-  replacement values or `$ENV:NAME` / `$FILE:path` references. Values are never
-  prefilled. Leave replacement blank when editing to retain the existing private
-  value; cancel clears entry buffers. Prefer references over literal credentials.
-- **Mounts**: typed mount forms for host/guest paths, read-only and options.
-- **Advanced**: all remaining supported settings, including routing, Docker,
-  host environment, owner locks and explicit host-access controls.
-- **Sources**: canonical save paths, precedence, warnings and effective provenance.
-  Search all settings by name or description from any section.
-- **Actions**: enable, turn off, reload, prune, redacted logs with a selectable non-negative tail count (default 100),
-  prune error details, effective redacted configuration, seal networking in the draft, reset temporary
-  settings, and help. Dangerous actions require explicit confirmation and idle.
+## Keys
 
-Collection entry changes stay in the draft until applied. Add/edit/delete applies
-only to selected identities in the chosen save scope, preserving that scope's
-other entries (including entries hidden by the current project's settings).
-It does **not** export unrelated project/session secrets, mounts, hosts, ports,
-environment variables or tool permissions into global settings. A deliberately
-edited project/session entry can be saved globally; confirmation identifies its
-origin and explicitly warns about that higher-scope import. This can make that
-specific credential or permission available to other projects—review it carefully.
-Metadata-only secret editing retains the selected entry's credential/reference.
+These bindings apply in normal tree mode, **not while typing**:
 
-**Clear list/secrets/mounts** is a distinct explicit empty replacement of the
-chosen scope's collection, not entry deletion. **Inherit** removes an assignment
-from that scope. Higher project/session settings can still shadow either action;
-confirmation and results report that honestly, including no-op lower-scope
-removals. The backend also supports deliberate whole-list replacement, never
-inferred from ordinary CRUD. Existing `remove_*` controls are reconciled only for
-conflicting entries in the chosen scope and listed in preview; unrelated removals
-remain intact. Unknown raw settings are retained; comments/layout are not
-preserved on changed saves. Opening/cancelling the panel applies nothing.
+| Key | Action |
+| --- | --- |
+| `j` / down, `k` / up | Next / previous visible node |
+| `h` / left | Collapse, otherwise parent |
+| `l` / right | Expand, otherwise first child |
+| `e` | Edit the selected supported Configuration item |
+| `a` | Add to the selected collection (or entry's collection) |
+| `d` | Delete an entry; remove a scalar/collection override at the eventual save scope (inherit) |
+| `w` | Save + reload ephemeral current-session edits |
+| `P` | Save + reload host-owned project edits |
+| `G` | Save + reload host-owned global edits |
+| Enter | Expand a group or activate a Configuration action/form control |
+| `q` | Close the TUI from the tree or any non-input screen; confirm unsaved discard |
+| Esc | Back/cancel; close from tree |
+| Tab / Shift-Tab | Next / previous row, also skipping long diagnostic text |
+| PageDown / PageUp | Scroll a long selected row |
 
-## Three save buttons
+`P` and `G` are uppercase. Save keys always target the Configuration draft,
+including when Runtime has focus. Runtime has no edit/add/delete actions.
+In text and masked inputs, `q/e/a/d/w/P/G/j/k/h/l` are ordinary text, including
+Kitty input and bracketed paste. Enter accepts a field; Esc cancels it. Closing a
+dirty draft or edited entry form asks to discard, with **Cancel selected by default**.
+Cancel returns to the same screen without dropping pending entries or saves;
+Escape backs out of transient screens without closing.
 
-1. **Apply temporarily** — current session memory only, above host policy; never
-   appended to the transcript or restored on resume. Cleared on switch/shutdown.
-2. **Apply to project settings** — host-owned canonical project `config.toml`.
-3. **Apply to global settings** — host-owned `default.toml` for all projects.
+The contextual footer lists available actions. Selection scrolls into view and
+reflows on resize, including mobile widths. Results/errors become focused,
+scrollable rows even at one or three terminal rows; Enter opens the full result.
+Arrows scroll long transient descriptions; Tab moves directly between controls.
+
+## Save scopes
+
+1. **`w` ephemeral** — memory only, above host policy, never appended to the
+   transcript or restored on resume; cleared on session switch/shutdown.
+2. **`P` project** — canonical host-owned project `config.toml`.
+3. **`G` global** — host-owned `default.toml` shared by projects.
 
 Only deliberately dirty fields and entry operations are saved, never a flattened
-effective snapshot. Materializing an authoritative list uses only its chosen
-scope and lower layers; unrelated higher-scope entries are excluded. Unchanged
-target credentials/references are preserved, and deliberately transferred FILE
-references keep their source origin without reading credential bytes. Confirmation
-shows target, changed fields, entry identities/origins, explicit clears/replacements,
-intentional higher-scope imports, runtime effect and shadowed settings. Higher
-project/temporary layers can shadow a global save; saving does not imply it became
-effective. Saves re-resolve and validate the selected scope before committing.
-External edits and unsafe filesystem paths are rejected; reopen a stale draft.
+Configuration or Runtime snapshot. Entry CRUD preserves the chosen scope's other
+entries, including those hidden by higher layers. It never exports unrelated
+project/ephemeral credentials, mounts, hosts, environment or tool permissions.
+A deliberate higher-scope entry import is identified by origin and identity in
+confirmation: that particular permission/credential may become available to
+other projects. Metadata edits retain private values/references without reading
+credential bytes for display.
 
-Resources, image, network/ports, secrets, mounts, environment and boot/lifecycle
-changes recreate the guest when enabled. Confirm the disruption: guest ephemeral
-state and nested containers can be lost. Host workspace writes already happened
-and are not undone. Routing/footer/access-policy and automatic-start preference
-changes adopt live. Lifecycle actions refresh the panel draft while retaining
-deliberate unsaved edits; a saved-but-failed activation leaves the panel editable. Save
-success and runtime activation failure are reported separately; failure never
-silently turns the sandbox off or enables host fallback. Fix the cause and use
-Actions → Reload settings, or close/reopen after external file changes.
+**Clear list (explicit empty)** is a distinct whole-list replacement. `d` on the
+collection inherits instead. Project/ephemeral layers can shadow a lower-scope
+save or deletion; preview and results report shadowing and no-ops. Conflicting
+same-scope `remove_*` identities are reconciled; unrelated removals stay intact.
+Unknown raw settings are retained; comments/layout are not preserved on changed
+saves. Unsafe paths and external edits are rejected; reopen a stale draft.
 
-**Turn off (HOST execution)** deliberately hands tools to the unsandboxed host.
-This differs from `fallback_mode = "host"`, which permits automatic host execution
-on sandbox failure. Keep the default `block` for untrusted work.
+Confirmation shows scope, changed fields, entry intents/origins, higher-scope
+imports, runtime effect and shadowing. Resources, image, networking, secrets,
+mounts, environment and boot/lifecycle changes may recreate the guest. Confirm
+before losing guest ephemeral state and nested containers. Host writes already
+happened and cannot be undone. Routing/footer/access policy and `auto_start`
+preferences adopt live; `auto_start = false` never stops a running guest or
+hands tools to the host. Automatic session naming is an ephemeral-only override;
+inherit removes persistent naming assignments.
 
-Prune walks all SDK pages, preserves live owners/current session, and never
-removes legacy named volumes. There are no workspace modes, volume/export/copy
-actions. Host files remain your responsibility; see [storage](storage.md) and
-[host-read exceptions](safety.md#host-read-exceptions).
+Saved settings and successful runtime adoption are separate outcomes. Failed
+activation keeps the panel editable and the previous snapshot last-known; it
+never silently enables host execution. Fix the cause, then use
+**Configuration → Actions → Reload settings**. Reload/Enable refresh the draft
+while preserving deliberate unsaved edits.
 
-Diagnostic screens cap display at 2000 lines and disclose truncation. Choose a
-smaller log tail if needed; configured secret bytes are redacted by the backend.
+## Actions and diagnostics
+
+**Configuration → Actions** retains enable, **Turn off (HOST execution)**,
+reload, prune, redacted logs (validated non-negative tail count, default 100),
+effective redacted desired-config diagnostics, seal network in the draft,
+reset ephemeral settings and help. Dangerous actions require explicit
+confirmation and idle. Runtime remains observational.
+
+Turn off deliberately hands tools to the unsandboxed host. This differs from
+`fallback_mode = "host"`, which permits automatic host execution after failure.
+Keep `block` for untrusted work. Prune preserves live owners/current session and
+never removes host files or legacy named volumes. There are no workspace modes
+or volume/export/copy actions; see [storage](storage.md) and [safety](safety.md).
+Diagnostics cap display at 2000 lines, disclose truncation, and redact configured
+secret bytes. Choose a smaller log tail when needed.
+
+Launch failures name the settings/UI stage and a safe error class or known
+filesystem code, never raw credential-bearing error contents. Check the named
+host target's permissions/symlinks. A symlinked Pi agent root is supported;
+policy descendants must be regular files/directories. Unexpected programming
+failures reach Pi's handler as sanitized diagnostics.

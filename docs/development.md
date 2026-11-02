@@ -50,19 +50,32 @@ Run `just dev-image` by itself when you only need to refresh the local image.
 
 ### Control-panel integration and testing
 
-`/msb` is the only command surface. `control-panel.ts` owns draft navigation/forms,
-`settings-fields.ts` is the complete searchable inventory, `settings-input.ts`
+`/msb` is the only command surface. `control-panel.ts` owns one collapsible tree
+with Configuration (editable desired policy) and Runtime (read-only adopted policy),
+stable node identity/expansion and compact transient forms. Normal keys are
+j/k move, h/l fold/parent/child, e/a/d edit/add/delete-or-inherit, w/P/G scoped
+save + reload, q close; input dispatch precedes all command bindings.
+`settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
 retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
 never renders plaintext or uses an Input undo/kill ring. The settings backend
 keeps raw credentials/references private; do not stringify effective Config.
+The manager's successful boot/live-adoption observer captures a redacted runtime
+policy and frozen provenance, separate from resolved desired config/configRef.
+Failed/canceled/pending changes must never appear as current Runtime policy;
+inactive snapshots are last-known, and session teardown clears them. Successful
+fresh creation verifies all fields. Revalidation of an existing guest or transport replacement
+have no trustworthy instance ID or verified actual image metadata, so snapshots
+include only live extension-policy fields; image and all other VM fields are unknown. Live/no-op adoption must
+not promote partial certainty. Keep this conservative until the SDK proves actual
+instance/config identity; never infer it from name/session/image labels.
 Native `ctx.ui.custom` with a 100%-width/height overlay covers and pads the whole
 terminal viewport, including regular and alternate-screen renderers. This uses
-public Pi 0.84.4 APIs, not a second TUI, private layoutRoot access, render patches,
+public APIs compatible with Pi 0.84.4 and 1.4.0, not a second TUI, private layoutRoot access, render patches,
 or manually emitted screen-switch escapes. Pi owns overlay focus/restoration.
 Opening is exclusive; cancel, errors and shutdown dispose drafts and entry buffers.
 
 `control-panel.test.ts` exercises keyboard-only CRUD/apply/cancel, exact widths
-24/32/40/80/120 and heights 1/3/6/10/24/40, and actual native renderer composition
+24/32/40/80/120 and heights 1/2/3/4/6/16/24/40, and actual native renderer composition
 with terminal doubles (including an installed viewport layout root). Runtime tests
 use an injected SDK to verify live adoption versus guarded resource recreation.
 Regressions also drive the panel through the native integration with the shared
@@ -72,7 +85,9 @@ short-height feedback, repeated secret editing and removal reconciliation.
 actual Pi extension loader, command context, `ui.custom`, theme and both native
 renderers. It covers a symlinked agent root, all save scopes, masked input,
 responsive overlay composition, close/reopen and focus restoration without a VM.
-It always tests the declared local runtime; include another installed runtime with:
+It drives tree keys rather than section menus, including all scoped saves and
+literal command letters in inputs. It always tests the declared Pi 0.84.4 runtime;
+include an installed Pi 1.4.0 runtime with:
 
 ```sh
 PI_MSB_TEST_PI_PACKAGE=/path/to/pi-coding-agent \

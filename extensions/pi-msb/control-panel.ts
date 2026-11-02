@@ -1,23 +1,26 @@
-import { visibleWidth, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import { visibleWidth, matchesKey, decodeKittyPrintable, isKeyRelease, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { ConfigError, DEFAULT_CONFIG, normalizeConfigPath, parseTomlConfig } from "./config.ts";
 import { SettingsInput } from "./settings-input.ts";
-import { COLLECTION_REMOVALS } from "./settings.ts";
 import { MaskedInput } from "./masked-input.ts";
-import { SECTIONS, SETTINGS_FIELDS, valueAt, type Section, type SettingsField } from "./settings-fields.ts";
+import { SECTIONS, SETTINGS_FIELDS, valueAt, type SettingsField } from "./settings-fields.ts";
 import type { SettingsDraft, SettingsScope } from "./settings.ts";
 import type { MsbControl, Config } from "./types.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
-type Row = { id: string; label: string; detail?: string; action?: () => void | Promise<void> };
+type Row = { id: string; label: string; detail?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; dirty?: string; edit?: () => void; add?: () => void; remove?: () => void; removeLabel?: string; readonly?: boolean };
 type FormField = { name: string; value: string; secret?: boolean; choices?: string[]; description?: string };
-export const SAVE_LABELS = ["Apply temporarily", "Apply to project settings", "Apply to global settings"] as const;
-const scopes: SettingsScope[] = ["temporary", "project", "global"];
+const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "ephemeral", env: "environment", defaults: "default" }[source] ?? source);
+const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
 /** Strip terminal controls from every external label, log, path and value. */
 export const safeText = (value: unknown): string => String(value ?? "").replace(/\x1b\][^\x07]*(?:\x07|$)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, " ");
 const display = (value: unknown): string => value === null ? "automatic session name" : value === undefined ? "inherit" : typeof value === "string" ? value : JSON.stringify(value);
+function displayConfig(toml: string) {
+  const value = parseTomlConfig(toml, "global").value;
+  return { ...value, ...(value.secrets ? { secrets: value.secrets.map((secret) => ({ env: secret.env, allowHosts: secret.allowHosts, value: "<redacted>" })) } : {}) };
+}
 
-/** One focus model for forms, menus and save buttons; the whole model pages at tiny heights. */
+/** Stable tree identities share a bounded viewport with transient editors and confirmations. */
 export class ControlPanel implements Component, Focusable {
   focused = true;
   #draft: SettingsDraft;
@@ -27,7 +30,10 @@ export class ControlPanel implements Component, Focusable {
   #tui: Pick<TUI, "terminal" | "requestRender">;
   #theme: Pick<Theme, "fg" | "bold" | "inverse">;
   #done: () => void;
-  #section: Section = "Overview";
+  #tree = true;
+  #treeFocus = "configuration";
+  #expanded = new Set(["configuration", "runtime"]);
+  #entryChanges = new Set<string>();
   #rows: Row[] = [];
   #focus = 0;
   #scroll = 0;
@@ -39,7 +45,6 @@ export class ControlPanel implements Component, Focusable {
   #operation: Promise<void> = Promise.resolve();
   #closed = false;
   #feedback?: string;
-  #message = "Arrows/Tab move · Enter select · Esc back";
   #values: any;
   #provenance: Record<string, string>;
   #paths: Record<string, string>;
@@ -48,86 +53,156 @@ export class ControlPanel implements Component, Focusable {
   #editing?: { input: SettingsInput | MaskedInput; accept: (value: string) => void | Promise<void>; cancel: () => void; label: string };
   #back?: () => void;
   #formCleanup?: () => void;
+  #formDirty = false;
+  #exitConfirmation = false;
 
   constructor(options: { draft: SettingsDraft; control: MsbControl; ctx: Context; tui: Pick<TUI, "terminal" | "requestRender">; theme: Pick<Theme, "fg" | "bold" | "inverse">; done: () => void; paths: Record<string, string> }) {
     this.#draft = options.draft; this.#control = options.control; this.#ctx = options.ctx; this.#tui = options.tui; this.#theme = options.theme; this.#done = options.done; this.#paths = options.paths;
     const snapshot = this.#draft.snapshot();
-    // Only the backend's redacted display crosses into presentation state.
-    this.#values = parseTomlConfig(snapshot.effectiveToml, "global").value;
+    // Mask references too; only private backend entry edits retain credential origins.
+    this.#values = displayConfig(snapshot.effectiveToml);
     if (snapshot.automaticSandboxName) this.#values.sandboxName = null;
     this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings;
     this.#home();
   }
   invalidate(): void {}
   #refresh(): void { if (!this.#closed) this.#tui.requestRender(); }
-  #page(rows: Row[], back?: () => void): void { this.#rows = rows; this.#focus = 0; this.#scroll = 0; this.#detailOffset = 0; this.#back = back; this.#refresh(); }
+  #page(rows: Row[], back?: () => void): void { this.#tree = false; this.#rows = rows; this.#focus = 0; this.#scroll = 0; this.#detailOffset = 0; this.#back = back; this.#refresh(); }
   #rowValue(path: string): unknown { return this.#changes.has(path) ? this.#changes.get(path) : valueAt(this.#values, path); }
   #set(path: string, value: unknown): void { this.#draft.set(path, value); this.#changes.set(path, value); this.#dirty = true; }
   #inherit(path: string): void { this.#draft.inherit(path); this.#changes.set(path, undefined); this.#dirty = true; this.#home(); }
-  #home(): void {
+  #home(refresh = true): void {
     if (this.#closed) return;
-    const rows: Row[] = [
-      ...(this.#feedback ? [this.#feedbackRow()] : []),
-      { id: "section", label: `Section: ${this.#section}`, detail: "Select a section", action: () => this.#page(SECTIONS.map((section) => ({ id: section, label: section, action: () => { this.#section = section; this.#home(); } })), () => this.#home()) },
-      { id: "search", label: "Search all settings", action: () => this.#input("Search names and descriptions", "", false, (query) => this.#page(SETTINGS_FIELDS.filter((field) => `${field.path} ${field.description}`.toLowerCase().includes(query.toLowerCase())).map((field) => this.#fieldRow(field)), () => this.#home())) },
-    ];
-    if (this.#section === "Overview") {
-      const state = this.#control.getState(); const info = state.info;
-      rows.push({ id: "status", label: `Runtime: ${state.status}`, detail: state.reason });
-      if (info) for (const [name, value] of Object.entries({ Workspace: info.root, Workdir: info.cwd, Name: info.name, PID: info.pid, Age: `${Math.max(0, Math.floor((Date.now() - info.createdAt) / 1000))}s`, Image: info.image, Docker: `${info.docker.mode} / ${info.docker.readiness}`, Version: info.docker.version, Storage: info.docker.storageDriver, "Docker detail": info.docker.reason })) rows.push({ id: name, label: `${name}: ${value ?? "unknown"}` });
-      rows.push({ id: "resources", label: `${display(this.#rowValue("cpus"))} CPUs · ${display(this.#rowValue("memory_mib"))} MiB`, detail: `Network: ${display(this.#rowValue("network.mode"))}. Draft values are not running until applied.` });
-      rows.push({ id: "boundary", label: "Host workspace is mounted read/write", detail: "Entire Git worktree exposed. Host bypass is an explicit escape, never a recovery fallback by default." });
-    } else if (this.#section === "Sources") {
-      for (const [scope, path] of Object.entries(this.#paths)) rows.push({ id: scope, label: `${scope} target`, detail: path });
-      rows.push({ id: "precedence", label: "Precedence (low to high)", detail: "Built-ins → PI_MSB_* environment → global host → project host → temporary memory. Project/global arrays replace lower lists. Global saves can be shadowed." });
-      for (const warning of this.#warnings) rows.push({ id: `warning:${rows.length}`, label: "Warning", detail: warning });
-      rows.push(...SETTINGS_FIELDS.map((field) => ({ id: field.path, label: `${field.path}: ${this.#owner(field.path)}`, detail: this.#summary(field.path), action: () => this.#field(field) })));
-    } else if (this.#section === "Actions") rows.push(...this.#actions());
-    else rows.push(...SETTINGS_FIELDS.filter((field) => field.section === this.#section).map((field) => this.#fieldRow(field)));
-    rows.push(...SAVE_LABELS.map((label, index) => ({ id: `save:${scopes[index]}`, label, detail: index === 0 ? "Memory only; resets on session switch/end" : this.#paths[scopes[index]!], action: () => this.#save(scopes[index]!) })));
-    rows.push({ id: "close", label: "Close", action: () => this.#exit() });
-    this.#page(rows);
+    this.#tree = true; this.#back = undefined;
+    const state = this.#control.getState();
+    const policy = this.#control.getRuntimePolicy?.();
+    const runtimeValues = policy ? displayConfig(policy.effectiveToml) : undefined;
+    if (runtimeValues && policy?.automaticSandboxName) runtimeValues.sandboxName = null;
+    const fields = (root: string, values: any, provenance: Record<string, string>, readonly: boolean): Row[] => SECTIONS.filter((section) => SETTINGS_FIELDS.some((field) => field.section === section)).map((section) => ({
+      id: `${root}/${section}`, label: section, children: SETTINGS_FIELDS.filter((field) => field.section === section).map((field) => {
+        const path = field.path; const id = `${root}/${path}`;
+        const value = readonly ? valueAt(values, path) : this.#rowValue(path);
+        const collection = Array.isArray(valueAt(DEFAULT_CONFIG, path));
+        const known = !readonly || policy?.knownFields.includes(normalizeConfigPath(path)[0] as keyof Config);
+        const baseline = valueAt(values, path);
+        const fallbackSource = collection && Array.isArray(baseline) && baseline.length === 0 ? "defaults" : collection ? "mixed / entry sources" : "unknown";
+        const origin = !known ? "unverified" : originLabel(provenance[normalizeConfigPath(path).join(".")] ?? fallbackSource);
+        const dirty = !readonly && this.#changes.has(path) ? value === undefined ? "inherit on save" : "draft" : undefined;
+        const edit = readonly ? undefined : () => this.#field(field);
+        const add = readonly || !collection ? undefined : () => this.#addEntry(field);
+        const row: Row = { id, label: fieldLabel(path), value: !known ? "unknown — not verified" : Array.isArray(value) ? `${value.length} entries` : display(value), origin, dirty, detail: `${path}: ${field.description}`, readonly, edit: collection ? undefined : edit, add, removeLabel: "inherit", remove: readonly ? undefined : () => this.#inherit(path) };
+        if (collection && known) {
+          row.children = (Array.isArray(value) ? value : []).map((entry: any) => {
+            const identity = path === "secrets" ? entry.env : path === "mounts" ? entry.guestPath : String(entry);
+            const entryId = `${id}/${identity}`;
+            const entryOrigin = originLabel(provenance[`${path}[${identity}]`] ?? provenance[normalizeConfigPath(path).join(".")] ?? (!readonly && this.#entryChanges.has(`${path}[${identity}]`) ? "uncommitted" : "inherited / unknown"));
+            const entryDirty = !readonly && this.#entryChanges.has(`${path}[${identity}]`) ? "draft entry" : dirty === "draft" && !this.#entryChanges.size ? "draft" : undefined;
+            const editEntry = readonly ? undefined : () => this.#editEntry(field, entry);
+            const remove = readonly ? undefined : () => this.#removeEntry(field, entry);
+            const result: Row = { id: entryId, label: String(identity), value: path === "secrets" ? "********" : path === "mounts" ? entry.readonly ? "ro" : "rw" : undefined, origin: entryOrigin, dirty: entryDirty, readonly, edit: editEntry, add, remove, removeLabel: "delete" };
+            if (path === "secrets" || path === "mounts") {
+              const children = path === "secrets" ? { "Environment name": entry.env, "Allowed hosts": entry.allowHosts, "Value / reference": "********" } : { Type: entry.type, "Host path / volume name": entry.hostPath ?? "memory", "Guest path": entry.guestPath, "Read only": entry.readonly, Options: entry.options ?? [] };
+              result.children = Object.entries(children).map(([label, value]) => {
+                const childId = `${entryId}/${label}`;
+                const listAdd = readonly ? undefined : () => this.#recordList(path, entry, label);
+                return { id: childId, label, value: Array.isArray(value) ? `${value.length} entries` : display(value), origin: entryOrigin, dirty: entryDirty, readonly, edit: readonly ? undefined : () => this.#editEntry(field, entry, label), add: Array.isArray(value) ? listAdd : add,
+                  ...(Array.isArray(value) ? { children: value.map((item: string) => ({ id: `${childId}/${item}`, label: item, readonly, origin: entryOrigin, dirty: entryDirty, edit: readonly ? undefined : () => this.#recordList(path, entry, label, item), add: listAdd, remove: readonly ? undefined : () => this.#recordList(path, entry, label, item, true), removeLabel: "delete" })) } : {}),
+                };
+              });
+            }
+            return result;
+          });
+          if (!readonly) row.children.push({ id: `${id}/control:clear`, label: "Clear list (explicit empty)", action: () => { this.#set(path, []); this.#home(); } });
+        }
+        return row;
+      }),
+    }));
+    const configuration: Row = { id: "configuration", label: "Configuration", children: [
+      ...fields("configuration", this.#values, this.#provenance, false),
+      { id: "configuration/sources", label: "Sources & warnings", children: [
+        ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${originLabel(scope)} target`, value: path })),
+        { id: "precedence", label: "Inheritance", value: "default → environment → global → project → ephemeral", detail: "Draft is intent, not an adopted policy. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
+        ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
+      ] },
+      { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
+    ] };
+    const runtime: Row = { id: "runtime", label: "Runtime", value: `${state.status} · read-only`, readonly: true, children: [
+      { id: "runtime/status", label: "Status", value: state.status, detail: state.reason, readonly: true },
+      ...((this.#dirty || policy && SETTINGS_FIELDS.some((field) => policy.knownFields.includes(normalizeConfigPath(field.path)[0] as keyof Config) && JSON.stringify(valueAt(this.#values, field.path)) !== JSON.stringify(valueAt(runtimeValues, field.path)))) ? [{ id: "runtime/pending", label: "Desired changes pending (not running)", readonly: true }] : []),
+      { id: "runtime/adoption", label: policy ? state.status === "active" ? "Actually adopted policy" : "Last known policy (not running)" : this.#control.getRuntimePolicy ? "No running policy adopted" : "Policy snapshot unavailable", value: policy ? new Date(policy.adoptedAt).toISOString() : "No current policy", readonly: true },
+      ...(policy?.verification === "reconnected" ? [{ id: "runtime/verification", label: "VM instance not verified", value: "Existing/reconnected guest: only identity and live extension policy are known; image and other VM settings are unverified.", readonly: true }] : []),
+      ...(state.info ? Object.entries(state.info).filter(([key]) => key !== "docker" && key !== "image").map(([key, value]) => ({ id: `runtime/info/${key}`, label: key, value: display(value), readonly: true })) : []),
+      ...(state.info ? [{ id: "runtime/docker", label: "Docker readiness", value: display(state.info.docker), readonly: true }] : []),
+      ...(policy ? fields("runtime", runtimeValues, policy.provenance, true) : []),
+    ] };
+    const rows: Row[] = [];
+    const flatten = (node: Row, parent?: string, depth = 0) => { node.parent = parent; node.depth = depth; rows.push(node); if (node.children && this.#expanded.has(node.id)) for (const child of node.children) flatten(child, node.id, depth + 1); };
+    flatten(configuration); flatten(runtime);
+    this.#rows = rows;
+    let index = rows.findIndex((row) => row.id === this.#treeFocus);
+    while (index < 0 && this.#treeFocus.includes("/")) { this.#treeFocus = this.#treeFocus.slice(0, this.#treeFocus.lastIndexOf("/")); index = rows.findIndex((row) => row.id === this.#treeFocus); }
+    this.#focus = Math.max(0, index); this.#treeFocus = rows[this.#focus]!.id;
+    if (refresh) this.#refresh();
   }
-  #owner(path: string): string { return this.#changes.has(path) ? "draft (not applied)" : this.#provenance[normalizeConfigPath(path).join(".")] ?? "built-ins / collection owners"; }
-  #summary(path: string): string {
-    if (path === "secrets") return `${(this.#rowValue(path) as any[] | undefined)?.length ?? 0} secrets (values masked)`;
-    return display(this.#rowValue(path));
-  }
-  #fieldRow(field: SettingsField): Row { return { id: field.path, label: `${field.path}: ${this.#summary(field.path)}`, detail: `${field.description} Source: ${this.#owner(field.path)}`, action: () => this.#field(field) }; }
+  #owner(path: string): string { return originLabel(this.#provenance[normalizeConfigPath(path).join(".")] ?? "mixed / entry sources"); }
   #field(field: SettingsField): void {
-    if (field.path === "secrets") { this.#secrets(); return; }
-    if (field.path === "mounts") { this.#mounts(); return; }
     const value = this.#rowValue(field.path) ?? valueAt(DEFAULT_CONFIG, field.path);
-    if (Array.isArray(value)) { this.#list(field, value.map(String)); return; }
     const set = (next: unknown) => { this.#set(field.path, next); this.#home(); };
-    this.#page([
-      { id: "description", label: field.path, detail: `${field.description} Current: ${display(value)}. Source: ${this.#owner(field.path)}` },
-      ...(field.path === "sandbox_name" ? [{ id: "automatic-name", label: "Use automatic session name (temporary only)", detail: "Override lower-layer custom names with null in memory. Persistent files have no null; use Inherit there.", action: () => set(null) }] : []),
-      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: `Use ${choice}`, action: () => set(choice) })) : [{ id: "edit", label: "Edit value", action: () => this.#input(field.path, String(value ?? ""), false, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text)) }]),
-      { id: "inherit", label: "Inherit / remove chosen scope's assignment", detail: "Different from an empty value or list. Choose a save scope afterward.", action: () => this.#inherit(field.path) },
+    const input = () => this.#input(field.path, String(value ?? ""), false, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text));
+    if (field.choices || field.path === "sandbox_name") this.#page([
+      { id: "description", label: fieldLabel(field.path), detail: `${field.description} Source: ${this.#owner(field.path)}` },
+      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: `Use ${choice}`, action: () => set(choice) })) : [
+        { id: "automatic-name", label: "Use automatic session name (ephemeral only)", action: () => set(null) },
+        { id: "edit", label: "Edit value", action: input },
+      ]),
       { id: "back", label: "Back", action: () => this.#home() },
     ], () => this.#home());
+    else input();
   }
-  #list(field: SettingsField, items: string[]): void {
-    const back = () => this.#list(field, items);
-    const edit = (index?: number) => this.#form(field.path, [{ name: "Value", value: index === undefined ? "" : items[index]! }], (fields) => {
-      const value = fields[0]!.value;
-      this.#draft.upsertListEntry(field.path, value, index === undefined ? undefined : items[index]);
-      if (index === undefined) items.push(value); else items[index] = value;
-      this.#changes.set(field.path, [...items]); this.#dirty = true; back();
-    }, index === undefined ? undefined : () => { this.#draft.removeListEntry(field.path, items[index]!); items.splice(index, 1); this.#changes.set(field.path, [...items]); this.#dirty = true; back(); }, back);
-    this.#page([
-      { id: "description", label: field.path, detail: `${field.description}${COLLECTION_REMOVALS[field.path] ? ` Entry edits preserve the selected scope's other entries, never unrelated higher-scope entries. Saving reconciles conflicting ${COLLECTION_REMOVALS[field.path]} identities in the chosen scope; unrelated removals stay intact.` : ""}` },
-      ...items.map((item, index) => ({ id: `item:${index}`, label: item, detail: "Enter to edit or delete", action: () => edit(index) })),
-      { id: "add", label: "Add entry", action: () => edit() },
-      { id: "clear", label: "Clear list (explicit empty)", action: () => { this.#set(field.path, []); this.#list(field, []); } },
-      { id: "inherit", label: "Inherit list", action: () => this.#inherit(field.path) },
-      { id: "back", label: "Back", action: () => this.#home() },
-    ], () => this.#home());
+  #recordList(path: string, entry: any, label: string, previous?: string, remove = false): void {
+    const key = path === "secrets" ? "allowHosts" : "options";
+    const apply = (value?: string) => {
+      const items = [...(entry[key] ?? [])].filter((item) => item !== previous && item !== value);
+      if (value !== undefined) items.push(value);
+      const next = { ...entry, [key]: items };
+      const identity = path === "secrets" ? entry.env : entry.guestPath;
+      if (path === "secrets") this.#draft.upsertSecret({ env: entry.env, allowHosts: items });
+      else this.#draft.upsertMount(next, identity);
+      this.#changes.set(path, (this.#rowValue(path) as any[]).map((item) => (path === "secrets" ? item.env : item.guestPath) === identity ? next : item));
+      this.#entryDone(path, identity);
+      const parent = `configuration/${path}/${identity}/${label}`;
+      this.#expanded.add(`configuration/${path}/${identity}`); this.#expanded.add(parent);
+      this.#treeFocus = value === undefined ? parent : `${parent}/${value}`; this.#home();
+    };
+    if (remove) apply(); else this.#input(label, previous ?? "", false, apply);
   }
-  #secrets(): void {
+  #addEntry(field: SettingsField): void { this.#editEntry(field); }
+  #entryDone(path: string, identity: string, previous?: string): void {
+    const old = `configuration/${path}/${previous ?? identity}`; const next = `configuration/${path}/${identity}`;
+    for (const id of [...this.#expanded]) if (id === old || id.startsWith(`${old}/`)) { this.#expanded.delete(id); this.#expanded.add(next + id.slice(old.length)); }
+    this.#expanded.add(`configuration/${path}`); this.#treeFocus = next;
+    this.#entryChanges.add(`${path}[${identity}]`); this.#dirty = true; this.#home();
+  }
+  #removeEntry(field: SettingsField, entry: any): void {
+    const path = field.path; const identity = path === "secrets" ? entry.env : path === "mounts" ? entry.guestPath : String(entry);
+    if (path === "secrets") this.#draft.removeSecret(identity);
+    else if (path === "mounts") this.#draft.removeMount(identity);
+    else this.#draft.removeListEntry(path, identity);
+    this.#changes.set(path, (this.#rowValue(path) as any[]).filter((item) => path === "secrets" ? item.env !== identity : path === "mounts" ? item.guestPath !== identity : String(item) !== identity));
+    this.#treeFocus = `configuration/${path}`; this.#entryChanges.add(`${path}[${identity}]`); this.#dirty = true; this.#home();
+  }
+  #editEntry(field: SettingsField, entry?: any, child?: string): void {
+    if (field.path === "secrets") { this.#secret(entry, child); return; }
+    if (field.path === "mounts") { this.#mount(entry, child); return; }
+    this.#input(field.path, entry ?? "", false, (value) => {
+      this.#draft.upsertListEntry(field.path, value, entry);
+      this.#changes.set(field.path, [...((this.#rowValue(field.path) ?? []) as string[]).filter((item) => item !== entry && item !== value), value]);
+      this.#entryDone(field.path, value, entry);
+    });
+  }
+  #secret(entry?: { env: string; allowHosts: string[] }, child?: string): void {
     const items = (this.#rowValue("secrets") ?? []) as Array<{ env: string; allowHosts: string[] }>;
-    const edit = (entry?: typeof items[number]) => this.#form("Secret (never displayed)", [
+    this.#form("Secret (never displayed)", [
       { name: "Environment name", value: entry?.env ?? "", description: "A valid environment variable, not a process-control name." },
       { name: "Allowed hosts", value: (entry?.allowHosts ?? []).join(", "), description: "Comma-separated destinations; at least one is required." },
       { name: "Replace value / reference", value: "", secret: true, description: entry ? "Leave blank to retain the private existing value. $ENV:NAME or $FILE:path recommended." : "Masked entry. $ENV:NAME or $FILE:path recommended." },
@@ -135,20 +210,12 @@ export class ControlPanel implements Component, Focusable {
       const env = fields[0]!.value; const allowHosts = fields[1]!.value.split(",").map((host) => host.trim()).filter(Boolean); const value = fields[2]!.value;
       this.#draft.upsertSecret({ env, allowHosts, ...(value ? { value } : {}) }, entry?.env);
       this.#changes.set("secrets", [...items.filter((item) => item.env !== entry?.env && item.env !== env), { env, allowHosts, value: "<redacted>" }]);
-      this.#dirty = true; this.#secrets();
-    }, entry ? () => { this.#draft.removeSecret(entry.env); this.#changes.set("secrets", items.filter((item) => item.env !== entry.env)); this.#dirty = true; this.#secrets(); } : undefined, () => this.#secrets());
-    this.#page([
-      { id: "description", label: "Secrets", detail: "Values and references are never prefilled. Edit metadata without replacing a credential. Only selected entry edits are saved; unrelated higher-scope entries are never exported; conflicting remove_secrets identities in the chosen scope are reconciled." },
-      ...items.map((entry) => ({ id: entry.env, label: `${entry.env}: ********`, detail: `${entry.allowHosts?.join(", ")} · ${this.#provenance[`secrets[${entry.env}]`] ?? "draft/inherited"}`, action: () => edit(entry) })),
-      { id: "add", label: "Add secret", action: () => edit() },
-      { id: "clear", label: "Clear secrets (explicit empty)", action: () => { this.#set("secrets", []); this.#secrets(); } },
-      { id: "inherit", label: "Inherit secrets", action: () => this.#inherit("secrets") },
-      { id: "back", label: "Back", action: () => this.#home() },
-    ], () => this.#home());
+      this.#entryDone("secrets", env, entry?.env);
+    }, entry ? () => this.#removeEntry(SETTINGS_FIELDS.find((field) => field.path === "secrets")!, entry) : undefined, () => this.#home(), child === "Value / reference" ? "Replace value / reference" : child);
   }
-  #mounts(): void {
+  #mount(entry?: Config["mounts"][number], child?: string): void {
     const items = (this.#rowValue("mounts") ?? []) as Config["mounts"];
-    const edit = (entry?: Config["mounts"][number]) => this.#form("Mount", [
+    this.#form("Mount", [
       { name: "Type", value: entry?.type ?? "dir", choices: ["dir", "file", "named", "tmpfs"] },
       { name: "Host path / volume name", value: entry?.hostPath ?? "", description: "Absolute host path for dir/file; no host socket or writable policy exposure." },
       { name: "Guest path", value: entry?.guestPath ?? "", description: "Absolute path; cannot shadow workspace, /tmp or guest system paths." },
@@ -157,31 +224,24 @@ export class ControlPanel implements Component, Focusable {
     ], (fields) => {
       const mount = { type: fields[0]!.value as Config["mounts"][number]["type"], ...(fields[1]!.value ? { hostPath: fields[1]!.value } : {}), guestPath: fields[2]!.value, readonly: fields[3]!.value === "true", options: fields[4]!.value.split(",").map((option) => option.trim()).filter(Boolean) };
       this.#draft.upsertMount(mount, entry?.guestPath);
-      this.#changes.set("mounts", [...items.filter((item) => item.guestPath !== entry?.guestPath && item.guestPath !== mount.guestPath), mount]); this.#dirty = true; this.#mounts();
-    }, entry ? () => { this.#draft.removeMount(entry.guestPath!); this.#changes.set("mounts", items.filter((item) => item.guestPath !== entry.guestPath)); this.#dirty = true; this.#mounts(); } : undefined, () => this.#mounts());
-    this.#page([
-      { id: "description", label: "Mounts", detail: "Host data stays on the host; writable mounts expose it. Named storage can persist. Only selected entry edits are applied to the chosen scope. Review the security boundary before saving. Conflicting remove_mounts identities in the chosen scope are reconciled." },
-      ...items.map((entry) => ({ id: entry.guestPath!, label: `${entry.guestPath} (${entry.readonly ? "ro" : "rw"})`, detail: `${entry.type}: ${entry.hostPath ?? "memory"}`, action: () => edit(entry) })),
-      { id: "add", label: "Add mount", action: () => edit() },
-      { id: "clear", label: "Clear mounts (explicit empty)", action: () => { this.#set("mounts", []); this.#mounts(); } },
-      { id: "inherit", label: "Inherit mounts", action: () => this.#inherit("mounts") },
-      { id: "back", label: "Back", action: () => this.#home() },
-    ], () => this.#home());
+      this.#changes.set("mounts", [...items.filter((item) => item.guestPath !== entry?.guestPath && item.guestPath !== mount.guestPath), mount]); this.#entryDone("mounts", mount.guestPath, entry?.guestPath);
+    }, entry ? () => this.#removeEntry(SETTINGS_FIELDS.find((field) => field.path === "mounts")!, entry) : undefined, () => this.#home(), child);
   }
-  #form(title: string, fields: FormField[], save: (fields: FormField[]) => void, remove: (() => void) | undefined, back: () => void): void {
-    const clear = () => { for (const field of fields) if (field.secret) field.value = ""; this.#formCleanup = undefined; };
-    this.#formCleanup = clear;
+  #form(title: string, fields: FormField[], save: (fields: FormField[]) => void, remove: (() => void) | undefined, back: () => void, selected?: string): void {
+    const clear = () => { for (const field of fields) if (field.secret) field.value = ""; this.#formDirty = false; this.#formCleanup = undefined; };
+    this.#formDirty = false; this.#formCleanup = clear;
     const show = () => this.#page([
       { id: "title", label: title },
       ...fields.map((field) => ({ id: field.name, label: `${field.name}: ${field.secret ? field.value ? "******** (replacement)" : "not replaced" : field.value}`, detail: field.description, action: () => {
-        if (field.choices) this.#page(field.choices.map((value) => ({ id: value, label: value, action: () => { field.value = value; show(); } })), show);
-        else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, (value) => { field.value = value; show(); }, show);
+        if (field.choices) this.#page(field.choices.map((value) => ({ id: value, label: value, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })), show);
+        else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, (value) => { this.#formDirty ||= field.value !== value; field.value = value; show(); }, show);
       } })),
       { id: "save-item", label: "Keep draft entry", action: () => { save(fields); clear(); } },
       ...(remove ? [{ id: "delete-item", label: "Delete entry from draft", action: () => { remove(); clear(); } }] : []),
       { id: "cancel-item", label: "Cancel entry", action: () => { clear(); back(); } },
     ], () => { clear(); back(); });
     show();
+    if (selected) this.#focus = Math.max(0, this.#rows.findIndex((row) => row.id === selected));
   }
   #input(label: string, value: string, secret: boolean, accept: (value: string) => void | Promise<void>, cancel = () => this.#home()): void {
     const input = secret ? new MaskedInput() : new SettingsInput();
@@ -200,7 +260,7 @@ export class ControlPanel implements Component, Focusable {
   async #save(scope: SettingsScope): Promise<void> {
     let target: SettingsDraft | undefined;
     if (scope !== "temporary" && this.#changes.has("sandbox_name") && this.#changes.get("sandbox_name") === null) {
-      this.#report("Automatic session naming is a temporary-only override. Choose Apply temporarily, or Inherit sandbox_name to remove a persistent assignment.");
+      this.#report("Automatic session naming is an ephemeral-only override. Choose w (save ephemeral), or Inherit sandbox_name to remove a persistent assignment.");
       return;
     }
     try {
@@ -208,10 +268,10 @@ export class ControlPanel implements Component, Focusable {
       if (this.#closed) { target.discard(); return; }
       const preview = await (this.#control.previewSettings?.(target) ?? target.preview());
       if (this.#closed) { target.discard(); return; }
-      const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${intent.source}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`).join("; ");
+      const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${originLabel(intent.source)}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`).join("; ");
       const summary = `${scope === "temporary" ? "Current session memory only" : target.path}. ${preview.changes.length} dirty settings: ${preview.changes.map((change) => change.path).join(", ") || "none"}. ${entries ? `Collection intent: ${entries}. ` : ""}${preview.effect === "restart" ? "RESTART: guest ephemeral state and nested containers may be lost. In-flight tools must finish." : "Live routing/presentation update; no guest restart required."} ${preview.shadowed.length ? `Shadowed (NOT effective): ${preview.shadowed.join(", ")}.` : ""} Conflicting same-scope removal controls shown in changed fields are reconciled. Host bypass/network/mount/environment settings can widen access; review before confirming.`;
       const pending = target; this.#pending = pending;
-      this.#confirm(`Apply ${scope} settings?`, summary, async () => {
+      this.#confirm(`Save ${originLabel(scope)} + reload?`, summary, async () => {
         let saved = false; let applied = false; let message = "";
         try {
           await this.#ctx.waitForIdle();
@@ -221,7 +281,7 @@ export class ControlPanel implements Component, Focusable {
           await this.#control.reload({ allowRestart: preview.effect === "restart" });
           if (this.#closed) return;
           message = `${saved ? "Applied" : "No changes"}${result.shadowed.length ? `; shadowed: ${result.shadowed.join(", ")}` : ""}. Runtime: ${this.#control.getState().status}`;
-        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Overview and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
+        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Runtime and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
         finally {
           pending.discard(); this.#pending = undefined;
           if (!this.#closed) {
@@ -236,9 +296,9 @@ export class ControlPanel implements Component, Focusable {
     } catch { target?.discard(); this.#report("Validation failed. Check types/ranges, required secret hosts, references and mount/host policy guards. Draft retained."); }
   }
   #load(): void {
-    const snapshot = this.#draft.snapshot(); this.#values = parseTomlConfig(snapshot.effectiveToml, "global").value;
+    const snapshot = this.#draft.snapshot(); this.#values = displayConfig(snapshot.effectiveToml);
     if (snapshot.automaticSandboxName) this.#values.sandboxName = null;
-    this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings; this.#changes.clear(); this.#dirty = false;
+    this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings; this.#changes.clear(); this.#entryChanges.clear(); this.#dirty = false;
   }
   async #reopenDraft(): Promise<void> {
     const fresh = await this.#control.settings!.open("temporary");
@@ -250,16 +310,15 @@ export class ControlPanel implements Component, Focusable {
     if (this.#closed) { next.discard(); return; }
     this.#draft.discard(); this.#draft = next;
     const snapshot = next.snapshot();
-    this.#values = parseTomlConfig(snapshot.effectiveToml, "global").value;
+    this.#values = displayConfig(snapshot.effectiveToml);
     if (snapshot.automaticSandboxName) this.#values.sandboxName = null;
     this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings;
   }
   #feedbackRow(): Row { return { id: "feedback", label: `Result: ${this.#feedback}`, detail: "Enter for full result; arrows scroll wrapped text.", action: () => this.#text("Operation result", this.#feedback!) }; }
   #report(message: string): void {
     if (this.#closed) return;
-    this.#message = message; this.#feedback = message;
-    this.#rows = [this.#feedbackRow(), ...this.#rows.filter((row) => row.id !== "feedback")];
-    this.#focus = 0; this.#scroll = 0; this.#detailOffset = 0; this.#refresh();
+    this.#formCleanup?.(); this.#feedback = message;
+    this.#page([this.#feedbackRow(), { id: "back", label: "Back", action: () => this.#home() }], () => this.#home());
   }
   #actions(): Row[] {
     const dangerous = (label: string, detail: string, run: () => Promise<unknown>): Row => ({ id: label, label, detail, action: () => this.#confirm(label, detail, async () => {
@@ -287,9 +346,9 @@ export class ControlPanel implements Component, Focusable {
         this.#text("Recent logs", await this.#control.getLogs(Number(value)));
       }) },
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
-      { id: "seal", label: "Seal network in draft", detail: "Sets deny mode; apply with one of the three buttons.", action: () => { this.#set("network.mode", "deny"); this.#home(); } },
-      dangerous("Reset temporary settings", "Discard current memory-only overrides, then reconfigure. Restart may lose guest state. Unsaved panel edits will also be discarded.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Select a section, search a setting, or choose Actions. Enter edits; Esc backs out. Entry edits affect only the draft. Inherit removes the chosen save scope's assignment; empty lists explicitly clear. Apply temporarily affects only this session. Project/global files live outside the workspace. Sources shows ownership; higher layers may shadow a save. Secrets never prefill values. Restarting loses guest ephemeral state; host files remain your responsibility. Close without applying to cancel.") },
+      { id: "seal", label: "Seal network in draft", detail: "Sets deny mode; save with w, P or G.", action: () => { this.#set("network.mode", "deny"); this.#home(); } },
+      dangerous("Reset ephemeral settings", "Discard current memory-only overrides, then reconfigure. Restart may lose guest state. Unsaved panel edits will also be discarded.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Configuration is editable desired policy; Runtime is read-only adopted policy (or last known when inactive). j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the eventual save scope. w saves ephemeral session memory, P project, G global; all preview and reload. q closes (dirty discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origin, * marks draft intent. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
@@ -302,13 +361,20 @@ export class ControlPanel implements Component, Focusable {
     ], () => this.#home());
   }
   #exit(): void {
-    if (this.#dirty) this.#confirm("Discard unsaved changes?", "No setting changes will be applied. Previously confirmed saves are not undone.", () => this.close());
-    else this.close();
+    if (this.#exitConfirmation) return;
+    if (!this.#dirty && !this.#formDirty) { this.close(); return; }
+    const previous = { rows: this.#rows, tree: this.#tree, focus: this.#focus, scroll: this.#scroll, detailOffset: this.#detailOffset, back: this.#back };
+    this.#exitConfirmation = true;
+    this.#confirm("Discard unsaved changes?", "No setting changes will be applied. Previously confirmed saves are not undone.", () => this.close(), () => {
+      this.#exitConfirmation = false;
+      this.#rows = previous.rows; this.#tree = previous.tree; this.#focus = previous.focus; this.#scroll = previous.scroll; this.#detailOffset = previous.detailOffset; this.#back = previous.back;
+      this.#refresh();
+    });
   }
   async waitForIdle(): Promise<void> { await this.#operation; }
   close(): void { if (this.#closed) return; this.dispose(); this.#done(); }
   dispose(): void {
-    if (this.#closed) return; this.#closed = true;
+    if (this.#closed) return; this.#closed = true; this.focused = false;
     this.#editing?.input.clear();
     this.#editing = undefined; this.#formCleanup?.(); this.#pending?.discard(); this.#pending = undefined; this.#draft.discard(); this.#changes.clear(); this.#values = {}; this.#rows = [];
   }
@@ -329,24 +395,55 @@ export class ControlPanel implements Component, Focusable {
       }
       this.#refresh(); return;
     }
-    if (matchesKey(data, "escape")) { if (this.#back) this.#back(); else this.#exit(); }
-    else if (matchesKey(data, "up") && this.#detailOffset > 0) this.#detailOffset--;
-    else if (matchesKey(data, "down") && this.#detailOffset < Math.max(0, (this.#rowHeights[this.#focus] ?? 1) - this.#capacity)) this.#detailOffset++;
-    else if (matchesKey(data, "up") || matchesKey(data, "shift+tab") || matchesKey(data, "left")) { this.#focus = (this.#focus - 1 + this.#rows.length) % this.#rows.length; this.#detailOffset = 0; }
-    else if (matchesKey(data, "down") || matchesKey(data, "tab") || matchesKey(data, "right")) { this.#focus = (this.#focus + 1) % this.#rows.length; this.#detailOffset = 0; }
-    else if (matchesKey(data, "enter")) {
+    if (this.#tree) this.#home(false);
+    if (isKeyRelease(data)) return;
+    const modified = /^\x1b\[27;([12]);(\d+)~$/.exec(data);
+    const key = data.length === 1 ? data : decodeKittyPrintable(data) ?? (modified && Number(modified[2]) >= 32 && Number(modified[2]) <= 126 ? String.fromCodePoint(Number(modified[2])) : undefined);
+    const row = this.#rows[this.#focus];
+    const run = (action?: () => void | Promise<void>) => {
+      if (!action) return;
       this.#busy = true;
-      this.#operation = Promise.resolve().then(() => this.#rows[this.#focus]?.action?.()).catch(() => { this.#report("Action failed. Review settings and sandbox status; no automatic host escape."); }).finally(() => { this.#busy = false; this.#refresh(); });
-    }
+      this.#operation = Promise.resolve().then(action).catch(() => this.#report("Action failed. Review settings and sandbox status; no automatic host escape.")).finally(() => { this.#busy = false; this.#refresh(); });
+    };
+    if (key === "q") this.#exit();
+    else if (matchesKey(data, "escape")) { if (this.#back) this.#back(); else this.#exit(); }
+    else if (this.#tree && ["w", "P", "G"].includes(key ?? "")) run(() => this.#save(key === "w" ? "temporary" : key === "P" ? "project" : "global"));
+    else if (this.#tree && key === "e") run(row?.edit);
+    else if (this.#tree && key === "a") run(row?.add);
+    else if (this.#tree && key === "d") run(row?.remove);
+    else if (this.#tree && (matchesKey(data, "left") || key === "h")) {
+      if (row?.children && this.#expanded.has(row.id)) this.#expanded.delete(row.id);
+      else if (row?.parent) this.#treeFocus = row.parent;
+      this.#home(); this.#detailOffset = 0;
+    } else if (this.#tree && (matchesKey(data, "right") || key === "l" || matchesKey(data, "enter") && row?.children)) {
+      if (row?.children) {
+        if (this.#expanded.has(row.id) && row.children[0]) this.#treeFocus = row.children[0].id;
+        else this.#expanded.add(row.id);
+      }
+      this.#home(); this.#detailOffset = 0;
+    } else if (matchesKey(data, "pageUp") && this.#detailOffset > 0) this.#detailOffset--;
+    else if (matchesKey(data, "pageDown") && this.#detailOffset < Math.max(0, (this.#rowHeights[this.#focus] ?? 1) - this.#capacity)) this.#detailOffset++;
+    else if (!this.#tree && matchesKey(data, "up") && this.#detailOffset > 0) this.#detailOffset--;
+    else if (!this.#tree && matchesKey(data, "down") && this.#detailOffset < Math.max(0, (this.#rowHeights[this.#focus] ?? 1) - this.#capacity)) this.#detailOffset++;
+    else if (matchesKey(data, "up") || matchesKey(data, "shift+tab") || key === "k") { this.#focus = (this.#focus - 1 + this.#rows.length) % this.#rows.length; this.#detailOffset = 0; }
+    else if (matchesKey(data, "down") || matchesKey(data, "tab") || key === "j") { this.#focus = (this.#focus + 1) % this.#rows.length; this.#detailOffset = 0; }
+    else if (matchesKey(data, "enter")) run(row?.action);
+    if (this.#tree && !this.#closed) this.#treeFocus = this.#rows[this.#focus]!.id;
     this.#refresh();
   }
   render(width: number): string[] {
     width = Math.max(1, Math.floor(width));
     const height = Math.max(1, Math.floor(this.#tui.terminal.rows));
+    if (this.#tree && !this.#editing) this.#home(false);
     const lines: string[] = [];
-    const title = this.#theme.bold(this.#theme.fg("accent", `MICROSANDBOX${this.#dirty ? " · unsaved" : ""}`));
-    if (height >= 4) lines.push(truncateToWidth(title, width));
-    const capacity = Math.max(1, height - lines.length - (height >= 6 ? 1 : 0)); this.#capacity = capacity;
+    const title = this.#theme.bold(this.#theme.fg("accent", "MICROSANDBOX")) + (this.#dirty ? this.#theme.fg("warning", " · unsaved draft") : "");
+    if (height >= 8) lines.push(truncateToWidth(title, width));
+    const selected = this.#rows[this.#focus];
+    const capabilities = this.#tree ? [selected?.edit ? "e edit" : "", selected?.add ? "a add" : "", selected?.remove ? `d ${selected.removeLabel}` : "", selected?.action ? "Enter run" : "", selected?.readonly ? "read-only" : ""].filter(Boolean).join(" · ") : "Enter select · q close · Esc back";
+    const hints = this.#editing ? ["Enter keep · Esc cancel", "Typing (q is text)"] : this.#tree ? ["j/k h/l fold · q close", capabilities, ...(width < 32 ? ["w ephemeral", "P project G global"] : ["w ephemeral P project G global"])] : [capabilities, "↑/↓ scroll · Tab next"];
+    const footer = hints.filter(Boolean).flatMap((hint) => wrapTextWithAnsi(this.#theme.fg("muted", hint), width));
+    const footerCount = height >= 6 ? Math.min(footer.length, height - lines.length - 2) : height >= 2 ? 1 : 0;
+    const capacity = Math.max(1, height - lines.length - footerCount); this.#capacity = capacity;
     if (this.#editing) {
       const edit = this.#editing;
       const prompt = wrapTextWithAnsi(safeText(edit.label), width);
@@ -359,10 +456,14 @@ export class ControlPanel implements Component, Focusable {
         const row = this.#rows[index]!; const active = index === this.#focus;
         const rowStart = body.length;
         if (active) focusedLine = rowStart;
-        const label = `${active ? ">" : " "} ${safeText(row.label)}`;
+        const prefix = `${active ? ">" : " "} ${"  ".repeat(row.depth ?? 0)}${row.children ? this.#expanded.has(row.id) ? "▾ " : "▸ " : this.#tree ? "  " : ""}`;
+        const label = prefix + this.#theme.fg(row.children ? "accent" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", safeText(row.label))
+          + (row.value !== undefined ? this.#theme.fg(row.id === "runtime" || row.id === "runtime/status" ? this.#control.getState().status === "active" ? "success" : ["unavailable", "host-fallback"].includes(this.#control.getState().status) ? "error" : "warning" : "syntaxString", `: ${safeText(row.value)}`) : "")
+          + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "")
+          + (row.dirty ? this.#theme.fg("warning", ` * ${row.dirty}`) : "");
         const labelLines = wrapTextWithAnsi(label, width);
         body.push(...labelLines.map((line) => active ? this.#theme.inverse(line) : line));
-        if (row.detail && (active || width >= 80)) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));
+        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "runtime/status")) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));
         this.#rowHeights.push(body.length - rowStart);
       }
       this.#detailOffset = Math.min(this.#detailOffset, Math.max(0, (this.#rowHeights[this.#focus] ?? 1) - capacity));
@@ -373,17 +474,20 @@ export class ControlPanel implements Component, Focusable {
       this.#scroll = Math.max(0, Math.min(this.#scroll, Math.max(0, body.length - capacity)));
       lines.push(...body.slice(this.#scroll, this.#scroll + capacity));
     }
-    if (height >= 6) { while (lines.length < height - 1) lines.push(""); lines.push(this.#theme.fg("muted", truncateToWidth(safeText(this.#busy ? "Working; please wait..." : this.#message), width))); }
+    if (footerCount) {
+      while (lines.length < height - footerCount) lines.push("");
+      lines.push(...(footerCount === 1 ? [this.#theme.fg("muted", truncateToWidth(this.#busy ? "Working · q after completion" : this.#editing ? "Enter keep · Esc cancel" : "q close · Esc back", width))] : footer.slice(0, footerCount)));
+    }
     while (lines.length < height) lines.push("");
     // Pad opaque full viewport, so the native overlay never exposes underlying chat.
     return lines.slice(0, height).map((line) => truncateToWidth(line, width, "") + " ".repeat(Math.max(0, width - visibleWidth(truncateToWidth(line, width, "")))));
   }
 }
 
-export type PanelLaunchStage = "settings access" | "temporary settings" | "project settings" | "global settings" | "interactive overlay" | "panel construction";
+export type PanelLaunchStage = "settings access" | "ephemeral settings" | "project settings" | "global settings" | "interactive overlay" | "panel construction";
 const launchHelp: Record<PanelLaunchStage, string> = {
   "settings access": "Check working directory/Git discovery and restart Pi.",
-  "temporary settings": "Check host-owned settings and policy boundaries.",
+  "ephemeral settings": "Check host-owned settings and policy boundaries.",
   "project settings": "Check the host-owned project settings target and its directory permissions/symlinks.",
   "global settings": "Check the host-owned global settings target and its directory permissions/symlinks.",
   "interactive overlay": "Check Pi interactive UI support and report a compatibility bug if this persists.",
@@ -415,7 +519,7 @@ export async function openControlPanel(ctx: Context, control: MsbControl): Promi
   try {
     const settings = control.settings;
     if (!settings) throw new Error("This control adapter does not support settings");
-    stage = "temporary settings";
+    stage = "ephemeral settings";
     draft = await settings.open("temporary");
     const paths: Record<string, string> = { temporary: "Current session memory (no disk writes)" };
     for (const scope of ["project", "global"] as const) { stage = `${scope} settings`; const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }

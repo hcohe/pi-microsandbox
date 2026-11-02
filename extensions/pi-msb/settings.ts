@@ -220,7 +220,8 @@ async function atomicWrite(path: string, text: string, expected: Source, guard: 
   } finally { await fs.unlink(temp).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
 }
 
-const LIVE_FIELDS = new Set(["blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "showFooter", "autoStart"]);
+export const LIVE_SETTINGS_KEYS: readonly (keyof Config)[] = Object.freeze(["blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "showFooter", "autoStart"]);
+const LIVE_FIELDS = new Set<string>(LIVE_SETTINGS_KEYS);
 /** Conservative: only live routing/presentation and startup-only preferences avoid recreation. */
 export function classifySettingsEffect(before: Config, after: Config): SettingsEffect {
   const changed = Object.keys(before).filter((key) => !equal(before[key as keyof Config], after[key as keyof Config]));

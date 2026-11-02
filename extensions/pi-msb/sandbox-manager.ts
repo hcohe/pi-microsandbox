@@ -36,6 +36,8 @@ export interface SandboxManagerDeps {
   createOperations(transport: SandboxTransport): ToolOperations;
   prepareRuntime(runtime: RuntimeExecution, config: Config): Promise<RuntimePreparation>;
   persist(state: PersistedSandboxState): void;
+  /** Successful adoption, or conservative loss of VM-instance certainty after inspection. */
+  adopted?(request: BootRequest, verification: "created" | "reconnected" | "live"): void;
   now?: () => number;
 }
 
@@ -295,6 +297,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         requestSandboxName(previousRequest) === requestSandboxName(request) &&
         classifySettingsEffect(previousRequest.config, request.config) !== "restart") {
       lastRequest = request;
+      deps.adopted?.(request, "live");
       return state;
     }
     if (state.status === "active" && runtime) {
@@ -325,6 +328,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     lock = owner;
 
     let partialSandbox = false;
+    let created = false;
     let currentRequestInfo: RuntimeState["info"] = null;
     let bootedRuntime: RuntimeExecution | null = null;
 
@@ -339,13 +343,13 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       let raw: unknown;
 
       if (!inspected) {
-        partialSandbox = true;
+        partialSandbox = true; created = true;
         raw = await deps.createSandbox(request);
       } else if (isLegacyManagedOwner(inspected, request)) {
         // The current session owner lock guards removal. Legacy named volumes
         // are intentionally neither inspected nor removed.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
-        partialSandbox = true;
+        partialSandbox = true; created = true;
         raw = await deps.createSandbox(request);
       } else if (!isManagedOwner(inspected, request)) {
         throw new Error(`sandbox name conflict: ${name}`);
@@ -355,7 +359,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
         // The old instance was removed; a failed replacement still needs its
         // own best-effort cleanup.
-        partialSandbox = true;
+        partialSandbox = true; created = true;
         raw = await deps.createSandbox(request);
       } else if (isRunning(inspected)) {
         raw = await deps.connectSandbox(inspected);
@@ -393,6 +397,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       deps.persist(persisted);
       retainedState = persisted;
       state = { status: "active", info: currentRequestInfo };
+      deps.adopted?.(request, created ? "created" : "reconnected");
       return state;
     } catch (error) {
       await disposeRuntime();
@@ -444,7 +449,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     if (isRunning(inspected) && !runtimeInvalid) {
       // The boot-created transport remains authoritative while the sandbox is
       // running. Reconnecting here would replace a valid handle and dispose a
-      // transport that may still have active callers.
+      // transport that may still have active callers. Labels alone cannot prove
+      // that an external same-name replacement is the instance we created.
+      deps.adopted?.(lastRequest, "reconnected");
       return runtime;
     }
 
@@ -495,6 +502,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     runtime = replacement;
     runtimeInvalid = false;
     if (state.info) state = { ...state, info: { ...state.info, docker: { ...preparation.docker } } };
+    // A same-name guest is not a trustworthy instance identity. Reconnected VM
+    // policy must become unknown even when the previous transport was ours.
+    deps.adopted?.(lastRequest, "reconnected");
     if (previous && previous !== replacement) {
       try {
         await previous.transport.dispose();

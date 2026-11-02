@@ -66,6 +66,23 @@ function depsFor(events: string[], overrides: Partial<SandboxManagerDeps> = {}):
   };
 }
 
+test("adoption observer runs only after successful boot/reconnect or live policy adoption", async () => {
+  for (const inspectedStatus of [undefined, "running", "stopped"]) {
+    const events: string[] = []; const adopted: BootRequest[] = []; let fail = false;
+    const initial = request();
+    const manager = createSandboxManager(depsFor(events, {
+      inspectSandbox: async () => inspectedStatus ? { name: sandboxNameFor(sessionId), status: inspectedStatus, labels: labels(initial) } : null,
+      adopted: (value) => { assert.equal(manager.getState().status, "active"); adopted.push(value); events.push("adopted"); },
+      prepareRuntime: async () => { if (fail) throw new Error("preparation failed"); return { docker: { mode: "disabled", readiness: "disabled" } }; },
+    }));
+    await manager.boot(initial); assert.equal(adopted.length, 1); assert.ok(events.indexOf("persist") < events.indexOf("adopted"));
+    await manager.boot(initial); assert.equal(adopted.length, 1); // unchanged request keeps original provenance
+    const live = request({ config: config({ showFooter: false }) }); await manager.boot(live); assert.equal(adopted.length, 2); assert.equal(adopted[1], live);
+    fail = true; await manager.boot(request({ config: config({ cpus: 2 }), forceRecreate: true })); assert.equal(manager.getState().status, "unavailable"); assert.equal(adopted.length, 2);
+    await manager.shutdown();
+  }
+});
+
 test("the owner lock precedes every resource mutation", async () => {
   const events: string[] = [];
   const manager = createSandboxManager(depsFor(events));

@@ -2,16 +2,16 @@
 
 [Back to README](../README.md)
 
-1. Open `/msb`: inspect Overview and Actions → Recent logs.
+1. Open `/msb`: inspect Runtime and Configuration → Actions → Recent logs.
 2. If the state is `unavailable (blocked)`, fix the displayed configuration,
-   image, virtualization, path, or missing-tool error and choose Actions → Reload settings.
+   image, virtualization, path, or missing-tool error and choose Configuration → Actions → Reload settings.
    Startup failures fail closed; routed tools do not silently run on the host.
-3. If a process died, a later startup or Actions → Prune stale sandboxes can remove its labelled
+3. If a process died, a later startup or Configuration → Actions → Prune stale sandboxes can remove its labelled
    sandbox after the owner lock is free.
 4. If a same-name resource has different managed labels, pi-microsandbox
    refuses to attach or replace it. Verify the resource with Microsandbox's
    tooling before removing it.
-5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb` → Actions → Turn off
+5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb` → Configuration → Actions → Turn off
    for explicit host mode, or configure `fallback_mode = "host"` knowingly.
    Automatic fallback remains visibly distinct from explicit off mode; both are
    unsandboxed.
@@ -30,15 +30,13 @@ the mount.
 ## Legacy named volumes
 
 Named Git volumes created by older releases are never migrated or deleted
-automatically. Before upgrading, use the old `/msb volumes` and `/msb export`
-commands to inventory and copy work while those commands are available. After
-upgrading, use Microsandbox's volume tooling to inspect and recover each
+automatically. Use Microsandbox's volume tooling to inspect and recover each
 `pi-msb-vol-*` volume, then remove it manually only after confirming that
 nothing is needed. Current pi-microsandbox commands do not manage these volumes.
 
 ## Docker daemon problems
 
-`/msb` Overview shows the configured Docker mode, readiness, server version, and
+`/msb` → Runtime shows the adopted Docker mode, readiness, server version, and
 storage driver. Inside an active sandbox, start or recheck the daemon with:
 
 ```sh

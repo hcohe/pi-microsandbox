@@ -13,7 +13,7 @@ The default is fail-closed:
   a sandbox is active it requires interactive approval for the exact tool,
   working directory, and recursively sorted arguments. It is unavailable in
   headless operation and is never silently selected.
-- `/msb` → Actions → Turn off is an explicit host-mode handoff and asks for
+- `/msb` → Configuration → Actions → Turn off is an explicit host-mode handoff and asks for
   confirmation before stopping/removing the guest. This is
   different from `fallback_mode = "host"`, which automatically uses host tools
   after a sandbox failure and is shown as `MSB host fallback`. Both are
@@ -65,7 +65,7 @@ reference, not an active policy; existing files (even empty ones) are preserved.
 New files use mode `0600`, new directories `0700`, and setup errors block startup.
 `pi-microsandbox/default.toml` applies to all projects; a host-owned per-project
 file overrides it. Both take precedence over launch environment/CLI settings;
-deliberate temporary panel changes sit above both files, last only for the current
+deliberate ephemeral panel changes sit above both files, last only for the current
 session and are not written to its transcript. Host lists replace rather than
 extend lower-layer lists. `PI_MSB_*`
 environment variables and session `/msb` controls are also supported.

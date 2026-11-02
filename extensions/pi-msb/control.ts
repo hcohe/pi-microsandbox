@@ -10,7 +10,7 @@ import {
   resolveSecretValue,
   toEffectiveToml,
 } from "./config.ts";
-import { classifySettingsEffect, SettingsEditor } from "./settings.ts";
+import { classifySettingsEffect, LIVE_SETTINGS_KEYS, SettingsEditor } from "./settings.ts";
 import { buildSandboxLabels, decodeSessionState, normalizeSandboxRecord, encodeSessionState } from "./labels.ts";
 import { acquireOwnerLock, createLocksPort } from "./locks.ts";
 import { createBashOps, createFindOps, createGrepOps } from "./operations-exec.ts";
@@ -32,6 +32,7 @@ import {
   type RuntimeExecution,
   type RuntimePreparation,
   type RuntimeState,
+  type RuntimePolicySnapshot,
   type ToolOperations,
   type ToolOpsProvider,
   type Workspace,
@@ -473,6 +474,22 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     persist: (state) => options.appendEntry?.(STATE_ENTRY, encodeSessionState(state)),
   };
 
+  let adopted: { sessionId: string; cwd: string; policy: RuntimePolicySnapshot } | undefined;
+  deps.adopted = (request, verification) => {
+    const sameRuntime = adopted?.sessionId === request.sessionId && adopted.cwd === request.cwd;
+    const knownFields = verification === "created" ? Object.keys(request.config) as Array<keyof Config>
+      : verification === "live" && sameRuntime ? adopted!.policy.knownFields : [...LIVE_SETTINGS_KEYS];
+    const safeConfig = Object.fromEntries(knownFields.map((key) => [key, key === "secrets"
+      ? request.config.secrets.map(({ env, allowHosts }) => ({ env, allowHosts: [...allowHosts], value: "<redacted>" }))
+      : request.config[key]])) as unknown as Config;
+    const provenance: Record<string, string> = Object.fromEntries(Object.entries(resolved.provenance).filter(([key]) => knownFields.some((field) => key === field || key.startsWith(`${field}.`) || key.startsWith(`${field}[`))));
+    const effectiveToml = toEffectiveToml({ ...resolved, config: safeConfig });
+    if (verification === "reconnected" && sameRuntime && adopted!.policy.verification === "reconnected" && adopted!.policy.effectiveToml === effectiveToml) return;
+    adopted = { sessionId: request.sessionId, cwd: request.cwd, policy: {
+      effectiveToml, provenance, automaticSandboxName: knownFields.includes("sandboxName") && request.config.sandboxName === null,
+      knownFields: [...knownFields], verification: verification === "created" || verification === "live" && sameRuntime && adopted!.policy.verification === "created" ? "created" : "reconnected", adoptedAt: Date.now(),
+    } };
+  };
   const manager = createSandboxManager(deps);
   const notifyState = (state: RuntimeState) => options.onState?.(state);
   const visibleState = (): RuntimeState => {
@@ -550,6 +567,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return settings;
     },
     getState: visibleState,
+    getRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.policy) : undefined,
     async setEnabled(enabled) {
       if (enabled && isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
@@ -660,7 +678,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
   };
 
-  return { control, manager, provider, configRef, configureSession, endSession: () => { settings.endSession(); settingsReady = false; logSecretRedactions.clear(); } };
+  return { control, manager, provider, configRef, configureSession, endSession: () => { settings.endSession(); settingsReady = false; adopted = undefined; logSecretRedactions.clear(); } };
 }
 
 export const createControl = createMsbIntegration;
