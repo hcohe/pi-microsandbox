@@ -419,9 +419,12 @@ test("scope-safe intent replay retains masked-placeholder guards and does not bl
 });
 
 test("host read-only list entry conversion never imports higher-scope filesystem paths", async (t) => {
-  const { editor, paths, root } = await fixture(t);
-  const globalPath = join(root, "global-data"), projectPath = join(root, "project-data"), privatePath = join(root, "private-data"), chosenPath = join(root, "chosen-data");
-  for (const path of [globalPath, projectPath, privatePath, chosenPath]) await mkdir(path);
+  const { editor, input, paths } = await fixture(t);
+  // Legacy entries become same-path guest mounts; /tmp is reserved in the guest.
+  const globalPath = "/mnt/global-data", projectPath = "/mnt/project-data", privatePath = "/mnt/private-data", chosenPath = "/mnt/chosen-data";
+  const mountPaths = new Set([globalPath, projectPath, privatePath, chosenPath]);
+  input.realpath = async (path) => mountPaths.has(path) ? path : realpath(path);
+  input.stat = async (path) => mountPaths.has(path) ? { isSocket: () => false } : stat(path);
   await writeFile(paths.global, `host_ro_allowlist = ${JSON.stringify([globalPath])}\n`);
   await writeFile(paths.project, `host_ro_allowlist = ${JSON.stringify([projectPath, privatePath])}\n`);
   const draft = await editor.open("temporary"); draft.upsertListEntry("host_ro_allowlist", chosenPath, projectPath);

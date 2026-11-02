@@ -207,6 +207,7 @@ test("historical persisted overrides are ignored and never resurrect temporary s
       sessionId: `legacy-${key}`, cwd, configDirName: ".pi", agentDir: join(root, "agent"),
       entries: () => [{ type: "custom", customType: "pi-msb.override", data: { key, value: "legacy" } }],
       sdkLoader: async () => { loads++; return fakeSdk([]); },
+      acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
     });
     const state = await integration.configureSession({ sessionId: `legacy-${key}`, cwd, projectTrusted: true });
     t.after(() => integration.manager.shutdown());

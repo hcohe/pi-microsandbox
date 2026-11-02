@@ -103,7 +103,7 @@ test("network list CRUD and project sparse persistence are actionable", async (t
   await f.choose("api.example.com"); await f.choose("Delete entry");
   await f.choose("Add entry"); await f.choose("Value:"); await f.key("new.example.com"); await f.key("\r"); await f.choose("Keep draft entry"); await f.choose("Back");
   await f.choose(SAVE_LABELS[1]); await f.choose("Confirm");
-  const text = await readFile(f.paths.project!, "utf8"); assert.match(text, /new.example.com/); assert.doesNotMatch(text, /cpus|memory|secret|image/);
+  const text = await readFile(f.paths.project!, "utf8"); assert.match(text, /new\.example\.com/); assert.doesNotMatch(text, /cpus|memory|secret|image/);
   assert.deepEqual(f.calls, ["idle", "reload"]);
 });
 
@@ -303,7 +303,7 @@ test("panel inputs preserve Kitty printable keys and ordinary split paste", asyn
   const f = await fixture(t);
   await f.choose("Section"); await f.choose("Network"); await f.choose("network.allow_hosts:"); await f.choose("Add entry"); await f.choose("Value:");
   for (const chunk of ["\x1b[200~api.", "example", ".com\x1b[201~"]) await f.key(chunk);
-  await f.key("\r"); await f.choose("Keep draft entry"); assert.match(f.text(), /api.example.com/);
+  await f.key("\r"); await f.choose("Keep draft entry"); assert.match(f.text(), /api\.example\.com/);
   await f.choose("Back"); await f.choose("Section"); await f.choose("Secrets"); await f.choose("secrets:"); await f.choose("Add secret");
   await f.choose("Environment name"); await f.key("TOKEN"); await f.key("\r"); await f.choose("Allowed hosts"); await f.key("a.example"); await f.key("\r"); await f.choose("Replace value");
   for (const char of "KITTY_SECRET") { await f.key(`\x1b[${char.codePointAt(0)}u`); assert.doesNotMatch(f.text(), /KITTY_SECRET/); }
@@ -390,8 +390,12 @@ test("UI global secret metadata/value editing preserves target-only credentials 
   await f.choose("EDIT:"); await f.choose("Replace value"); await f.key("$ENV:NEW_REF"); assert.doesNotMatch(f.text(), /\$ENV:NEW_REF/); await f.key("\r"); await f.choose("Keep draft entry");
   await f.choose("EDIT:"); await panelSecretHostEdit(f, "final.example"); await f.choose("Keep draft entry"); await f.choose("Back");
   await f.choose(SAVE_LABELS[2]);
-  assert.match(f.text(), /UPSERT secrets\[EDIT\]/); assert.match(f.text(), /host-project/); assert.ok(f.text().split("\n").map((line) => line.trim()).join("").includes(f.paths.project!)); assert.match(f.text(), /DELIBERATE higher-scope\s+import/);
-  assert.doesNotMatch(f.text(), /PRIVATE_LITERAL_BYTES|PRIVATE_FILE_BYTES|NEW_REF/);
+  for (const width of [80, 120]) {
+    f.terminal.columns = width;
+    const preview = f.text().replace(/\s+/g, " ");
+    assert.match(preview, /UPSERT secrets\[EDIT\]/); assert.match(preview, /host-project/); assert.ok(f.text().split("\n").map((line) => line.trim()).join("").includes(f.paths.project!)); assert.match(preview, /DELIBERATE higher-scope import/);
+    assert.doesNotMatch(f.text(), /PRIVATE_LITERAL_BYTES|PRIVATE_FILE_BYTES|NEW_REF/);
+  }
   await f.choose("Confirm");
   const text = await readFile(f.paths.global!, "utf8"); const secrets = (await import("./config.ts")).parseTomlConfig(text, "global").value.secrets!;
   assert.deepEqual(secrets.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_FILE", "EDIT"]); assert.equal(secrets[1]!.value, "$FILE:global-token"); assert.equal(secrets[2]!.value, "$ENV:NEW_REF"); assert.deepEqual(secrets[2]!.allowHosts, ["final.example"]);
@@ -409,13 +413,24 @@ test("UI add/delete global secret intents exclude project siblings and report sh
   await f.choose("Add secret"); await f.choose("Environment name"); await f.key("NEW"); await f.key("\r"); await panelSecretHostEdit(f, "new.example"); await f.choose("Replace value"); await f.key("$ENV:NEW"); await f.key("\r"); await f.choose("Keep draft entry"); await f.choose("Back"); await f.choose(SAVE_LABELS[2]); await f.choose("Confirm");
   let text = await readFile(f.paths.global!, "utf8"); assert.doesNotMatch(text, /PRIVATE_|env = "EDIT"/); assert.match(text, /NEW/); assert.match(text, /TARGET_ONLY/);
   await openPanelSecrets(f); await f.choose("EDIT:"); await f.choose("Delete entry"); await f.choose("Back"); await f.choose(SAVE_LABELS[2]);
-  assert.match(f.text(), /REMOVE secrets\[EDIT\]/); assert.match(f.text(), /shadowed; not effective\s+here/); await f.choose("Confirm");
+  for (const width of [80, 120]) {
+    f.terminal.columns = width;
+    const preview = f.text().replace(/\s+/g, " ");
+    assert.match(preview, /REMOVE secrets\[EDIT\]/); assert.match(preview, /shadowed; not effective here/);
+  }
+  await f.choose("Confirm");
   assert.match(f.text(), /No changes/); assert.match(f.text(), /secrets\[EDIT\]/); assert.equal(await readFile(f.paths.global!, "utf8"), text);
 });
 
 test("UI explicit secret clear is distinguished from CRUD and affects only the chosen scope", async (t) => {
   const f = await fixture(t); await seedScopedPanelSecrets(f); await openPanelSecrets(f);
-  await f.choose("Clear secrets"); await f.choose("Back"); await f.choose(SAVE_LABELS[2]); assert.match(f.text(), /CLEAR secrets\[whole list\]/); assert.match(f.text(), /explicit whole-list intent/); await f.choose("Confirm");
+  await f.choose("Clear secrets"); await f.choose("Back"); await f.choose(SAVE_LABELS[2]);
+  for (const width of [80, 120]) {
+    f.terminal.columns = width;
+    const preview = f.text().replace(/\s+/g, " ");
+    assert.match(preview, /CLEAR secrets\[whole list\]/); assert.match(preview, /explicit whole-list intent/);
+  }
+  await f.choose("Confirm");
   assert.deepEqual((await import("./config.ts")).parseTomlConfig(await readFile(f.paths.global!, "utf8"), "global").value.secrets, []);
   assert.match(await readFile(f.paths.project!, "utf8"), /PRIVATE_LITERAL/);
 });
