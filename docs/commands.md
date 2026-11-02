@@ -7,6 +7,13 @@ There are no subcommands or argument completions. Headless/RPC/print invocations
 return an actionable error without executing lifecycle actions; configure the
 host-owned files or `PI_MSB_*` environment variables before starting a session.
 
+If opening fails, the diagnostic identifies the settings/UI stage and a safe error
+class or known filesystem code, never raw config/error contents. Check the named
+host settings target's permissions and symlinks; a symlinked Pi agent root is
+supported, but policy descendants must be regular directories/files. Unexpected
+programming failures reach Pi's error handler as sanitized diagnostics. Opening
+applies no settings and never enables host execution.
+
 ## Navigate and edit
 
 Use arrows or Tab to move, Enter to select/edit, and Esc to go back. Long screens

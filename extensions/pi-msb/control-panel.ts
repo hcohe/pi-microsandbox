@@ -1,6 +1,6 @@
 import { visibleWidth, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, normalizeConfigPath, parseTomlConfig } from "./config.ts";
+import { ConfigError, DEFAULT_CONFIG, normalizeConfigPath, parseTomlConfig } from "./config.ts";
 import { SettingsInput } from "./settings-input.ts";
 import { COLLECTION_REMOVALS } from "./settings.ts";
 import { MaskedInput } from "./masked-input.ts";
@@ -380,25 +380,54 @@ export class ControlPanel implements Component, Focusable {
   }
 }
 
+export type PanelLaunchStage = "settings access" | "temporary settings" | "project settings" | "global settings" | "interactive overlay" | "panel construction";
+const launchHelp: Record<PanelLaunchStage, string> = {
+  "settings access": "Check working directory/Git discovery and restart Pi.",
+  "temporary settings": "Check host-owned settings and policy boundaries.",
+  "project settings": "Check the host-owned project settings target and its directory permissions/symlinks.",
+  "global settings": "Check the host-owned global settings target and its directory permissions/symlinks.",
+  "interactive overlay": "Check Pi interactive UI support and report a compatibility bug if this persists.",
+  "panel construction": "Report a control-panel bug with the Pi version and this diagnostic.",
+};
+/** Never retain or print arbitrary messages, stacks, causes, names or codes from credential-bearing errors. */
+export class PanelLaunchError extends Error {
+  readonly unexpected: boolean;
+  constructor(stage: PanelLaunchStage, error: unknown) {
+    const kind = error instanceof ConfigError ? "ConfigError" : error instanceof TypeError ? "TypeError" : error instanceof RangeError ? "RangeError" : error instanceof ReferenceError ? "ReferenceError" : error instanceof SyntaxError ? "SyntaxError" : error instanceof Error ? "Error" : "unknown error";
+    const code = error && typeof error === "object" ? Object.getOwnPropertyDescriptor(error, "code")?.value : undefined;
+    const safeCode = ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "EROFS", "ENOSPC", "EMFILE"].includes(code) ? code as string : undefined;
+    super(`Unable to open /msb at ${stage} (${kind}${safeCode ? ` / ${safeCode}` : ""}). ${launchHelp[stage]} Opening the panel applies no settings.`);
+    this.name = "PanelLaunchError";
+    this.unexpected = !(error instanceof ConfigError) && !safeCode;
+  }
+}
+
 let activePanel: ControlPanel | undefined;
 let opening = false;
 let generation = 0;
 export async function closeControlPanel(): Promise<void> { generation++; const panel = activePanel; panel?.close(); await panel?.waitForIdle(); }
 export async function openControlPanel(ctx: Context, control: MsbControl): Promise<void> {
   if (opening || activePanel) throw new Error("A Microsandbox panel is already open");
-  if (!control.settings) throw new Error("This control adapter does not support settings");
   opening = true;
   const currentGeneration = generation;
   let draft: SettingsDraft | undefined;
+  let stage: PanelLaunchStage = "settings access";
   try {
-    draft = await control.settings.open("temporary");
+    const settings = control.settings;
+    if (!settings) throw new Error("This control adapter does not support settings");
+    stage = "temporary settings";
+    draft = await settings.open("temporary");
     const paths: Record<string, string> = { temporary: "Current session memory (no disk writes)" };
-    for (const scope of ["project", "global"] as const) { const source = await control.settings.open(scope); paths[scope] = source.path!; source.discard(); }
+    for (const scope of ["project", "global"] as const) { stage = `${scope} settings`; const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
     const selected = draft;
     if (generation !== currentGeneration) return;
+    stage = "interactive overlay";
     await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+      stage = "panel construction";
       activePanel = new ControlPanel({ draft: selected, control, ctx, tui, theme, paths, done: () => { activePanel = undefined; done(); } });
+      stage = "interactive overlay";
       return activePanel;
     }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 } });
-  } finally { await closeControlPanel(); activePanel = undefined; draft?.discard(); opening = false; }
+  } catch (error) { throw new PanelLaunchError(stage, error); }
+  finally { await closeControlPanel(); activePanel = undefined; draft?.discard(); opening = false; }
 }

@@ -79,3 +79,52 @@ test("registerMsbCommand exposes only panel opening and no completions", () => {
   assert.equal(typeof registration.handler, "function");
   assert.equal(registration.getArgumentCompletions, undefined);
 });
+
+test("launch diagnostics identify settings stage without echoing messages, causes, custom names or codes", async () => {
+  const { ConfigError } = await import("./config.ts");
+  const f = fixture(); f.ctx.mode = "tui";
+  const error = new ConfigError(["PRIVATE_CONFIG_SENTINEL"]);
+  Object.assign(error, { name: "PRIVATE_NAME_SENTINEL", code: "PRIVATE_CODE_SENTINEL", cause: new Error("PRIVATE_CAUSE_SENTINEL") });
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { open: async (scope: string) => {
+    if (scope === "project") throw error;
+    return { discard() {} };
+  } } });
+  await createCommandHandler(f.control)("", f.ctx);
+  const notice = f.notices.at(-1)?.message ?? "";
+  assert.match(notice, /project settings \(ConfigError\)/);
+  assert.match(notice, /directory permissions\/symlinks/);
+  assert.doesNotMatch(notice, /PRIVATE_/);
+  assert.deepEqual(f.calls, []);
+});
+
+test("launch I/O diagnostics allow only known safe codes; programmer errors propagate sanitized", async () => {
+  const { PanelLaunchError } = await import("./control-panel.ts");
+  const f = fixture(); f.ctx.mode = "tui";
+  const error = Object.assign(new Error("PRIVATE_IO_SENTINEL"), { code: "EACCES" });
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { open: async () => { throw error; } } });
+  await createCommandHandler(f.control)("", f.ctx);
+  assert.match(f.notices.at(-1)!.message, /temporary settings \(Error \/ EACCES\)/);
+  assert.doesNotMatch(f.notices.at(-1)!.message, /PRIVATE_/);
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { open: async () => { throw new TypeError("PRIVATE_PROGRAMMER_SENTINEL", { cause: error }); } } });
+  await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
+    assert.ok(error instanceof PanelLaunchError);
+    assert.match(error.message, /temporary settings \(TypeError\)/);
+    assert.doesNotMatch(error.stack ?? "", /PRIVATE_/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+test("panel-construction failures propagate with a safe UI stage, not a hidden blanket catch", async () => {
+  const f = fixture(); f.ctx.mode = "tui";
+  const draft = { discard() {}, snapshot() { throw new TypeError("PRIVATE_CONSTRUCTION_SENTINEL"); } };
+  Object.defineProperty(f.control, "settings", { value: { open: async () => draft } });
+  f.ctx.ui.custom = async (factory: any) => factory({}, {}, {}, () => {});
+  await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /panel construction \(TypeError\)/);
+    assert.doesNotMatch(error.stack ?? "", /PRIVATE_/);
+    return true;
+  });
+  assert.deepEqual(f.notices, []);
+});

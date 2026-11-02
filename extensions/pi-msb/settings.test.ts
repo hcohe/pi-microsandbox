@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -463,4 +463,318 @@ test("mount/list per-entry deletions preserve target siblings and report higher-
   assert.ok(preview.shadowed.includes("mounts[/mnt/delete]")); assert.ok(preview.shadowed.includes("network.allow_hosts[delete.example]"));
   await global.apply(); const raw = parseTomlConfig(await readFile(paths.global, "utf8"), "global").value;
   assert.deepEqual(raw.mounts!.map((mount) => mount.guestPath), ["/mnt/keep"]); assert.deepEqual(raw.network!.allowHosts, ["keep.example"]);
+});
+
+test("symlinked host-selected agent anchor supports sparse saves in every scope and missing descendants", async (t) => {
+  const { input, root } = await fixture(t);
+  const target = join(root, "canonical-agent"); await mkdir(target);
+  const alias = join(root, "agent-alias"); await symlink(target, alias);
+  const selected = { ...input, agentDir: alias };
+  const paths = await hostConfigPaths(selected);
+  assert.equal(paths.global, join(target, "pi-microsandbox/default.toml"));
+  const editor = new SettingsEditor(selected, "anchored");
+  for (const [scope, field] of [["temporary", "show_footer"], ["project", "cpus"], ["global", "memory_mib"]] as const) {
+    const draft = await editor.open(scope);
+    draft.set(field, scope === "temporary" ? false : scope === "project" ? 2 : 2048);
+    assert.equal((await draft.apply()).saved, true);
+  }
+  assert.equal(editor.temporary().showFooter, false);
+  assert.deepEqual(parseTomlConfig(await readFile(paths.project, "utf8"), "project").value, { cpus: 2 });
+  assert.deepEqual(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value, { memoryMiB: 2048 });
+  assert.equal((await resolveConfig(selected)).config.cpus, 2);
+});
+
+test("agent anchor retarget/replacement invalidates draft apply and scope conversion, including memory-only drafts", async (t) => {
+  const { input, root } = await fixture(t);
+  const target = join(root, "anchor-one"); const other = join(root, "anchor-two");
+  await mkdir(target); await mkdir(other);
+  const alias = join(root, "agent-alias"); await symlink(target, alias);
+  const selected = { ...input, agentDir: alias };
+  for (const scope of ["temporary", "project", "global"] as const) {
+    const editor = new SettingsEditor(selected, "anchor");
+    const draft = await editor.open(scope); draft.set("cpus", 2);
+    await rm(alias); await symlink(other, alias);
+    await assert.rejects(draft.apply(), /agent directory changed/);
+    await assert.rejects(draft.forScope("global"), /agent directory changed/);
+    await assert.rejects(draft.refresh(), /agent directory changed/);
+    assert.deepEqual(editor.temporary(), {});
+    await assert.rejects(stat(join(other, "pi-microsandbox")), { code: "ENOENT" });
+    await rm(alias); await symlink(target, alias);
+  }
+  const editor = new SettingsEditor(selected, "replaced-link");
+  const draft = await editor.open("project"); draft.set("cpus", 3);
+  // Replacement pointing to the same target must also invalidate the old draft.
+  await rm(alias); await symlink(target, alias);
+  await assert.rejects(draft.apply(), /agent directory changed/);
+  const canonicalReplacement = await editor.open("temporary"); canonicalReplacement.set("cpus", 3);
+  await rename(target, `${target}-moved`); await mkdir(target);
+  await assert.rejects(canonicalReplacement.apply(), /agent directory changed/);
+});
+
+test("agent aliases never hide lexical or canonical workspace/writable-mount exposure", async (t) => {
+  const { input, root } = await fixture(t);
+  const safe = join(root, "outside-agent"); await mkdir(safe);
+  const insideAlias = join(input.cwd, "agent-link"); await symlink(safe, insideAlias);
+  const outsideAlias = join(root, "workspace-link"); await symlink(input.cwd, outsideAlias);
+  for (const agentDir of [insideAlias, outsideAlias]) {
+    const editor = new SettingsEditor({ ...input, agentDir }, "unsafe-anchor");
+    await assert.rejects(editor.open("temporary"), /outside the mounted workspace/);
+  }
+  const aliasParent = join(root, "mounted"); await mkdir(aliasParent);
+  const alias = join(aliasParent, "agent"); await symlink(safe, alias);
+  const selected = { ...input, agentDir: alias };
+  const editor = new SettingsEditor(selected, "mounted-anchor");
+  for (const hostPath of [safe, aliasParent]) {
+    const draft = await editor.open("temporary");
+    draft.set("mounts", [{ type: "dir", hostPath, guestPath: "/mnt/exposed", readonly: false, options: [] }]);
+    await assert.rejects(draft.apply(), /writable host mounts must not expose host configuration/);
+    assert.deepEqual(editor.temporary(), {});
+  }
+});
+
+test("canonical agent anchor does not allow descendant/file symlinks or dangling root links", async (t) => {
+  const { input, root } = await fixture(t);
+  const target = join(root, "anchor"); await mkdir(target);
+  const alias = join(root, "agent-alias"); await symlink(target, alias);
+  const selected = { ...input, agentDir: alias };
+  const editor = new SettingsEditor(selected, "descendants");
+  const outside = join(root, "policy-data"); await mkdir(outside);
+  await symlink(outside, join(target, "pi-microsandbox"));
+  await assert.rejects(editor.open("global"), /non-symlink/);
+  await rm(join(target, "pi-microsandbox")); await mkdir(join(target, "pi-microsandbox"));
+  await writeFile(join(outside, "default.toml"), "cpus = 3\n");
+  await symlink(join(outside, "default.toml"), join(target, "pi-microsandbox/default.toml"));
+  await assert.rejects(editor.open("global"), /non-symlink/);
+  await rm(alias); await symlink(join(root, "missing-agent"), alias);
+  await assert.rejects(editor.open("project"), /could not be canonicalized/);
+});
+
+async function upwardReferenceFixture(t: TestContext, scope: "global" | "project" | "temporary") {
+  const { input, root } = await fixture(t);
+  const lexicalAgent = join(root, "home/.pi/agent");
+  const canonicalAgent = join(root, "srv/pi/agent");
+  await mkdir(dirname(lexicalAgent), { recursive: true }); await mkdir(canonicalAgent, { recursive: true });
+  await symlink(canonicalAgent, lexicalAgent);
+  const selected = { ...input, agentDir: lexicalAgent };
+  const paths = await hostConfigPaths(selected);
+  const lexicalPaths = {
+    global: join(lexicalAgent, "pi-microsandbox/default.toml"),
+    project: join(lexicalAgent, "pi-microsandbox/projects/work/config.toml"),
+  };
+  const token = join(root, "home/.pi/token"); const replacement = join(root, "home/.pi/replacement");
+  for (const [path, marker] of [[token, "ORIGINAL_TOKEN_MARKER"], [replacement, "ORIGINAL_REPLACEMENT_MARKER"], [join(root, "srv/pi/token"), "WRONG_TOKEN_MARKER"], [join(root, "srv/pi/replacement"), "WRONG_REPLACEMENT_MARKER"]]) await writeFile(path, marker);
+  const origin = scope === "temporary" ? input.cwd : dirname(lexicalPaths[scope]);
+  const reference = `$FILE:${relative(origin, token)}`;
+  const replacementReference = `$FILE:${relative(origin, replacement)}`;
+  const editor = new SettingsEditor(selected, "upward-reference");
+  if (scope === "temporary") {
+    const draft = await editor.open(scope); draft.upsertSecret({ env: "TOKEN", value: reference, allowHosts: ["original.example"] }); await draft.apply();
+  } else {
+    await mkdir(dirname(paths[scope]), { recursive: true });
+    await writeFile(paths[scope], `secrets = [{ env = "TOKEN", value = ${JSON.stringify(reference)}, allow_hosts = ["original.example"] }]\n`);
+  }
+  const resolved = () => resolveConfig({ ...selected, temporaryOverrides: editor.temporary() });
+  const rawSecrets = async (scope: "global" | "project" | "temporary") => scope === "temporary" ? editor.temporary().secrets! : parseTomlConfig(await readFile(paths[scope], "utf8"), "global").value.secrets!;
+  return { input: selected, root, editor, paths, lexicalPaths, token, replacement, reference, replacementReference, resolved, rawSecrets };
+}
+
+test("symlinked agent startup and sparse saves preserve lexical upward FILE origins and raw spelling", async (t) => {
+  const { resolveSecretValue } = await import("./config.ts");
+  for (const scope of ["global", "project"] as const) {
+    const f = await upwardReferenceFixture(t, scope);
+    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
+    assert.equal(await resolveSecretValue((await f.resolved()).config.secrets[0]!.value, {}), "ORIGINAL_TOKEN_MARKER");
+    const draft = await f.editor.open(scope); draft.set("show_footer", false); await draft.apply();
+    assert.equal((await f.rawSecrets(scope))[0]!.value, f.reference);
+    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
+    assert.equal(draft.path, f.paths[scope]); // I/O remains canonical, not the reference origin.
+    await rm(join(f.root, "srv/pi/token"));
+    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
+  }
+});
+
+test("symlinked agent secret metadata/replacement edits and refresh retain lexical raw reference origins", async (t) => {
+  for (const scope of ["global", "project", "temporary"] as const) {
+    const f = await upwardReferenceFixture(t, scope);
+    const draft = await f.editor.open(scope);
+    draft.upsertSecret({ env: "TOKEN", allowHosts: ["metadata.example"] });
+    const refreshed = await draft.refresh(); await refreshed.apply();
+    assert.equal((await f.rawSecrets(scope))[0]!.value, f.reference);
+    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
+    const replacement = await f.editor.open(scope);
+    replacement.upsertSecret({ env: "TOKEN", value: f.replacementReference, allowHosts: ["replacement.example"] });
+    replacement.upsertSecret({ env: "TOKEN", allowHosts: ["retained.example"] });
+    await replacement.apply();
+    assert.equal((await f.rawSecrets(scope))[0]!.value, f.replacementReference);
+    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.replacement}`);
+  }
+});
+
+test("symlinked agent cross-scope entry and whole-list transfers anchor FILE origins without copying bytes", async (t) => {
+  for (const source of ["global", "project", "temporary"] as const) for (const destination of ["global", "project", "temporary"] as const) {
+    if (source === destination) continue;
+    for (const mode of ["metadata", "replacement", "whole-list"] as const) {
+      const f = await upwardReferenceFixture(t, source);
+      const draft = await f.editor.open(source);
+      if (mode === "whole-list") draft.set("secrets", [{ env: "TOKEN", value: f.reference, allowHosts: ["whole.example"] }]);
+      else draft.upsertSecret({ env: "TOKEN", ...(mode === "replacement" ? { value: f.replacementReference } : {}), allowHosts: ["transferred.example"] });
+      const transferred = await draft.forScope(destination);
+      if (mode !== "whole-list" && source !== "temporary") assert.equal((await transferred.preview()).collections[0]!.sourcePath, f.lexicalPaths[source]);
+      await transferred.apply();
+      const expected = mode === "replacement" ? f.replacement : f.token;
+      assert.equal((await f.rawSecrets(destination))[0]!.value, `$FILE:${expected}`, `${source} -> ${destination}: ${mode}`);
+      if (source !== "temporary") assert.equal((await f.rawSecrets(source))[0]!.value, f.reference);
+      assert.doesNotMatch(JSON.stringify(await f.rawSecrets(destination)), /ORIGINAL_.*MARKER|WRONG_.*MARKER/);
+      // A promoted global entry may be shadowed here; inspect that target without the higher project layer.
+      const elsewhere = join(f.root, "home/elsewhere"); await mkdir(elsewhere);
+      const targetResolved = destination === "global" ? await resolveConfig({ ...f.input, cwd: elsewhere, repoRoot: elsewhere }) : destination === "project" ? await resolveConfig(f.input) : await f.resolved();
+      assert.equal(targetResolved.config.secrets[0]!.value, `$FILE:${expected}`, `${source} -> ${destination}: ${mode}`);
+    }
+  }
+});
+
+test("symlinked agent inherited secret materialization keeps lexical FILE identity and absolute-only mount sources", async (t) => {
+  const f = await upwardReferenceFixture(t, "global");
+  const draft = await f.editor.open("temporary"); draft.upsertSecret({ env: "NEW", value: "$ENV:NEW_TOKEN", allowHosts: ["new.example"] });
+  const global = await draft.forScope("global"); await global.apply();
+  assert.equal((await f.rawSecrets("global"))[0]!.value, f.reference);
+  assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
+  const inherited = await f.editor.open("project"); inherited.upsertSecret({ env: "TOKEN", allowHosts: ["project.example"] }); await inherited.apply();
+  assert.equal((await f.rawSecrets("project"))[0]!.value, `$FILE:${f.token}`);
+  const mount = await f.editor.open("global");
+  mount.set("mounts", [{ type: "file", hostPath: "../../token", guestPath: "/mnt/token", readonly: true, options: [] }]);
+  await assert.rejects(mount.apply(), /hostPath must be absolute/);
+  const validMount = await f.editor.open("global");
+  validMount.upsertMount({ type: "file", hostPath: f.token, guestPath: "/mnt/token", readonly: true, options: [] }); await validMount.apply();
+  assert.equal((await f.resolved()).config.mounts[0]!.hostPath, f.token);
+  await writeFile(f.paths.global, 'mounts = [{ type = "file", host_path = "../../token", guest_path = "/mnt/token", readonly = true }]\n');
+  await assert.rejects(resolveConfig(f.input), /hostPath must be absolute/);
+});
+
+async function nestedAgentAliasFixture(t: TestContext, chain: false | "absolute" | "relative" = false, missingSuffix = false) {
+  const { root } = await fixture(t);
+  const base = join(root, "case"); const home = join(base, "home"); const physicalHome = join(base, "real-home");
+  const storeAgent = join(base, "store/agent"); const hops = join(base, "hops"); const cwd = join(base, "workspace");
+  await mkdir(join(physicalHome, ".pi"), { recursive: true }); await mkdir(storeAgent, { recursive: true }); await mkdir(hops); await mkdir(cwd);
+  if (chain) {
+    await symlink(chain === "relative" ? "hops/home" : join(hops, "home"), home);
+    await symlink(chain === "relative" ? "../real-home" : physicalHome, join(hops, "home"));
+    await symlink(chain === "relative" ? "../../hops/agent" : join(hops, "agent"), join(physicalHome, ".pi/agent"));
+    await symlink(chain === "relative" ? "../store/agent" : storeAgent, join(hops, "agent"));
+  } else {
+    await symlink(physicalHome, home); await symlink(storeAgent, join(physicalHome, ".pi/agent"));
+  }
+  const input: ResolveConfigInput = { cwd, homedir: home, agentDir: join(home, ".pi/agent", ...(missingSuffix ? ["future-anchor"] : [])), env: {}, projectTrusted: true, configDirName: ".pi" };
+  const paths = await hostConfigPaths(input);
+  if (!missingSuffix) { await mkdir(dirname(paths.global)); await writeFile(paths.global, "cpus = 3\n"); }
+  await symlink(join(physicalHome, ".pi"), join(base, "pi-parent-alias"));
+  const unsafe = [join(physicalHome, ".pi"), join(home, ".pi"), join(base, "pi-parent-alias"), ...(chain ? [hops] : [])];
+  const siblings = [join(physicalHome, ".pi/cache"), join(hops, "unrelated"), join(storeAgent, "data")];
+  for (const sibling of siblings) await mkdir(sibling);
+  const mount = (hostPath: string, readonly = false) => ({ type: "dir" as const, hostPath, guestPath: "/mnt/agent-parent", readonly, options: [] });
+  return { input, paths, unsafe, siblings, mount, hops };
+}
+
+test("nested agent aliases reject writable physical parents during resolution, including missing policy targets", async (t) => {
+  for (const missingSuffix of [false, true]) {
+    const f = await nestedAgentAliasFixture(t, false, missingSuffix);
+    for (const hostPath of f.unsafe) await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount(hostPath)] } }), /writable host mounts must not expose host configuration/);
+  }
+});
+
+test("nested agent aliases reject editor preview/save in every scope without writes", async (t) => {
+  const f = await nestedAgentAliasFixture(t);
+  const editor = new SettingsEditor(f.input, "nested-alias");
+  for (const scope of ["temporary", "project", "global"] as const) for (const hostPath of f.unsafe) {
+    const draft = await editor.open(scope); draft.set("mounts", [f.mount(hostPath)]);
+    await assert.rejects(draft.preview(), /writable host mounts must not expose host configuration/);
+    await assert.rejects(draft.apply(), /writable host mounts must not expose host configuration/);
+    assert.deepEqual(editor.temporary(), {});
+    assert.equal(await readFile(f.paths.global, "utf8"), "cpus = 3\n");
+    await assert.rejects(stat(f.paths.project), { code: "ENOENT" });
+  }
+});
+
+test("nested agent alias chains protect absolute/relative link hops while readonly parents and unrelated siblings stay mountable", async (t) => {
+  for (const chain of ["absolute", "relative"] as const) for (const missingSuffix of [false, true]) {
+    const f = await nestedAgentAliasFixture(t, chain, missingSuffix);
+    const editor = new SettingsEditor(f.input, "alias-chain");
+    for (const hostPath of f.unsafe) {
+      await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount(hostPath)] } }), /writable host mounts must not expose host configuration/);
+      const draft = await editor.open("temporary"); draft.set("mounts", [f.mount(hostPath)]);
+      await assert.rejects(draft.preview(), /writable host mounts must not expose host configuration/);
+      await assert.rejects(draft.apply(), /writable host mounts must not expose host configuration/);
+      const readonly = await resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount(hostPath, true)] } });
+      assert.equal(readonly.config.mounts[0]!.readonly, true);
+    }
+    for (const hostPath of f.siblings) {
+      assert.equal((await resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount(hostPath)] } })).config.mounts[0]!.readonly, false);
+      const draft = await editor.open("temporary"); draft.set("mounts", [f.mount(hostPath)]); await draft.preview(); await draft.apply();
+      assert.equal(editor.temporary().mounts![0]!.hostPath, hostPath);
+    }
+  }
+});
+
+test("nested agent alias inspection fails closed on unexpected I/O, cycles and excessive dependencies", async (t) => {
+  const f = await nestedAgentAliasFixture(t, "relative");
+  const { promises: filesystem } = await import("node:fs");
+  const readlink = filesystem.readlink.bind(filesystem);
+  const inspection = t.mock.method(filesystem, "readlink", async (path: Parameters<typeof filesystem.readlink>[0]) => {
+    if (String(path) === join(f.hops, "agent")) throw Object.assign(new Error("PRIVATE_IO_SENTINEL"), { code: "EACCES" });
+    return readlink(path);
+  });
+  await assert.rejects(resolveConfig(f.input), /host configuration ancestors could not be inspected/);
+  inspection.mock.restore();
+  await rm(join(f.hops, "agent")); await symlink("agent", join(f.hops, "agent"));
+  await assert.rejects(resolveConfig(f.input), /could not be canonicalized/);
+  await assert.rejects(resolveConfig({ ...f.input, readFile: async () => null, realpath: async (path) => path }), /ancestor traversal cycle detected/);
+  // Synthetic canonicalization keeps this bound test independent of OS path/symlink limits.
+  await assert.rejects(resolveConfig({ ...f.input, agentDir: join(f.hops, ...Array<string>(260).fill("x")), realpath: async (path) => path }), /ancestor traversal limit exceeded/);
+});
+
+async function componentAgentAliasFixture(t: TestContext, absolute = true, missingSuffix = false) {
+  const { root } = await fixture(t);
+  const base = join(root, "component-case"); const home = join(base, "home");
+  const physicalHome = join(base, "physical/real-home"); const storeAgent = join(base, "store/agent");
+  const hops = join(base, "hops"); const routes = join(base, "routes"); const cwd = join(base, "workspace");
+  for (const directory of [join(physicalHome, ".pi"), join(base, "physical/deep"), storeAgent, hops, routes, cwd]) await mkdir(directory, { recursive: true });
+  // Keep raw target components: path.join/resolve would erase the critical jump/.. pair.
+  await symlink(absolute ? `${base}/routes/jump/../real-home` : "./routes/./jump/../real-home", home);
+  await symlink(absolute ? `${hops}/jump` : "../hops/./jump", join(routes, "jump"));
+  await symlink(absolute ? `${base}/physical/deep` : "../physical/./deep", join(hops, "jump"));
+  await symlink(absolute ? storeAgent : "../../../store/agent", join(physicalHome, ".pi/agent"));
+  assert.equal(await realpath(home), physicalHome);
+  const input: ResolveConfigInput = { cwd, homedir: home, agentDir: join(home, ".pi/agent", ...(missingSuffix ? ["future-anchor"] : [])), env: {}, projectTrusted: true, configDirName: ".pi" };
+  const paths = await hostConfigPaths(input);
+  if (!missingSuffix) { await mkdir(dirname(paths.global)); await writeFile(paths.global, "cpus = 3\n"); }
+  const sibling = join(hops, "unrelated"); await mkdir(sibling);
+  const mount = (hostPath = hops, readonly = false) => ({ type: "dir" as const, hostPath, guestPath: "/mnt/agent-parent", readonly, options: [] });
+  return { input, paths, hops, routes, sibling, mount };
+}
+
+test("agent alias jump/.. traversal protects intermediate links before processing parent components", async (t) => {
+  const f = await componentAgentAliasFixture(t);
+  await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount()] } }), /writable host mounts must not expose host configuration/);
+  const editor = new SettingsEditor(f.input, "component-alias");
+  for (const scope of ["temporary", "project", "global"] as const) {
+    const draft = await editor.open(scope); draft.set("mounts", [f.mount()]);
+    await assert.rejects(draft.preview(), /writable host mounts must not expose host configuration/);
+    await assert.rejects(draft.apply(), /writable host mounts must not expose host configuration/);
+    assert.deepEqual(editor.temporary(), {});
+    assert.equal(await readFile(f.paths.global, "utf8"), "cpus = 3\n");
+    await assert.rejects(stat(f.paths.project), { code: "ENOENT" });
+  }
+});
+
+test("agent alias raw components support dots, leading parents, absolute/relative targets and missing suffixes", async (t) => {
+  for (const absolute of [true, false]) for (const missingSuffix of [false, true]) {
+    const f = await componentAgentAliasFixture(t, absolute, missingSuffix);
+    for (const hostPath of [f.hops, f.routes]) {
+      await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount(hostPath)] } }), /writable host mounts must not expose host configuration/);
+      assert.equal((await resolveConfig({ ...f.input, temporaryOverrides: { mounts: [f.mount(hostPath, true)] } })).config.mounts[0]!.readonly, true);
+    }
+    const editor = new SettingsEditor(f.input, "raw-component-alias");
+    const draft = await editor.open("temporary"); draft.set("mounts", [f.mount(f.sibling)]); await draft.preview(); await draft.apply();
+    assert.equal(editor.temporary().mounts![0]!.hostPath, f.sibling);
+  }
 });

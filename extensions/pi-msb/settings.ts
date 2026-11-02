@@ -2,7 +2,7 @@ import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, normalize, parse, resolve } from "node:path";
 import {
-  applyOverride, assertPolicyOutsideWorkspace, ConfigError, DEFAULT_CONFIG, hostConfigPaths,
+  applyOverride, assertPolicyOutsideWorkspace, canonicalPolicyLocation, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets,
   normalizeConfigPath, parseTomlConfig, readRawConfig, removeOverride,
   resolveConfig, toEffectiveToml, validateConfig, type ResolveConfigInput,
 } from "./config.ts";
@@ -136,7 +136,32 @@ function reconcileRemovals(layer: Record<string, unknown>, collection: string, e
   patchRaw(layer, normalizeConfigPath(path), after, false);
   return { path, operation: "set", before: masked(before), after: masked(after) };
 }
-interface Source { text: string | null; version: string; raw: Record<string, unknown> }
+interface Source { text: string | null; version: string; raw: Record<string, unknown>; anchor?: SettingsAnchor }
+interface SettingsAnchor { path: string; canonical: string; ancestors: Array<{ path: string; identity?: string }> }
+const anchorIdentity = (stat: Awaited<ReturnType<typeof fs.lstat>>): string => `${stat.dev}:${stat.ino}:${stat.mode}${stat.isSymbolicLink() ? `:${stat.ctimeMs}:${stat.mtimeMs}` : ""}`;
+async function captureAnchor(path: string, canonical: string): Promise<SettingsAnchor> {
+  const entries: SettingsAnchor["ancestors"] = [];
+  for (const part of new Set([...await ancestors(path), ...await ancestors(canonical)])) {
+    try { entries.push({ path: part, identity: anchorIdentity(await fs.lstat(part)) }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; entries.push({ path: part }); }
+  }
+  const anchor = { path, canonical, ancestors: entries };
+  await assertAnchor(anchor);
+  return anchor;
+}
+/** Pin existing lexical ancestors (including the selected root link), but allow missing directories to be created. */
+async function assertAnchor(anchor: SettingsAnchor | undefined): Promise<void> {
+  if (!anchor) return;
+  for (const entry of anchor.ancestors) {
+    let stat;
+    try { stat = await fs.lstat(entry.path); }
+    catch (error) { if (!entry.identity && (error as NodeJS.ErrnoException).code === "ENOENT") continue; throw new ConfigError(["settings agent directory changed; reopen the panel"]); }
+    if (entry.identity ? anchorIdentity(stat) !== entry.identity : !stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new ConfigError(["settings agent directory changed; reopen the panel"]);
+    }
+  }
+  if (await canonicalPolicyLocation(anchor.path) !== anchor.canonical) throw new ConfigError(["settings agent directory changed; reopen the panel"]);
+}
 async function ancestors(path: string): Promise<string[]> {
   const result: string[] = [];
   for (let current = resolve(path); ; current = dirname(current)) {
@@ -210,14 +235,16 @@ export class SettingsDraft {
   #contextRevision: number;
   #base: ResolvedConfig;
   #scopeBase?: ResolvedConfig;
-  #paths: { global: string; project: string };
+  #referencePaths: { global: string; project: string };
   #closed = false;
   #patch = new Map<string, DraftPatch>();
   readonly scope: SettingsScope;
   readonly path: string | null;
-  constructor(editor: SettingsEditor, scope: SettingsScope, path: string | null, source: Source, revision: number, base: ResolvedConfig, paths: { global: string; project: string }) {
-    this.#editor = editor; this.scope = scope; this.path = path; this.#source = source; this.#revision = revision; this.#contextRevision = editor.contextRevision; this.#base = base; this.#paths = paths;
+  constructor(editor: SettingsEditor, scope: SettingsScope, path: string | null, source: Source, revision: number, base: ResolvedConfig, referencePaths: { global: string; project: string }) {
+    this.#editor = editor; this.scope = scope; this.path = path; this.#source = source; this.#revision = revision; this.#contextRevision = editor.contextRevision; this.#base = base; this.#referencePaths = referencePaths;
   }
+  /** I/O uses path; raw relative FILE references use the original lexical policy location. */
+  get #referencePath(): string | null { return this.scope === "temporary" ? null : this.#referencePaths[this.scope]; }
   snapshot(): SettingsSnapshot {
     const raw = structuredClone(this.#source.raw);
     for (const [path, patch] of this.#patch) patchRaw(raw, normalizeConfigPath(path), patch.entries ? replayEntries(path, this.#ownCollection(path) ?? [], patch.entries) : patch.value, patch.inherit);
@@ -245,11 +272,13 @@ export class SettingsDraft {
   async refresh(): Promise<SettingsDraft> {
     if (this.#closed) throw new ConfigError(["settings draft is closed"]);
     this.#editor.assertContextRevision(this.#contextRevision);
+    await assertAnchor(this.#source.anchor);
     return this.#transfer(await this.#editor.open(this.scope));
   }
   /** Rebase only deliberate dirty edits onto another scope; original draft remains unchanged. */
   async forScope(scope: SettingsScope): Promise<SettingsDraft> {
     this.#assertOpen();
+    await assertAnchor(this.#source.anchor);
     return this.#transfer(await this.#editor.open(scope));
   }
   async #transfer(target: SettingsDraft): Promise<SettingsDraft> {
@@ -266,7 +295,7 @@ export class SettingsDraft {
         else {
           const value = structuredClone(patch.value);
           if (path === "secrets" && this.path !== target.path && Array.isArray(value)) {
-            for (const secret of value) if (typeof secret?.value === "string") secret.value = await this.#editor.rebaseSecretReference(secret.value, this.path);
+            for (const secret of value) if (typeof secret?.value === "string") secret.value = await this.#editor.rebaseSecretReference(secret.value, this.#referencePath);
           }
           target.set(path, value);
         }
@@ -285,7 +314,7 @@ export class SettingsDraft {
     this.#editEntry("secrets", {
       operation: "upsert", identity: secret.env, previousIdentity: previousEnv,
       value: { ...secret, value },
-      valueOrigin: secret.value !== undefined ? this.path : (previous ? previous.valueOrigin ?? null : this.#origin("secrets", previousEnv).path),
+      valueOrigin: secret.value !== undefined ? this.#referencePath : (previous ? previous.valueOrigin ?? null : this.#origin("secrets", previousEnv).path),
       origin: previous?.origin ?? this.#origin("secrets", previousEnv),
     });
   }
@@ -322,10 +351,10 @@ export class SettingsDraft {
     } else this.#patch.set(path, { inherit: false, entries: [...(patch?.entries ?? []), structuredClone(edit)] });
   }
   #origin(path: string, identity: string): EntryOrigin {
-    if (!this.#visibleCollection(path).some((entry) => entryIdentity(path, entry) === identity)) return { source: "new entry", path: this.path, rank: 0 };
+    if (!this.#visibleCollection(path).some((entry) => entryIdentity(path, entry) === identity)) return { source: "new entry", path: this.#referencePath, rank: 0 };
     const key = path === "secrets" || path === "mounts" ? `${path}[${identity}]` : normalizeConfigPath(path).join(".");
     const source = this.#base.provenance[key] ?? "defaults";
-    return { source, path: source === "host-project" ? this.#paths.project : source === "host-default" ? this.#paths.global : null, rank: LAYER_RANK[source] ?? 0 };
+    return { source, path: source === "host-project" ? this.#referencePaths.project : source === "host-default" ? this.#referencePaths.global : null, rank: LAYER_RANK[source] ?? 0 };
   }
   #ownCollection(path: string): unknown[] | undefined {
     const ownRaw = rawValue(this.#source.raw, normalizeConfigPath(path));
@@ -383,6 +412,7 @@ export class SettingsDraft {
   }
   async #candidate(runtimeBaseline?: Config) {
     this.#assertOpen();
+    await assertAnchor(this.#source.anchor);
     if ([...this.#patch.values()].some((patch) => patch.entries)) {
       this.#scopeBase = this.scope === "temporary" ? this.#base : await this.#editor.resolveCandidate(null, null, {}, this.scope);
       this.#assertOpen();
@@ -422,7 +452,7 @@ export class SettingsDraft {
       if (patch.entries) for (const entry of patch.entries) {
         const present = (get(next.config, normalizeConfigPath(path)) as unknown[]).some((item) => entryIdentity(path, item) === entry.identity);
         collections.push({ path, operation: entry.operation, identities: [entry.identity], previousIdentity: entry.previousIdentity, source: entry.origin.source, sourcePath: entry.origin.path, promoted: entry.operation === "upsert" && entry.origin.rank > targetRank, shadowed: higher(entry.identity) && (entry.operation === "upsert" || present) });
-      } else collections.push({ path, operation: patch.inherit ? "inherit" : (patch.value as unknown[]).length ? "replace" : "clear", identities: patch.inherit ? [] : (patch.value as unknown[]).map((entry) => entryIdentity(path, entry)), source: "explicit whole-list intent", sourcePath: this.path, promoted: false, shadowed: (LAYER_RANK[next.provenance[normalizeConfigPath(path).join(".")] ?? ""] ?? 0) > targetRank });
+      } else collections.push({ path, operation: patch.inherit ? "inherit" : (patch.value as unknown[]).length ? "replace" : "clear", identities: patch.inherit ? [] : (patch.value as unknown[]).map((entry) => entryIdentity(path, entry)), source: "explicit whole-list intent", sourcePath: this.#referencePath, promoted: false, shadowed: (LAYER_RANK[next.provenance[normalizeConfigPath(path).join(".")] ?? ""] ?? 0) > targetRank });
     }
     const shadowed = changes.filter((change) => {
       const path = normalizeConfigPath(change.path).join(".");
@@ -474,12 +504,15 @@ export class SettingsEditor {
   async open(scope: SettingsScope): Promise<SettingsDraft> {
     const revision = this.#revision;
     if (!["temporary", "project", "global"].includes(scope)) throw new ConfigError(["invalid settings scope"]);
-    const paths = await hostConfigPaths(this.#input);
+    const targets = await hostConfigTargets(this.#input);
+    const paths = targets.paths;
+    const anchor = await captureAnchor(targets.agentDir, targets.canonicalAgentDir);
     const path = scope === "temporary" ? null : paths[scope];
     const source = path ? await readSource(path) : { text: null, raw: structuredClone(this.#temporary) as Record<string, unknown>, version: "memory" };
     const base = await this.resolveCandidate(null, null, this.#temporary);
+    await assertAnchor(anchor);
     this.assertRevision(revision);
-    return new SettingsDraft(this, scope, path, source, revision, base, paths);
+    return new SettingsDraft(this, scope, path, { ...source, anchor }, revision, base, targets.lexicalPaths);
   }
   /** A ceiling is only for collection baselines. Preview/commit always validate the full layered candidate. */
   async resolveCandidate(path: string | null, text: string | null, temporary: DeepPartial<Config>, ceiling: SettingsScope = "temporary"): Promise<ResolvedConfig> {
@@ -498,8 +531,10 @@ export class SettingsEditor {
       let validated: ResolvedConfig;
       const guard = async () => {
         this.assertRevision(revision);
+        await assertAnchor(source.anchor);
         if (path) await assertPolicyOutsideWorkspace(path, [resolve(this.#input.repoRoot ?? this.#input.cwd), await fs.realpath(this.#input.repoRoot ?? this.#input.cwd)]);
         validated = await this.resolveCandidate(path, path ? serializeRaw(raw) : null, temporary);
+        await assertAnchor(source.anchor);
         this.assertRevision(revision);
       };
       await guard();

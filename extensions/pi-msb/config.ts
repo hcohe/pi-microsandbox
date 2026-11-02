@@ -706,6 +706,53 @@ export async function canonicalPolicyLocation(path: string, realpath = defaultRe
   }
 }
 
+/** Follow raw link-target components in filesystem order; jump/.. must inspect jump first. */
+async function hostPolicyAncestorLocations(paths: readonly string[], realpath: (path: string) => Promise<string>): Promise<string[]> {
+  const locations = new Set<string>();
+  let steps = 0;
+  for (const path of paths) {
+    const absolute = resolve(path);
+    let base = parse(absolute).root;
+    let pending = absolute.slice(base.length).split(sep);
+    const visited = new Set<string>();
+    locations.add(base);
+    while (pending.length) {
+      if (++steps > 256) throw new ConfigError(["host configuration ancestor traversal limit exceeded"]);
+      const state = JSON.stringify([base, pending]);
+      if (visited.has(state)) throw new ConfigError(["host configuration ancestor traversal cycle detected"]);
+      visited.add(state);
+      const component = pending.shift()!;
+      if (!component || component === "." || component === "..") {
+        try {
+          if (!(await fs.stat(base)).isDirectory()) throw new Error();
+        } catch { throw new ConfigError(["host configuration ancestors could not be inspected"]); }
+        if (component === "..") base = dirname(base);
+        continue;
+      }
+      const physicalEntry = join(base, component);
+      locations.add(physicalEntry);
+      let target: string | undefined;
+      try { target = await fs.readlink(physicalEntry); }
+      catch (error) {
+        // Missing suffixes and ordinary files/directories remain valid dependencies.
+        if (!["ENOENT", "EINVAL"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+          throw new ConfigError(["host configuration ancestors could not be inspected"]);
+        }
+      }
+      if (target !== undefined) {
+        const root = parse(target).root;
+        if (root) base = root;
+        // Do not join/resolve the target: preserve components following symlinks.
+        pending = [...target.slice(root.length).split(sep), ...pending];
+      } else {
+        base = await canonicalPolicyLocation(physicalEntry, realpath);
+        locations.add(base);
+      }
+    }
+  }
+  return [...locations];
+}
+
 /** A workspace must not be able to retarget any ancestor of a host policy path. */
 export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots: readonly string[], realpath = defaultRealpath): Promise<void> {
   let current = resolve(path);
@@ -722,9 +769,11 @@ export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots:
 
 /** Session setup only: never call this from the extension factory or bare import. */
 export async function ensureDefaultHostConfig(workspaceRoot: string, agentDir = getAgentDir()): Promise<void> {
-  const directory = join(resolve(agentDir), "pi-microsandbox");
+  const lexicalFile = join(resolve(agentDir), "pi-microsandbox/default.toml");
+  const directory = join(await canonicalPolicyLocation(resolve(agentDir)), "pi-microsandbox");
   const file = join(directory, "default.toml");
   const root = await defaultRealpath(workspaceRoot);
+  await assertPolicyOutsideWorkspace(lexicalFile, [root, resolve(workspaceRoot)]);
   await assertPolicyOutsideWorkspace(file, [root, resolve(workspaceRoot)]);
   const policyRoot = await canonicalPolicyLocation(directory);
   if (isInside(root, policyRoot)) {
@@ -745,19 +794,29 @@ export async function ensureDefaultHostConfig(workspaceRoot: string, agentDir = 
   }
 }
 
-/** Canonical host-owned targets; shared by resolution and the settings editor. */
-export async function hostConfigPaths(input: ResolveConfigInput): Promise<{ global: string; project: string }> {
+/** Canonical I/O targets and lexical reference origins must stay distinct across an agent-root symlink. */
+export async function hostConfigTargets(input: ResolveConfigInput) {
   const realpath = input.realpath ?? defaultRealpath;
   const env = input.env ?? process.env;
   const root = await realpath(input.repoRoot ?? input.cwd);
   const home = await realpath(input.homedir ?? env.HOME ?? osHomedir());
-  const directory = join(resolve(input.agentDir ?? getAgentDir()), "pi-microsandbox");
-  return {
-    global: join(directory, "default.toml"),
-    project: isInside(root, home)
-      ? join(directory, "projects", relative(home, root), "config.toml")
-      : join(directory, "projects-absolute", relative(parse(root).root, root), "config.toml"),
+  const agentDir = resolve(input.agentDir ?? getAgentDir());
+  const canonicalAgentDir = await canonicalPolicyLocation(agentDir, realpath);
+  const targets = (anchor: string) => {
+    const directory = join(anchor, "pi-microsandbox");
+    return {
+      global: join(directory, "default.toml"),
+      project: isInside(root, home)
+        ? join(directory, "projects", relative(home, root), "config.toml")
+        : join(directory, "projects-absolute", relative(parse(root).root, root), "config.toml"),
+    };
   };
+  return { agentDir, canonicalAgentDir, paths: targets(canonicalAgentDir), lexicalPaths: targets(agentDir) };
+}
+
+/** Shared host-owned targets for resolution and editing, including missing descendants. */
+export async function hostConfigPaths(input: ResolveConfigInput): Promise<{ global: string; project: string }> {
+  return (await hostConfigTargets(input)).paths;
 }
 
 /** Raw, non-normalized source data. Never expose this to a rendering/logging surface. */
@@ -792,8 +851,8 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     }
     layers.push(layerFromText("global", text, file));
   }
-  const { global: hostDefaultFile, project: hostProjectFile } = await hostConfigPaths(input);
-  const agentDir = resolve(input.agentDir ?? getAgentDir());
+  const targets = await hostConfigTargets(input);
+  const { global: hostDefaultFile, project: hostProjectFile } = targets.paths;
   const hostLayers: ParsedConfigLayer[] = [];
   const hostPolicyPaths: string[] = [];
   for (const [name, file] of [
@@ -802,7 +861,10 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   ] as const) {
     // Protect even missing policy locations, including symlinked parents, so a
     // writable mount cannot create a higher-priority override on the next reload.
+    const lexicalFile = targets.lexicalPaths[name === "host-default" ? "global" : "project"];
+    await assertPolicyOutsideWorkspace(lexicalFile, workspaceRoots, realpath);
     await assertPolicyOutsideWorkspace(file, workspaceRoots, realpath);
+    hostPolicyPaths.push(lexicalFile, dirname(lexicalFile));
     const protectedPaths = await Promise.all([canonicalPolicyLocation(file, realpath), canonicalPolicyLocation(dirname(file), realpath)]);
     hostPolicyPaths.push(...protectedPaths);
     const text = await (input.readFile ?? readHostPolicyFile)(file);
@@ -810,24 +872,26 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     if (protectedPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
-    const policy = layerFromText(name, text, file);
-    // Relative host-side secret files are relative to their own policy file.
+    const policy = layerFromText(name, text, lexicalFile);
+    // Normalize relative references against the original lexical policy path,
+    // before realpath: an upward reference must not jump to the agent link target.
     if (Array.isArray(policy.value.secrets)) {
       for (const secret of policy.value.secrets) if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) {
-        secret.value = `$FILE:${await canonicalPath(resolve(dirname(file), secret.value.slice(6)), true)}`;
+        secret.value = `$FILE:${await canonicalPath(resolve(dirname(lexicalFile), secret.value.slice(6)), true)}`;
       }
     }
     hostLayers.push(policy);
   }
+  hostPolicyPaths.push(...await hostPolicyAncestorLocations(Object.values(targets.lexicalPaths), realpath));
   // Reserve the whole policy directory while any host policy is active. A
   // writable child mount must not be able to create a higher-priority project
   // override that does not exist yet.
-  const hostPolicyRoot = hostLayers.length ? await canonicalPolicyLocation(join(agentDir, "pi-microsandbox"), realpath) : undefined;
+  const hostPolicyRoot = hostLayers.length ? await canonicalPolicyLocation(join(targets.canonicalAgentDir, "pi-microsandbox"), realpath) : undefined;
   if (hostPolicyRoot) {
     if (isInside(projectRoot, hostPolicyRoot) || hostPolicyPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
-    hostPolicyPaths.push(hostPolicyRoot);
+    hostPolicyPaths.push(hostPolicyRoot, join(targets.agentDir, "pi-microsandbox"));
   }
   layers.push(parseEnvConfig(env));
   if (input.cliOverridesToml !== undefined) layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
@@ -871,7 +935,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   for (const [index, mount] of config.mounts.entries()) {
     if (mount.type === "named" || mount.type === "tmpfs" || typeof mount.hostPath !== "string") continue;
     const host = resolve(mount.hostPath);
-    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || (hostPolicyRoot && isInside(host, hostPolicyRoot)))) {
+    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || (hostPolicyRoot && [hostPolicyRoot, join(targets.agentDir, "pi-microsandbox")].some((root) => isInside(host, root))))) {
       policyIssues.push("writable host mounts must not expose host configuration");
     }
     let unsafe = basename(host) === "docker.sock" || knownHostDockerSockets.some((socket) => isInside(socket, host));

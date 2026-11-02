@@ -87,7 +87,14 @@ mkdir -p -m 700 "$agent_dir/pi-microsandbox/projects/Code/app"
 ```
 
 Open `/msb` → Actions → Reload settings after external edits. Keep the agent directory outside the mounted
-workspace.
+workspace. A symlinked host-selected Pi agent directory is supported: its canonical
+location anchors the save targets. Policy files and directories below that anchor
+must not be symlinks. Both the original and canonical locations remain subject to
+workspace/writable-mount guards. Writable mounts also cannot expose physical
+ancestor entries or intermediate alias hops that could replace the selected agent
+link; read-only parents and unrelated sibling directories remain allowed.
+Retargeting or replacing the agent directory while
+a draft is open invalidates that draft; reopen the panel before saving.
 
 Both host-owned files are loaded regardless of Pi's project trust state. They
 are applied after launch settings, with the project-specific file after `default.toml`.
@@ -133,7 +140,12 @@ allow_hosts = ["registry.npmjs.org"]
 Make `MY_PROJECT_NPM_TOKEN` available to the host Pi process before launch.
 Alternatively, `$FILE:token` reads a host file beside the file declaring it
 (`default.toml` or the project override); absolute file references are also
-supported. Neither the policy nor the secret
+supported. Relative references are normalized against the original **lexical**
+policy path before resolving symlinks. A symlinked agent directory therefore does
+not redirect upward references such as `$FILE:../../token` into the link target's
+parent directories. Save targets remain canonical; unchanged raw reference
+spelling is retained, and deliberate cross-scope transfers anchor the reference
+to its original file without copying credential bytes. Neither the policy nor the secret
 file needs to be mounted into the guest. `/msb` → Actions shows effective redacted
 configuration and re-reads policy with Reload settings.
 

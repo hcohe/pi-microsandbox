@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { openControlPanel } from "./control-panel.ts";
+import { openControlPanel, PanelLaunchError } from "./control-panel.ts";
 import type { MsbControl, RuntimeState } from "./types.ts";
 export type CommandContext = Pick<ExtensionCommandContext, "ui" | "hasUI" | "mode" | "waitForIdle">;
 export type CommandHandler = (args: string, ctx: CommandContext) => Promise<void>;
@@ -66,7 +66,12 @@ export function createCommandHandler(control: MsbControl): CommandHandler {
       return;
     }
     try { await openControlPanel(ctx, control); }
-    catch { ctx.ui.notify("Unable to open /msb. Check the working directory/Git discovery, host-owned settings files and interactive UI support; no settings were applied by opening the panel.", "error"); }
+    catch (error) {
+      // Expected policy/I/O failures are actionable; unexpected bugs still reach Pi's error handler, but only through a diagnostic stripped of sensitive causes.
+      if (!(error instanceof PanelLaunchError)) throw new PanelLaunchError("interactive overlay", error);
+      if (error.unexpected) throw error;
+      ctx.ui.notify(error.message, "error");
+    }
   };
 }
 export function registerMsbCommand(pi: ExtensionAPI, control: MsbControl): void {

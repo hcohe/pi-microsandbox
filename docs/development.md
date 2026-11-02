@@ -33,7 +33,10 @@ just dev
 host. `dev-image` builds the current `default` variant as
 `pi-microsandbox-dev:local` and imports it into Microsandbox's separate image
 cache. `dev` runs both prerequisites, then starts Pi with this checkout's
-extension explicitly loaded alongside your normal discovered extensions. It
+extension explicitly loaded alongside your normal discovered extensions. `pi` is
+resolved from `PATH` (not necessarily the devDependency version). `--extension .`
+uses this package's `pi.extensions` manifest, and Pi's loader supplies its own
+framework/TUI imports rather than this checkout's devDependency copies. It
 forces the local image with `pull_policy = "never"`, requires Docker, and uses
 4 CPUs and 8192 MiB. Docker caching keeps repeat builds short
 when image inputs have not changed. Pass Pi arguments directly, for example:
@@ -65,6 +68,19 @@ use an injected SDK to verify live adoption versus guarded resource recreation.
 Regressions also drive the panel through the native integration with the shared
 `test/fake-msb-sdk.ts` fixture: startup-preference safety, draft refresh/recovery,
 short-height feedback, repeated secret editing and removal reconciliation.
+`control-panel-runtime.test.ts` additionally launches a process fixture with the
+actual Pi extension loader, command context, `ui.custom`, theme and both native
+renderers. It covers a symlinked agent root, all save scopes, masked input,
+responsive overlay composition, close/reopen and focus restoration without a VM.
+It always tests the declared local runtime; include another installed runtime with:
+
+```sh
+PI_MSB_TEST_PI_PACKAGE=/path/to/pi-coding-agent \
+  node --experimental-strip-types --import ./test/setup.ts --test extensions/pi-msb/control-panel-runtime.test.ts
+```
+
+The fixture overrides `PI_PACKAGE_DIR` to match the selected runtime: an inherited
+override for a different version can otherwise load incompatible theme assets.
 These are not live-VM or human-terminal tests. Before release, manually verify
 both native modes, themes, IME, bracketed paste, rapid resizing, and session
 switch/shutdown. Do not enable terminal input recording when entering secrets.
