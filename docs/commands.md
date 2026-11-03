@@ -2,19 +2,21 @@
 
 [Back to README](../README.md)
 
-Run **`/msb`** in interactive Pi. It opens a full-screen collapsible tree with
-one **Configuration** root. Opening never writes settings or starts a sandbox.
+Run **`/msb`** in interactive Pi. It opens full-screen with collapsed trees
+directly below **MICROSANDBOX**, initially focused on General. Opening never writes
+settings or starts a sandbox.
 Headless/RPC/print invocations report an actionable error; configure host-owned
 files or `PI_MSB_*` before starting a session instead.
 
-## One Configuration tree
+## Top-level trees
 
-- **Configuration** is the editable desired policy: General, Resources, Network,
-  Secrets, Mounts, Advanced, Status, Sources & warnings, and Actions. Values show their
+- **General**, **Resources**, **Network**, **Secrets**, **Mounts**, **Advanced**,
+  **Status**, **Sources & warnings**, and **Actions** are the visible roots, with
+  no wrapper. The settings trees edit desired policy. Values show their
   committed origin: default, environment, global, project or ephemeral. Mixed
   collections show entry sources rather than claiming a single group owner.
   `* draft`, `draft entry` and `inherit on save` mark intent, not a saved origin.
-- **Configuration → Status** starts collapsed with a plain heading. Its inner
+- **Status** starts collapsed with a plain heading. Its inner
   items are read-only and labeled **[runtime]**: state, adoption/last-known timestamp,
   pending changes, identity (name/displayId/PID/cwd/root/createdAt), and Docker
   readiness/version/storage/reason when known. Configurable policy is not
@@ -37,21 +39,21 @@ These bindings apply in normal tree mode, **not while typing**:
 | Key | Action |
 | --- | --- |
 | `j` / down, `k` / up | Next / previous visible node |
-| `h` / left | Collapse, otherwise parent |
+| `h` / left | Collapse, otherwise parent; no-op on a collapsed top-level group |
 | `l` / right | Expand, otherwise first child |
-| `e` | Edit the selected supported Configuration item |
+| `e` | Edit the selected supported settings item |
 | `a` | Add to the selected collection (or entry's collection) |
 | `d` | Delete an entry; remove a scalar/collection override at the eventual save scope (inherit) |
 | `w` | Save + reload ephemeral current-session edits |
 | `P` | Save + reload host-owned project edits |
 | `G` | Save + reload host-owned global edits |
-| Enter | Expand a group or activate a Configuration action/form control |
+| Enter | Expand a group or activate an action/form control |
 | `q` | Close the TUI from the tree or any non-input screen; confirm unsaved discard |
 | Esc | Back/cancel; close from tree |
 | Tab / Shift-Tab | Next / previous row, also skipping long diagnostic text |
 | PageDown / PageUp | Scroll a long selected row |
 
-`P` and `G` are uppercase. Save keys always target the Configuration draft,
+`P` and `G` are uppercase. Save keys always target the desired settings draft,
 including when Status has focus. Status metadata has no edit/add/delete actions.
 In text and masked inputs, `q/e/a/d/w/P/G/j/k/h/l` are ordinary text, including
 Kitty input and bracketed paste. Enter accepts a field; Esc cancels it. Closing a
@@ -105,12 +107,12 @@ inherit removes persistent naming assignments.
 Saved settings and successful runtime adoption are separate outcomes. Failed
 activation keeps the panel editable and the previous snapshot last-known; it
 never silently enables host execution. Fix the cause, then use
-**Configuration → Actions → Reload settings**. Reload/Enable refresh the draft
+**Actions → Reload settings**. Reload/Enable refresh the draft
 while preserving deliberate unsaved edits.
 
 ## Actions and diagnostics
 
-**Configuration → Actions** retains enable, **Turn off (HOST execution)**,
+**Actions** retains enable, **Turn off (HOST execution)**,
 reload, prune, redacted logs (validated non-negative tail count, default 100),
 effective redacted desired-config diagnostics, seal network in the draft,
 reset ephemeral settings and help. Dangerous actions require explicit

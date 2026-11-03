@@ -13,7 +13,7 @@ The default is fail-closed:
   a sandbox is active it requires interactive approval for the exact tool,
   working directory, and recursively sorted arguments. It is unavailable in
   headless operation and is never silently selected.
-- `/msb` → Configuration → Actions → Turn off is an explicit host-mode handoff and asks for
+- `/msb` → Actions → Turn off is an explicit host-mode handoff and asks for
   confirmation before stopping/removing the guest. This is
   different from `fallback_mode = "host"`, which automatically uses host tools
   after a sandbox failure and is shown as `MSB host fallback`. Both are

@@ -36,10 +36,11 @@ cd /path/to/project
 pi
 ```
 
-Inside Pi, **`/msb`** opens one full-screen **Configuration** tree for desired
-settings. Its collapsed **Status** subtree contains read-only **[runtime]**
-metadata, not duplicate settings. Expand with `l`/right, fold or go to parent with
-`h`/left, move with `j`/`k` or up/down. `e` edits, `a` adds, `d` deletes/inherits,
+Inside Pi, **`/msb`** opens full-screen with collapsed **General**, **Resources**,
+**Network**, **Secrets**, **Mounts**, **Advanced**, **Status**, **Sources & warnings**
+and **Actions** trees directly below **MICROSANDBOX**, initially focused on General.
+**Status** contains read-only **[runtime]** metadata, not duplicate settings.
+Expand with `l`/right, fold or go to parent with `h`/left, move with `j`/`k` or up/down. `e` edits, `a` adds, `d` deletes/inherits,
 and `q` closes. One contextual hint line stays pinned at the bottom, with accented
 keys and muted actions; narrow screens use grouped keys. [All keys →](docs/commands.md)
 
@@ -81,7 +82,7 @@ mount too. Use separate host worktrees when you need independent changes.
 including preparing a dedicated `.env` per project or worktree. Only put credentials
 the agent is allowed to access there; worktree management is not secret isolation.
 
-Sandbox failures stop routed tools by default. `/msb` → Configuration → Actions → **Turn off**
+Sandbox failures stop routed tools by default. `/msb` → Actions → **Turn off**
 explicitly switches to unsandboxed host tools after confirmation; `fallback_mode = "host"` opts into automatic host execution
 after failure. Keep the default `"block"` for untrusted work.
 [Know the boundary →](docs/safety.md)

@@ -81,7 +81,11 @@ try {
         const initial = tui.stripTerminalSequences(panel.render(80).join("\n"));
         assert.match(initial, /▸ Status *$/m);
         assert.doesNotMatch(initial, /Runtime|State:|No running policy adopted/);
-        assert.equal(initial.split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 1);
+        const roots = initial.split("\n").filter((line) => /^[> ] [▾▸] /.test(line));
+        assert.deepEqual(roots.map((line) => line.slice(4).trimEnd()), ["General", "Resources", "Network", "Secrets", "Mounts", "Advanced", "Status", "Sources & warnings", "Actions"]);
+        assert.ok(roots.every((line) => /^[> ] ▸ /.test(line)));
+        assert.match(initial, /^MICROSANDBOX *\n> ▸ General/m);
+        assert.doesNotMatch(initial, /Configuration/);
         for (const [width, height] of [[80, 24], [24, 2], [24, 6], [32, 12], [40, 10], [120, 20], [1, 1]]) {
           terminal.columns = width; terminal.rows = height;
           const lines = panel.render(width);
@@ -115,6 +119,14 @@ try {
           if (line.includes("▸")) await key("l");
         };
         assert.doesNotMatch(tui.stripTerminalSequences(panel.render(80).join("\n")), /Section:|Search all settings/);
+        await choose("General");
+        for (const [left, right] of [["h", "l"], ["\x1b[D", "\x1b[C"]]) {
+          await key(left); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▸ General/);
+          await key(right); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▾ General/);
+          await key(right); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), />     Guest image:/);
+          await key(left); await key(left);
+          assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▸ General/);
+        }
         await expand("Status");
         const status = tui.stripTerminalSequences(panel.render(80).join("\n"));
         assert.match(status, /State: off \[runtime\]/);

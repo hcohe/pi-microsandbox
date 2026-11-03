@@ -13,6 +13,7 @@ import { createMsbIntegration } from "./control.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createCommandHandler } from "./command.ts";
 import type { MsbControl } from "./types.ts";
+const ROOT_GROUPS = ["General", "Resources", "Network", "Secrets", "Mounts", "Advanced", "Status", "Sources & warnings", "Actions"];
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text } as any;
 async function fixture(t: any, theme = plainTheme, native = false) {
@@ -43,9 +44,9 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   const selected = () => full().split("\n").find((line) => line.startsWith("> "))?.slice(2).replace(/^\s*[▾▸]?\s*/, "").trimEnd() ?? "";
   const seek = async (label: string) => { for (let n = 0; n < 300; n++) { if (selected().startsWith(label)) return; await key("j"); } assert.fail(`unreachable row: ${label}\n${text()}`); };
   const choose = async (label: string) => { await seek(label); await key("\r"); };
-  const tree = async () => { for (let n = 0; n < 8 && !full().includes("▾ Configuration") && !full().includes("▸ Configuration"); n++) await key("\x1b"); };
+  const tree = async () => { for (let n = 0; n < 8 && !full().split("\n").some((line) => /^[> ] [▾▸] /.test(line) && ROOT_GROUPS.includes(line.slice(4).trimEnd())); n++) await key("\x1b"); };
   const expand = async (label: string) => { await seek(label); const line = full().split("\n").find((line) => line.startsWith("> ")); if (line?.includes("▸")) await key("l"); };
-  const node = async (group: string, label?: string) => { await tree(); await expand("Configuration"); await expand(group); if (label) await seek(label); };
+  const node = async (group: string, label?: string) => { await tree(); await expand(group); if (label) await seek(label); };
   const edit = async (group: string, label: string) => { await node(group, label); await key("e"); };
   const save = async (scope = 0) => { await tree(); await key(["w", "P", "G"][scope]!); };
   const action = async (label: string) => { await node("Actions", label); await key("\r"); };
@@ -60,18 +61,31 @@ test("settings inventory describes every public schema leaf", () => {
   assert.ok(SETTINGS_FIELDS.every((field) => field.description?.length > 10));
 });
 
-test("one Configuration root with collapsed runtime Status, tree h/l and arrow parity", async (t) => {
-  const f = await fixture(t); assert.doesNotMatch(f.full(), /Section:|Search all|Apply temporarily/);
-  assert.equal(f.selected(), "Configuration"); await f.key("h"); assert.equal(f.selected(), "Configuration");
-  assert.match(f.full(), /▸ Configuration/); await f.key("l"); assert.equal(f.selected(), "Configuration");
-  await f.key("l"); assert.equal(f.selected(), "General"); await f.key("\x1b[D"); assert.equal(f.selected(), "Configuration");
-  await f.key("\x1b[C"); assert.equal(f.selected(), "General"); await f.key("l"); await f.key("l"); assert.match(f.selected(), /Guest image/);
-  await f.key("h"); assert.equal(f.selected(), "General"); await f.key("h"); assert.match(f.full(), /▸ General/);
+test("collapsed groups are direct roots under MICROSANDBOX with vim and arrow tree parity", async (t) => {
+  const f = await fixture(t);
+  const initial = f.text().split("\n");
+  assert.equal(initial[0]!.trimEnd(), "MICROSANDBOX");
+  assert.deepEqual(initial.slice(1, 1 + ROOT_GROUPS.length).map((line) => line.slice(4).trimEnd()), ROOT_GROUPS);
+  assert.ok(initial.slice(1, 1 + ROOT_GROUPS.length).every((line) => /^[> ] ▸ /.test(line)));
+  assert.doesNotMatch(f.full(), /Configuration|Section:|Search all|Apply temporarily/);
+  assert.equal(f.selected(), "General");
+  for (const group of ROOT_GROUPS) {
+    await f.seek(group);
+    for (const left of ["h", "\x1b[D"]) { await f.key(left); assert.equal(f.selected(), group); }
+  }
+  for (const [left, right, down, up] of [["h", "l", "j", "k"], ["\x1b[D", "\x1b[C", "\x1b[B", "\x1b[A"]]) {
+    await f.seek("General");
+    await f.key(right); assert.equal(f.selected(), "General"); assert.match(f.full(), /> ▾ General/);
+    await f.key(right); assert.match(f.selected(), /Guest image/); assert.match(f.full(), />     Guest image:/);
+    await f.key(left); assert.equal(f.selected(), "General");
+    await f.key(left); assert.match(f.full(), /> ▸ General/);
+    await f.key(left); assert.equal(f.selected(), "General");
+    await f.key(down); assert.equal(f.selected(), "Resources");
+    await f.key(up); assert.equal(f.selected(), "General");
+  }
   await f.node("Status"); await f.key("h"); assert.equal(f.selected(), "Status"); assert.match(f.full(), /▸ Status *$/m);
   assert.doesNotMatch(f.full(), /State:|Runtime|Actually adopted|Policy snapshot unavailable/);
-  assert.equal(f.full().split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, 1);
-  await f.key("h"); assert.equal(f.selected(), "Configuration"); await f.key("h"); await f.key("j"); assert.equal(f.selected(), "Configuration");
-  await f.key("\x1b[B"); assert.equal(f.selected(), "Configuration");
+  assert.equal(f.full().split("\n").filter((line) => /^[> ] [▾▸] /.test(line)).length, ROOT_GROUPS.length);
   assert.deepEqual(f.calls, []);
 });
 
@@ -96,11 +110,16 @@ test("footer is one pinned row on short trees, with full labels or lossless comp
   const f = await fixture(t);
   for (const width of [24, 32, 40, 80, 120]) for (const height of [2, 3, 6, 12, 20, 40]) {
     f.terminal.columns = width; f.terminal.rows = height;
-    await f.seek("Configuration"); await f.key("h");
+    for (const group of ROOT_GROUPS) { await f.seek(group); await f.key("h"); }
+    await f.seek("General");
     const lines = f.panel.render(width).map(stripTerminalSequences);
     assert.match(lines.at(-1)!, /q close/); assert.match(lines.at(-1)!, /w\/P\/G|w ephemeral/);
     assert.equal(lines.filter((line) => line.includes("q close")).length, 1);
-    assert.ok(lines.slice(height >= 8 ? 2 : 1, -1).every((line) => !line.trim()), `${width}x${height}: footer below padding`);
+    const headingRows = height >= 8 ? 1 : 0;
+    const bodyRows = Math.min(ROOT_GROUPS.length, height - headingRows - 1);
+    assert.ok(lines.slice(headingRows, headingRows + bodyRows).every((line) => /^[> ] ▸ /.test(line)), `${width}x${height}: visible roots`);
+    assert.ok(lines.slice(headingRows + bodyRows, -1).every((line) => !line.trim()), `${width}x${height}: padding only after body`);
+    assert.match(lines[headingRows]!, /> ▸ General/); assert.equal(f.selected(), "General");
     await f.node("Secrets", "Secrets:"); await f.key("a");
     await f.choose("Environment name:"); await f.key("TOKEN"); await f.key("\r");
     await f.choose("Allowed hosts:"); await f.key("a.example"); await f.key("\r");
@@ -257,7 +276,7 @@ test("q protects unkept secret form changes and Escape remains back without clos
   await f.choose("Replace value"); await f.key("PRIVATE_FORM_SENTINEL"); await f.key("\r");
   await f.key("q"); assert.match(f.full(), /Discard unsaved/); assert.equal(f.selected(), "Cancel");
   await f.key("\r"); assert.match(f.full(), /replacement/); assert.doesNotMatch(f.full(), /PRIVATE_FORM_SENTINEL/);
-  await f.key("\x1b"); assert.equal(f.closed(), false); assert.match(f.full(), /▾ Configuration/);
+  await f.key("\x1b"); assert.equal(f.closed(), false); assert.match(f.full(), /[▾▸] General/);
   await f.key("q"); assert.equal(f.closed(), true); assert.deepEqual(f.settings.temporary(), {});
 });
 
@@ -412,7 +431,7 @@ test("Runtime snapshot is actual, immutable, frozen provenance; failed apply is 
   f.integration!.endSession(); assert.equal(f.control.getRuntimePolicy!(), undefined);
 });
 
-test("Status e/a/d unavailable, save from Status still targets Configuration draft only", async (t) => {
+test("Status e/a/d unavailable, save from Status still targets desired settings draft only", async (t) => {
   const f = await fixture(t, plainTheme, true); const original = f.control.getRuntimePolicy!(); await f.number("2");
   await f.node("Status");
   const labels = f.full().split("\n").filter((line) => line.includes("[runtime]"));

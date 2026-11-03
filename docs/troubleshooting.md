@@ -2,16 +2,16 @@
 
 [Back to README](../README.md)
 
-1. Open `/msb`: inspect Runtime and Configuration → Actions → Recent logs.
+1. Open `/msb`: inspect Status and Actions → Recent logs.
 2. If the state is `unavailable (blocked)`, fix the displayed configuration,
-   image, virtualization, path, or missing-tool error and choose Configuration → Actions → Reload settings.
+   image, virtualization, path, or missing-tool error and choose Actions → Reload settings.
    Startup failures fail closed; routed tools do not silently run on the host.
-3. If a process died, a later startup or Configuration → Actions → Prune stale sandboxes can remove its labelled
+3. If a process died, a later startup or Actions → Prune stale sandboxes can remove its labelled
    sandbox after the owner lock is free.
 4. If a same-name resource has different managed labels, pi-microsandbox
    refuses to attach or replace it. Verify the resource with Microsandbox's
    tooling before removing it.
-5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb` → Configuration → Actions → Turn off
+5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb` → Actions → Turn off
    for explicit host mode, or configure `fallback_mode = "host"` knowingly.
    Automatic fallback remains visibly distinct from explicit off mode; both are
    unsandboxed.
@@ -36,8 +36,8 @@ nothing is needed. Current pi-microsandbox commands do not manage these volumes.
 
 ## Docker daemon problems
 
-`/msb` → Runtime shows the adopted Docker mode, readiness, server version, and
-storage driver. Inside an active sandbox, start or recheck the daemon with:
+`/msb` → Status shows Docker readiness, server version, and storage driver
+when known. Inside an active sandbox, start or recheck the daemon with:
 
 ```sh
 pi-msb-docker-start 15000

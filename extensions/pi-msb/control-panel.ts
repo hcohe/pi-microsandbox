@@ -31,8 +31,8 @@ export class ControlPanel implements Component, Focusable {
   #theme: Pick<Theme, "fg" | "bold" | "inverse">;
   #done: () => void;
   #tree = true;
-  #treeFocus = "configuration";
-  #expanded = new Set(["configuration"]);
+  #treeFocus = "configuration/General";
+  #expanded = new Set<string>();
   #entryChanges = new Set<string>();
   #rows: Row[] = [];
   #focus = 0;
@@ -128,7 +128,7 @@ export class ControlPanel implements Component, Focusable {
         ...(["readiness", "version", "storageDriver", "reason"] as const).filter((key) => state.info!.docker[key] !== undefined).map((key) => statusRow(`docker/${key}`, `Docker ${key}`, display(state.info!.docker[key]))),
       ] : []),
     ] };
-    const configuration: Row = { id: "configuration", label: "Configuration", children: [
+    const roots: Row[] = [
       ...fields("configuration", this.#values, this.#provenance, false),
       status,
       { id: "configuration/sources", label: "Sources & warnings", children: [
@@ -137,10 +137,10 @@ export class ControlPanel implements Component, Focusable {
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
-    ] };
+    ];
     const rows: Row[] = [];
     const flatten = (node: Row, parent?: string, depth = 0) => { node.parent = parent; node.depth = depth; rows.push(node); if (node.children && this.#expanded.has(node.id)) for (const child of node.children) flatten(child, node.id, depth + 1); };
-    flatten(configuration);
+    for (const root of roots) flatten(root);
     this.#rows = rows;
     let index = rows.findIndex((row) => row.id === this.#treeFocus);
     while (index < 0 && this.#treeFocus.includes("/")) { this.#treeFocus = this.#treeFocus.slice(0, this.#treeFocus.lastIndexOf("/")); index = rows.findIndex((row) => row.id === this.#treeFocus); }
@@ -284,7 +284,7 @@ export class ControlPanel implements Component, Focusable {
           await this.#control.reload({ allowRestart: preview.effect === "restart" });
           if (this.#closed) return;
           message = `${saved ? "Applied" : "No changes"}${result.shadowed.length ? `; shadowed: ${result.shadowed.join(", ")}` : ""}. Runtime: ${this.#control.getState().status}`;
-        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Configuration → Status and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
+        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Status and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
         finally {
           pending.discard(); this.#pending = undefined;
           if (!this.#closed) {
@@ -351,7 +351,7 @@ export class ControlPanel implements Component, Focusable {
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
       { id: "seal", label: "Seal network in draft", detail: "Sets deny mode; save with w, P or G.", action: () => { this.#set("network.mode", "deny"); this.#home(); } },
       dangerous("Reset ephemeral settings", "Discard current memory-only overrides, then reconfigure. Restart may lose guest state. Unsaved panel edits will also be discarded.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Configuration is editable desired policy; its collapsed Status subtree shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the eventual save scope. w saves ephemeral session memory, P project, G global; all preview and reload. q closes (dirty discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origin, * marks draft intent. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "General, Resources, Network, Secrets, Mounts, Advanced, Status, Sources & warnings and Actions start collapsed directly below MICROSANDBOX. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the eventual save scope. w saves ephemeral session memory, P project, G global; all preview and reload. q closes (dirty discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origin, * marks draft intent. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
