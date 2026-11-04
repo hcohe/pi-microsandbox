@@ -324,7 +324,7 @@ export class ControlPanel implements Component, Focusable {
       const hostBoundaryWarnings = [...intentPaths].map((path) => HOST_BOUNDARY_WARNINGS[path]).filter((warning): warning is string => warning !== undefined);
       const summary = [
         ...hostBoundaryWarnings,
-        ...(scope === "temporary" ? ["Current integration session memory only."] : [
+        ...(scope === "temporary" ? ["Current running sandbox only."] : [
           `Settings file: ${target.path}`,
           "Persist defaults; reload this sandbox only.",
           "Others pick up on next start/reload.",

@@ -190,7 +190,7 @@ test("Review change puts each point on its own line and keeps Cancel selected", 
   for (const width of [160, 80]) {
     f.terminal.columns = width; f.terminal.rows = 24;
     const frame = f.text(), lines = frame.split("\n");
-    for (const point of ["HOST execution / sandbox bypass:", "Current integration session memory only.", "block_third_party: false", "Live routing/presentation update;", "Conflicting same-scope removal controls", "Host bypass/network/mount/environment settings"]) {
+    for (const point of ["HOST execution / sandbox bypass:", "Current running sandbox only.", "block_third_party: false", "Live routing/presentation update;", "Conflicting same-scope removal controls", "Host bypass/network/mount/environment settings"]) {
       assert.ok(lines.some((line) => line.startsWith(point)), `${width}: ${point}`);
     }
     assert.doesNotMatch(frame, /\. \.|Collection intent: \./);
