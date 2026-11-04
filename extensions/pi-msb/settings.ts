@@ -33,6 +33,31 @@ export interface SettingsCollectionIntent {
   promoted: boolean;
   shadowed: boolean;
 }
+/** Focused, sanitized display data; private comparisons happen before credentials are masked. */
+export interface SettingsReviewDelta {
+  entry?: string;
+  field: string;
+  before: unknown;
+  after: unknown;
+}
+export interface SettingsReviewFocus {
+  path: string;
+  operation: "set" | "inherit" | "upsert" | "remove";
+  identity?: string;
+  previousIdentity?: string;
+  targetBefore: "inherit" | "explicit";
+  targetAfter: "inherit" | "explicit";
+  baseline: "target" | "inherited";
+  changed: boolean;
+  effectiveChanged: boolean;
+  deltas: SettingsReviewDelta[];
+  inheritedDeltas: SettingsReviewDelta[];
+  reconciledDeltas: SettingsReviewDelta[];
+  shadowed: boolean;
+  writableMount: boolean;
+  replacesEntry: boolean;
+  hostBypass: string[];
+}
 interface EntryOrigin { source: string; path: string | null; rank: number }
 interface EntryEdit {
   operation: "upsert" | "remove";
@@ -139,6 +164,48 @@ function reconcileRemovals(layer: Record<string, unknown>, collection: string, e
   if (equal(before, after)) return;
   patchRaw(layer, normalizeConfigPath(path), after, false);
   return { path, operation: "set", before: masked(before), after: masked(after) };
+}
+function safeSettingsValue(path: string, value: unknown): unknown {
+  if (value === undefined) return undefined;
+  const container: Record<string, unknown> = {};
+  patchRaw(container, normalizeConfigPath(path), value, false);
+  return rawValue(projectSettingsJson(container), normalizeConfigPath(path));
+}
+/** Compare private native values, emitting only changed supported fields with safe credentials. */
+function reviewDeltas(path: string, before: unknown, after: unknown, previousIdentity?: string, identity?: string): SettingsReviewDelta[] {
+  const deltas: SettingsReviewDelta[] = [];
+  if (path === "secrets" || path === "mounts") {
+    const old = Array.isArray(before) ? before : [];
+    const next = Array.isArray(after) ? after : [];
+    if (before !== undefined && !Array.isArray(before)) deltas.push({ field: path, before: "<invalid>", after: undefined });
+    const safeEntry = (entry: unknown): Record<string, unknown> | undefined => {
+      if (entry === undefined) return undefined;
+      const safe = (safeSettingsValue(path, [entry]) as unknown[])[0];
+      return safe && typeof safe === "object" ? safe as Record<string, unknown> : undefined;
+    };
+    const safeIdentity = (entry: unknown): string => {
+      const safe = safeEntry(entry);
+      return safe ? entryIdentity(path, safe) : "<invalid>";
+    };
+    const remaining = new Set(old);
+    for (const b of next) {
+      const id = entryIdentity(path, b);
+      const a = old.find((item) => entryIdentity(path, item) === (id === identity ? previousIdentity ?? id : id));
+      remaining.delete(a);
+      compare(a, b, safeIdentity(b));
+    }
+    for (const a of remaining) compare(a, undefined, safeIdentity(a));
+    const oldOrder = old.map((item) => entryIdentity(path, item));
+    const nextOrder = next.map((item) => entryIdentity(path, item));
+    if (oldOrder.length === nextOrder.length && oldOrder.every((id) => nextOrder.includes(id)) && !equal(oldOrder, nextOrder)) deltas.push({ field: "entry order", before: old.map(safeIdentity), after: next.map(safeIdentity) });
+    function compare(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined, entry: string) {
+      const fields = path === "secrets" ? ["env", "allowHosts", "value"] : ["type", "hostPath", "guestPath", "readonly", "options"];
+      const safeBefore = safeEntry(a); const safeAfter = safeEntry(b);
+      if (a !== undefined && !safeBefore) deltas.push({ entry, field: path, before: "<invalid>", after: undefined });
+      for (const field of fields) if (!equal(a?.[field], b?.[field])) deltas.push({ entry, field: field === "value" ? "credential" : snake(field), before: safeBefore?.[snake(field)], after: safeAfter?.[snake(field)] });
+    }
+  } else if (!equal(before, after)) deltas.push({ field: path, before: safeSettingsValue(path, before), after: safeSettingsValue(path, after) });
+  return deltas;
 }
 interface Source { text: string | null; version: string; raw: Record<string, unknown>; anchor?: SettingsAnchor }
 interface SettingsAnchor { path: string; canonical: string; ancestors: Array<{ path: string; identity?: string }> }
@@ -427,16 +494,65 @@ export class SettingsDraft {
       afterCommit: await this.#editor.guardAfterCommit(this.#reviewState, this.path, this.path ? serializeRaw(candidate.raw) : null, candidate.next),
     };
     const { effectiveToml: _privateToml, ...preview } = candidate.preview;
-    preview.changes = preview.changes.map((change) => {
-      const safeValue = (value: unknown) => {
-        if (value === undefined) return null;
-        const container: Record<string, unknown> = {};
-        patchRaw(container, normalizeConfigPath(change.path), value, false);
-        return rawValue(projectSettingsJson(container), normalizeConfigPath(change.path));
-      };
-      return { ...change, before: safeValue(change.before), after: safeValue(change.after) };
-    });
+    preview.changes = preview.changes.map((change) => ({ ...change,
+      before: safeSettingsValue(change.path, change.before) ?? null,
+      after: safeSettingsValue(change.path, change.after) ?? null,
+    }));
+    const focus: SettingsReviewFocus[] = [];
+    for (const [path, patch] of this.#patch) {
+      const parts = normalizeConfigPath(path);
+      const own = COLLECTION_REMOVALS[path] ? this.#ownCollection(path) : rawValue(this.#source.raw, parts);
+      const after = patch.inherit ? undefined : this.#patchValue(path, patch);
+      const native = patch.entries?.[patch.entries.length - 1];
+      let before = own;
+      let focusedAfter = after;
+      let baseline: SettingsReviewFocus["baseline"] = "target";
+      let replacesEntry = false;
+      if (!native && COLLECTION_REMOVALS[path] && own === undefined && !patch.inherit) {
+        const scopeBase = this.scope === "temporary" ? this.#base : await this.#editor.resolveCandidate(null, null, {}, this.scope);
+        before = get(scopeBase.config, parts);
+        baseline = "inherited";
+      }
+      if (native) {
+        const selected = native.previousIdentity ?? native.identity;
+        const owned = (own as unknown[] | undefined)?.find((item) => entryIdentity(path, item) === selected);
+        const inheritedEntries = this.#baselineCollection(path, this.#scopeBase!);
+        const inherited = inheritedEntries.find((item) => entryIdentity(path, item) === selected);
+        baseline = owned === undefined ? "inherited" : "target";
+        const collision = native.identity !== selected ? ((own as unknown[] | undefined)?.find((item) => entryIdentity(path, item) === native.identity)
+          ?? inheritedEntries.find((item) => entryIdentity(path, item) === native.identity)) : undefined;
+        replacesEntry = collision !== undefined;
+        before = [owned ?? inherited, collision].filter((item) => item !== undefined);
+        focusedAfter = (after as unknown[]).filter((item) => entryIdentity(path, item) === native.identity);
+      }
+      const desiredBefore = get(this.#base.config, parts);
+      const desiredAfter = get(candidate.next.config, parts);
+      const bypassSetting = ["pass_through_tools", "block_third_party", "allow_skill_reads", "allow_host_execution", "fallback_mode"].includes(path);
+      let consequenceAfter = focusedAfter;
+      if (patch.inherit && (path === "mounts" || bypassSetting)) {
+        // Review inherited target-scope policy even when higher layers currently shadow it.
+        const inherited = this.scope === "temporary" ? candidate.next
+          : await this.#editor.resolveCandidate(this.path, serializeRaw(candidate.raw), {}, this.scope);
+        consequenceAfter = get(inherited.config, parts);
+      }
+      const changed = preview.changes.some((change) => change.path === path || change.path === COLLECTION_REMOVALS[path]);
+      const dangerous = (value: unknown): boolean => path === "pass_through_tools" ? Array.isArray(value) && value.length > 0
+        : path === "block_third_party" ? value === false : path === "fallback_mode" ? value === "host" : value === true;
+      focus.push({
+        path, operation: native?.operation ?? (patch.inherit ? "inherit" : "set"), identity: native?.identity, previousIdentity: native?.previousIdentity,
+        targetBefore: own === undefined ? "inherit" : "explicit", targetAfter: patch.inherit || !changed && own === undefined ? "inherit" : "explicit", baseline,
+        changed, replacesEntry, effectiveChanged: !equal(desiredBefore, desiredAfter),
+        deltas: changed ? reviewDeltas(path, before, focusedAfter, native?.previousIdentity, native?.identity) : [],
+        inheritedDeltas: patch.inherit ? reviewDeltas(path, desiredBefore, desiredAfter) : [],
+        reconciledDeltas: preview.changes.filter((change) => change.path === COLLECTION_REMOVALS[path]).map((change) => ({ field: change.path, before: change.before, after: change.after })),
+        shadowed: (LAYER_RANK[candidate.next.provenance[parts.join(".")] ?? ""] ?? 0) > scopeRank(this.scope),
+        writableMount: path === "mounts" && changed && Array.isArray(consequenceAfter) && consequenceAfter.some((mount) => ["dir", "file"].includes(mount.type) && !mount.readonly),
+        hostBypass: bypassSetting && (dangerous(consequenceAfter) || dangerous(after) || dangerous(desiredAfter) || dangerous(own)) ? [path] : [],
+      });
+    }
+    await this.#assertReviewState(this.#reviewState);
     return this.#sanitize({
+      focus, mayStart: candidate.next.config.autoStart && !!adoptedRuntime && typeof adoptedRuntime === "object" && "status" in adoptedRuntime && adoptedRuntime.status !== "active",
       adoptedRuntime, ...preview, effect, scope: this.scope === "temporary" ? "ephemeral" : this.scope,
       storage: { before: projectSettingsJson(this.#source.raw), changes: preview.changes },
       desired: { before: projectSettingsJson(this.#base.config), after: projectSettingsJson(candidate.next.config) },

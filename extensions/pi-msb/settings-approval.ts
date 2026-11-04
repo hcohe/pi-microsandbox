@@ -1,5 +1,6 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { formatSettingsDiff, SETTINGS_APPROVAL_HEADING, type SettingsDiffLine } from "./settings-diff.ts";
 
 /** Public custom overlay: native select titles cannot scroll in small/alternate-screen terminals. */
 export class SettingsApproval implements Component, Focusable {
@@ -11,16 +12,16 @@ export class SettingsApproval implements Component, Focusable {
   #lines: string[] = [];
   #capacity = 0;
   #usable = false;
-  #review: string;
+  #review: SettingsDiffLine[];
   #tui: Pick<TUI, "terminal" | "requestRender">;
   #theme: Pick<Theme, "fg" | "bold">;
   #done: (approved: boolean) => void;
-  constructor(review: string, tui: Pick<TUI, "terminal" | "requestRender">, theme: Pick<Theme, "fg" | "bold">, done: (approved: boolean) => void) {
+  constructor(review: SettingsDiffLine[], tui: Pick<TUI, "terminal" | "requestRender">, theme: Pick<Theme, "fg" | "bold">, done: (approved: boolean) => void) {
     this.#review = review; this.#tui = tui; this.#theme = theme; this.#done = done;
   }
   #finish(approved: boolean): void {
     if (this.#closed) return;
-    this.#closed = true; this.focused = false; this.#review = ""; this.#lines = [];
+    this.#closed = true; this.focused = false; this.#review = []; this.#lines = [];
     this.#done(approved);
   }
   cancel(): void { this.#finish(false); }
@@ -30,17 +31,19 @@ export class SettingsApproval implements Component, Focusable {
     const height = Math.max(1, this.#tui.terminal.rows);
     this.#usable = width >= 32 && height >= 10;
     this.#capacity = Math.max(1, height - 5);
-    this.#lines = this.#review.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(1, width - 2)));
+    this.#lines = formatSettingsDiff(this.#review, this.#theme).flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(1, width - 2)));
     this.#offset = Math.max(0, Math.min(this.#offset, this.#lines.length - this.#capacity));
     if (this.#usable && this.#offset + this.#capacity >= this.#lines.length) this.#endSeen = true;
     const rows = this.#usable ? [
-      this.#theme.bold("MICROSANDBOX CONFIGURATION APPROVAL"),
-      `Review ${this.#offset + 1}–${Math.min(this.#lines.length, this.#offset + this.#capacity)}/${this.#lines.length}${this.#endSeen ? " · End seen" : " · Read to end to enable Approve"}`,
+      this.#theme.bold(this.#theme.fg("accent", SETTINGS_APPROVAL_HEADING)),
+      this.#theme.fg("muted", `Review ${this.#offset + 1}–${Math.min(this.#lines.length, this.#offset + this.#capacity)}/${this.#lines.length}${this.#endSeen ? " · End seen" : " · Read to end to enable Approve"}`),
       ...this.#lines.slice(this.#offset, this.#offset + this.#capacity),
     ] : ["Review needs at least 32×10.", "Resize to read; Enter/Escape cancels."];
     while (rows.length < height - 2) rows.push("");
-    if (height >= 2) rows.push("↑↓/j/k scroll · PgUp/PgDn · g/G · Tab choose");
-    rows.push(`${this.#theme.fg(!this.#approve ? "accent" : "muted", "[ Cancel ]")}  ${this.#theme.fg(this.#approve && this.#usable ? "accent" : "muted", this.#endSeen && this.#usable ? "[ Approve ]" : "[ Approve disabled ]")}  Esc cancel`);
+    if (height >= 2) rows.push(width >= 64
+      ? this.#theme.bold(this.#theme.fg("accent", "↑↓/j/k")) + this.#theme.fg("muted", " scroll · PgUp/PgDn · g/G · Tab choose · Esc cancel")
+      : this.#theme.bold(this.#theme.fg("accent", "↑↓ g/G Tab")) + this.#theme.fg("muted", " · Esc cancel"));
+    rows.push(`${this.#theme.fg("muted", this.#theme.bold(`${!this.#approve ? "> " : ""}[ Cancel ]`))}  ${this.#theme.fg(this.#endSeen && this.#usable ? "accent" : "muted", this.#theme.bold(`${this.#approve ? "> " : ""}${this.#endSeen && this.#usable ? "[ Approve ]" : "[ Approve disabled ]"}`))}`);
     return rows.slice(0, height).map((line) => {
       const clipped = truncateToWidth(line, Math.max(1, width), "");
       return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
@@ -62,9 +65,9 @@ export class SettingsApproval implements Component, Focusable {
   }
 }
 
-export async function approveSettings(ctx: ExtensionContext, review: string, signal: AbortSignal): Promise<boolean> {
+export async function approveSettings(ctx: ExtensionContext, review: SettingsDiffLine[], signal: AbortSignal): Promise<boolean> {
   if (!ctx.hasUI || signal.aborted) return false;
-  if (ctx.mode === "rpc") return await ctx.ui.select(review, ["Cancel", "Approve"], { signal }) === "Approve" && !signal.aborted;
+  if (ctx.mode === "rpc") return await ctx.ui.select([SETTINGS_APPROVAL_HEADING, ...formatSettingsDiff(review)].join("\n"), ["Cancel", "Approve"], { signal }) === "Approve" && !signal.aborted;
   if (ctx.mode !== "tui") return false;
   let cancel: (() => void) | undefined;
   const abort = () => cancel?.();

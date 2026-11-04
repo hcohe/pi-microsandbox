@@ -207,10 +207,12 @@ try {
       const inspection = await inspect.execute("inspect", {}, undefined, undefined, runner.createContext());
       assert.equal(inspection.details.outcome, "inspected");
       assert.doesNotMatch(JSON.stringify(inspection), /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
-      for (const action of ["default-cancel", "escape", "approve", "apply", "restart", "abort", "too-small"]) {
+      for (const action of ["default-cancel", "escape", "approve", "apply", "restart", "abort", "too-small", "secret-hosts", "secret-rotation"]) {
         panel = undefined;
         const abort = new AbortController();
-        const proposal = action === "apply" ? { scope: "ephemeral", path: "show_footer", operation: "set", value: !inspection.details.desired.show_footer }
+        const proposal = action === "secret-hosts" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: Array.from({ length: 40 }, (_, n) => `host-${n}.example`) } }
+          : action === "secret-rotation" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["api.example"], value: "ROTATED_PRIVATE_SENTINEL" } }
+          : action === "apply" ? { scope: "ephemeral", path: "show_footer", operation: "set", value: !inspection.details.desired.show_footer }
           : action === "restart" ? { scope: "ephemeral", path: "memory_mib", operation: "set", value: inspection.details.desired.memory_mib + 128 }
           : { scope: "ephemeral", path: "cpus", operation: "inherit" };
         const pending = setter.execute("config", proposal, abort.signal, undefined, runner.createContext());
@@ -224,17 +226,43 @@ try {
           assert.equal(frame.length, height); assert.ok(frame.every((line) => tui.visibleWidth(line) === width));
           assert.doesNotMatch(frame.join("\n"), /PRIVATE_SENTINEL|\$FILE:|\$ENV:|UNDERLYING/);
         }
+        const frame = panel.render(100).join("\n");
+        assert.ok(frame.includes(theme.bold(theme.fg("accent", "MICROSANDBOX · Review change"))));
+        assert.ok(frame.includes(theme.fg("muted", theme.bold("> [ Cancel ]"))));
+        assert.ok(frame.includes(theme.bold(theme.fg("accent", "↑↓/j/k"))));
+        const callFrame = setter.renderCall({ ...proposal, identity: "UNSAFE_PRIVATE_SENTINEL" }, theme, {}).render(100).join("\n");
+        assert.doesNotMatch(callFrame, /PRIVATE_SENTINEL|allowHosts|value/);
+        if (action.startsWith("secret-")) {
+          assert.ok(frame.includes(theme.fg("toolDiffRemoved", "- ")));
+          assert.ok(frame.includes(theme.fg("toolDiffAdded", "+ ")));
+          assert.notEqual(theme.fg("toolDiffRemoved", "test"), theme.fg("toolDiffAdded", "test"));
+          assert.ok(frame.includes(theme.fg("muted", "global · secrets · upsert · TOKEN")));
+          assert.doesNotMatch(frame, /HOST|adoptedRuntime|provenance|"before"|"after"/);
+          if (action === "secret-rotation") {
+            assert.ok(frame.includes(theme.fg("toolDiffAdded", "<redacted> (changed)")));
+            assert.doesNotMatch(frame, /allow_hosts/);
+          } else {
+            assert.match(tui.stripTerminalSequences(frame), /Approve disabled/);
+            let seen = "";
+            for (let n = 0; n < 100; n++) { seen += tui.stripTerminalSequences(panel.render(32).join("\n")) + "\n"; input("j"); }
+            for (let n = 0; n < 40; n++) assert.ok(seen.includes(`host-${n}.example`));
+          }
+        }
         const key = (value) => { input(value); ui.renderNow(true); };
         if (action === "default-cancel") key("\r");
-        if (action === "escape") key("\x1b");
+        if (action === "escape" || action.startsWith("secret-")) key("\x1b");
         if (action === "abort") abort.abort();
         if (action === "too-small") { terminal.columns = 24; terminal.rows = 2; panel.render(24); key("\t"); key("G"); key("\r"); }
         if (["approve", "apply", "restart"].includes(action)) {
-          assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Approve disabled/);
           key("G"); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /End seen/);
           key("\t"); key("\r");
         }
         const result = await pending;
+        for (const expanded of [false, true]) {
+          const rendered = setter.renderResult(result, { expanded, isPartial: false }, theme, { isError: false }).render(100).join("\n");
+          assert.doesNotMatch(rendered, /PRIVATE_SENTINEL|adoptedRuntime|provenance|"before"|"after"/);
+          if (["apply", "restart"].includes(action)) assert.match(tui.stripTerminalSequences(rendered), /Saved · reloaded · runtime active/);
+        }
         assert.equal(result.details.outcome, action === "approve" ? "no_op" : ["apply", "restart"].includes(action) ? "applied" : "cancelled");
         if (["apply", "restart"].includes(action)) { assert.equal(result.details.saved, true); assert.equal(result.details.reloaded, true); assert.equal(result.details.runtimeStatus, "active"); }
         assert.equal(ui.hasOverlay(), false); assert.equal(editor.focused, true);

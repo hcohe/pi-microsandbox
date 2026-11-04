@@ -9,6 +9,7 @@ import { openControlPanel } from "./control-panel.ts";
 import { createMsbIntegration } from "./control.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { registerConfigTools } from "./settings-tools.ts";
+import { formatSettingsDiff, settingsDiff } from "./settings-diff.ts";
 import type { SettingsSanitizer } from "./settings-redaction.ts";
 import { SettingsEditor, SETTINGS_PATHS } from "./settings.ts";
 import type { MsbControl, ResolvedConfig, RuntimePolicySnapshot } from "./types.ts";
@@ -201,9 +202,11 @@ test("msb_config_set: native scalar lists, rename, whole-list replacement/clear 
     set("project", "pass_through_tools", ["replace"]), set("project", "pass_through_tools", []), set("ephemeral", "block_third_party", false),
   ]) assert.equal((await f.call(proposal)).details.outcome, "applied");
   for (const title of f.reviews) {
-    assert.match(title, /HOST.*pass_through_tools/); assert.match(title, /block_third_party = false/);
-    assert.match(title, /without per-call host approval/); assert.match(title, /REPLACES\/CLEARS/);
+    assert.match(title, /HOST/); assert.match(title, /without per-call host approval/);
+    assert.equal(title.includes("pass_through_tools"), !title.includes("block_third_party"));
   }
+  assert.match(f.reviews[3]!, /Replaces the whole target-scope list/);
+  assert.match(f.reviews[4]!, /Clears the whole target-scope list/);
 });
 
 test("msb_config_set: mount native CRUD retains canonical workspace/symlink/protected-guest safety", async (t) => {
@@ -404,3 +407,297 @@ test("privacy: resolver sanitizer capture changes no reads/output and runs only 
   let callbacks = 0;
   await assert.rejects(resolveConfig(f.input, () => { callbacks++; })); assert.equal(callbacks, 0);
 });
+
+test("compact review: secret host edit includes only selected entry and changed hosts; rotation stays visibly masked", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["keep.example","old.example"]}, {env="UNRELATED",value="OTHER_PRIVATE_SENTINEL",allow_hosts=["unrelated.example"]}]\n');
+  const edit = { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["keep.example", "new.example"] } };
+  const changed = await f.call(edit);
+  const text = f.reviews.at(-1)!;
+  assert.match(text, /global · secrets · upsert · TOKEN/);
+  assert.match(text, /- allow_hosts: old.example\n\+ allow_hosts: new.example/);
+  assert.doesNotMatch(text, /keep.example|UNRELATED|unrelated.example|credential|HOST|block_third_party|desired|provenance|adoptedRuntime|"before"|"after"/);
+  assert.doesNotMatch(changed.content[0].text, /UNRELATED|keep.example|provenance|adoptedRuntime/);
+  assert.doesNotMatch(text, /\x1b/); noPrivate(changed); noPrivate(text);
+  assert.equal((await f.call(edit)).details.outcome, "no_op");
+  assert.match(f.reviews.at(-1)!, /No stored change/); assert.doesNotMatch(f.reviews.at(-1)!, /credential|changed\)/);
+  const reference = `$FILE:${join(f.root, "ROTATED_PRIVATE_SENTINEL")}`;
+  await writeFile(reference.slice(6), "ROTATED_BYTES_PRIVATE_SENTINEL");
+  const rotated = await f.call({ ...edit, value: { ...edit.value, value: reference } });
+  assert.equal(rotated.details.outcome, "applied"); noPrivate(rotated);
+  assert.match(f.reviews.at(-1)!, /- credential: <redacted>\n\+ credential: <redacted> \(changed\)/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /allow_hosts|keep.example|old.example|new.example|UNRELATED/);
+  assert.equal((await f.call({ ...edit, value: { ...edit.value, value: reference } })).details.outcome, "no_op");
+  assert.doesNotMatch(f.reviews.at(-1)!, /credential/);
+});
+
+test("compact review: shadowed target baseline and retained higher-scope credential promotion are truthful", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",value="OLD_PRIVATE_SENTINEL",allow_hosts=["target.example"]}]\n');
+  await writeFile(f.paths.project, 'secrets = [{env="TOKEN",value="HIGH_PRIVATE_SENTINEL",allow_hosts=["higher.example"]}]\n');
+  const got = await f.call({ scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["changed.example"] } });
+  assert.equal(got.details.outcome, "applied");
+  const text = f.reviews.at(-1)!; noPrivate(text);
+  assert.match(text, /- allow_hosts: target.example/); assert.match(text, /\+ allow_hosts: changed.example/);
+  assert.match(text, /credential: <redacted> \(changed\)/);
+  assert.match(text, /Promotion:.*host-project.*global/); assert.match(text, /Shadowed/); assert.match(text, /Desired value unchanged; scope intent only/);
+  assert.doesNotMatch(text, /higher.example/);
+});
+
+test("compact review: inherit/no-op and shadowed bypass intent keep only relevant warnings", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nblock_third_party = false\n');
+  await writeFile(f.paths.project, 'cpus = 4\nblock_third_party = true\n');
+  await f.call(set("global", "cpus", 5));
+  assert.match(f.reviews.at(-1)!, /- cpus: 3\n\+ cpus: 5/); assert.match(f.reviews.at(-1)!, /Shadowed/); assert.doesNotMatch(f.reviews.at(-1)!, /HOST|block_third_party/);
+  await f.call(set("global", "block_third_party", false));
+  assert.match(f.reviews.at(-1)!, /No stored change/); assert.match(f.reviews.at(-1)!, /HOST.*block_third_party = false/); assert.match(f.reviews.at(-1)!, /Shadowed/);
+  await f.call({ scope: "project", path: "block_third_party", operation: "inherit" });
+  assert.match(f.reviews.at(-1)!, /Target: explicit → inherit/); assert.match(f.reviews.at(-1)!, /Desired after inherit/);
+  assert.match(f.reviews.at(-1)!, /\+ block_third_party: false/); assert.match(f.reviews.at(-1)!, /HOST.*block_third_party = false/);
+  await f.call({ scope: "project", path: "block_third_party", operation: "inherit" });
+  assert.match(f.reviews.at(-1)!, /No stored change/); assert.match(f.reviews.at(-1)!, /HOST/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /pass_through_tools|allow_skill_reads|fallback_mode|Restart/);
+});
+
+test("compact review: native secret rename/remove and whole-list set/clear show changed fields without siblings", async (t) => {
+  const f = await fixture(t);
+  const a = { env: "A", value: "A_PRIVATE_SENTINEL", allowHosts: ["a.example"] };
+  const b = { env: "B", value: "B_PRIVATE_SENTINEL", allowHosts: ["b.example"] };
+  await f.call(set("global", "secrets", [a, b]));
+  await f.call({ scope: "global", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "RENAMED", allowHosts: ["a.example"] } });
+  assert.match(f.reviews.at(-1)!, /A → RENAMED/); assert.match(f.reviews.at(-1)!, /- env: A\n\+ env: RENAMED/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /credential|allow_hosts|b.example/);
+  await f.call({ scope: "global", path: "secrets", operation: "remove", identity: "RENAMED" });
+  assert.match(f.reviews.at(-1)!, /- env: RENAMED/); assert.match(f.reviews.at(-1)!, /Removes the selected entry/); assert.doesNotMatch(f.reviews.at(-1)!, /b.example/);
+  await f.call(set("global", "secrets", [{ ...b, allowHosts: ["new.example"] }]));
+  assert.match(f.reviews.at(-1)!, /Replaces the whole target-scope list/); assert.match(f.reviews.at(-1)!, /- allow_hosts: b.example\n\+ allow_hosts: new.example/); assert.doesNotMatch(f.reviews.at(-1)!, /credential|env:/);
+  await f.call(set("global", "secrets", []));
+  assert.match(f.reviews.at(-1)!, /Clears the whole target-scope list/); assert.match(f.reviews.at(-1)!, /- credential: <redacted>/);
+});
+
+test("compact review: mount edits/rename and scalar-list edits omit unchanged fields", async (t) => {
+  const f = await fixture(t);
+  const data = join(f.root, "data"); await mkdir(data);
+  const mount = { type: "dir", hostPath: data, guestPath: "/mnt/data", readonly: true, options: [] };
+  await f.call({ scope: "global", path: "mounts", operation: "upsert", value: mount });
+  await f.call({ scope: "global", path: "mounts", operation: "upsert", value: { ...mount, readonly: false } });
+  assert.match(f.reviews.at(-1)!, /- readonly: true\n\+ readonly: false/); assert.doesNotMatch(f.reviews.at(-1)!, /host_path|options|type:/);
+  await f.call({ scope: "global", path: "mounts", operation: "upsert", previousIdentity: "/mnt/data", value: { ...mount, readonly: false, guestPath: "/mnt/renamed" } });
+  assert.match(f.reviews.at(-1)!, /- guest_path: \/mnt\/data\n\+ guest_path: \/mnt\/renamed/); assert.doesNotMatch(f.reviews.at(-1)!, /readonly:|host_path/);
+  await f.call(set("global", "host_env", ["KEEP", "OLD"]));
+  await f.call({ scope: "global", path: "host_env", operation: "upsert", value: "NEW", previousIdentity: "OLD" });
+  assert.match(f.reviews.at(-1)!, /- host_env: OLD\n\+ host_env: NEW/); assert.doesNotMatch(f.reviews.at(-1)!, /KEEP|HOST/);
+});
+
+test("compact review: collection reorder, inherited assignment and removal reconciliation remain visible", async (t) => {
+  const f = await fixture(t);
+  const a = { env: "A", value: "A_PRIVATE_SENTINEL", allowHosts: ["a.example"] };
+  const b = { env: "B", value: "B_PRIVATE_SENTINEL", allowHosts: ["b.example"] };
+  await f.call(set("global", "secrets", [a, b]));
+  await f.call(set("global", "secrets", [b, a]));
+  assert.match(f.reviews.at(-1)!, /entry order: \["A","B"\]/); assert.match(f.reviews.at(-1)!, /entry order: \["B","A"\]/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /credential|allow_hosts/);
+  await f.call({ scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["changed.example"] } });
+  assert.match(f.reviews.at(-1)!, /Target: inherit → explicit · compared with inherited baseline/);
+  assert.match(f.reviews.at(-1)!, /- allow_hosts: a.example\n\+ allow_hosts: changed.example/); assert.doesNotMatch(f.reviews.at(-1)!, /credential|b.example/);
+  await writeFile(f.paths.project, 'remove_secrets = ["A"]\n');
+  await f.call(set("project", "secrets", [a]));
+  assert.match(f.reviews.at(-1)!, /Reconciles target-scope removal controls/); assert.match(f.reviews.at(-1)!, /remove_secrets: A/);
+});
+
+test("compact setter renderers: never echo raw arguments or full review JSON, preserve useful outcomes and failures", async (t) => {
+  const f = await fixture(t); const tool = f.tools.get("msb_config_set")!;
+  const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as any;
+  const raw = { ...set(), identity: "RAW_PRIVATE_SENTINEL", value: "RAW_PRIVATE_SENTINEL" };
+  assert.equal(tool.renderCall!(raw as any, theme, {} as any).render(100).join("\n").trim(), "Microsandbox setting");
+  const got = await f.call(set());
+  for (const expanded of [false, true]) {
+    const frame = tool.renderResult!(got, { expanded, isPartial: false } as any, theme, {} as any).render(100).join("\n");
+    assert.match(frame, /Saved · reloaded · runtime off/); assert.doesNotMatch(frame, /adoptedRuntime|provenance|effectiveToml|supportedPaths/);
+    if (expanded) assert.match(frame, /\+ show_footer: false/);
+  }
+  f.failReload(); const failed = await f.call(set("global"));
+  const frame = tool.renderResult!(failed, { expanded: false } as any, theme, {} as any).render(100).join("\n");
+  assert.match(frame, /saved_but_reload_failed.*saved but not fully activated/); assert.doesNotMatch(frame, /Saved · reloaded/);
+  const external = tool.renderResult!({ content: [{ type: "text", text: "RAW_PRIVATE_SENTINEL" }], details: undefined }, {} as any, theme, { isError: true } as any).render(100).join("\n");
+  assert.match(external, /failed.*no confirmed activation/); noPrivate(external);
+});
+
+test("compact review: actual restart/start and explicit host intents retain relevant consequences", async (t) => {
+  const f = await fixture(t);
+  await f.call(set("ephemeral", "memory_mib", 4096));
+  assert.match(f.reviews.at(-1)!, /Restart: guest ephemeral state and nested containers may be lost/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /HOST/);
+  await writeFile(f.paths.global, "auto_start = true\n");
+  await f.call(set("ephemeral", "show_footer", false));
+  assert.match(f.reviews.at(-1)!, /Reload may start the inactive sandbox/);
+  for (const [path, value, pattern] of [["allow_host_execution", true, /individual tool-call approval/], ["fallback_mode", "host", /after sandbox failure/], ["allow_skill_reads", true, /HOST read/]] as const) {
+    await f.call(set("global", path, value)); assert.match(f.reviews.at(-1)!, pattern);
+    assert.doesNotMatch(f.reviews.at(-1)!, /pass_through_tools|block_third_party = false/);
+  }
+});
+
+test("compact review: malformed shadowed raw scalar is projected, never an unknown-data read channel", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\ncpus = { body = "UNRECOGNIZED_RAW_VALUE", VALUE = "UNKNOWN_PRIVATE_SENTINEL" }\n');
+  await writeFile(f.paths.project, "cpus = 4\n");
+  const got = await f.call(set("global", "cpus", 3));
+  assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews);
+  assert.match(f.reviews.at(-1)!, /- cpus: <invalid>\n\+ cpus: 3/);
+});
+
+test("compact review: whole-list clear without an own assignment shows affected inherited entries", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="LOWER",value="LOWER_PRIVATE_SENTINEL",allow_hosts=["lower.example"]}]\n');
+  await f.call(set("project", "secrets", []));
+  assert.match(f.reviews.at(-1)!, /Target: inherit → explicit · compared with inherited baseline/);
+  assert.match(f.reviews.at(-1)!, /- env: LOWER/); assert.match(f.reviews.at(-1)!, /- allow_hosts: \["lower.example"\]/);
+  assert.match(f.reviews.at(-1)!, /- credential: <redacted>/); noPrivate(f.reviews);
+});
+
+test("compact review: oversized diffs reject without opening UI or mutating, then release the shared lease", async (t) => {
+  const f = await fixture(t);
+  const got = await f.call(set("global", "network.allow_hosts", Array.from({ length: 5000 }, (_, n) => `long-host-${n}.example`)));
+  assert.equal(got.details.outcome, "rejected"); assert.match(got.details.reason, /Review too large/);
+  assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0);
+  assert.equal((await f.call(set())).details.outcome, "applied");
+});
+
+test("compact review: changing adopted runtime while reviewing still conflicts without activation", async (t) => {
+  const f = await fixture(t);
+  f.control.getAgentRuntimePolicy = () => undefined;
+  f.choose(async () => {
+    f.control.getAgentRuntimePolicy = () => ({ settings: { cpus: 2 }, knownFields: ["cpus"], provenance: {}, verification: "created", adoptedAt: 1 });
+    return "Approve";
+  });
+  assert.equal((await f.call(set())).details.outcome, "conflict");
+  assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
+});
+
+test("compact setter renderer: historical full-review results cannot fall back to a JSON wall", async (t) => {
+  const f = await fixture(t);
+  const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as any;
+  const historical = { content: [{ type: "text" as const, text: "HISTORICAL_JSON_WALL" }], details: { outcome: "applied", saved: true, reloaded: true, runtimeStatus: "off", review: { desired: { old: "HISTORICAL_JSON_WALL" }, provenance: {} } } };
+  for (const expanded of [false, true]) {
+    const frame = f.tools.get("msb_config_set")!.renderResult!(historical, { expanded } as any, theme, {} as any).render(100).join("\n");
+    assert.match(frame, /Saved · reloaded · runtime off/); assert.doesNotMatch(frame, /HISTORICAL_JSON_WALL|provenance/);
+  }
+});
+
+test("compact review: renaming onto an inherited entry discloses the overwritten entry safely", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",value="A_PRIVATE_SENTINEL",allow_hosts=["a.example"]},{env="B",value="B_PRIVATE_SENTINEL",allow_hosts=["b.example"]}]\n');
+  const got = await f.call({ scope: "project", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "B", allowHosts: ["a.example"] } });
+  assert.equal(got.details.outcome, "applied");
+  assert.match(f.reviews.at(-1)!, /- allow_hosts: \["b.example"\]/);
+  assert.match(f.reviews.at(-1)!, /Rename replaces an existing entry/); noPrivate(got); noPrivate(f.reviews);
+});
+
+test("compact review: malformed shadowed native entry fields retain the strict JSON whitelist", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",VALUE="UNKNOWN_PRIVATE_SENTINEL",allow_hosts={body="UNRECOGNIZED_RAW_VALUE"}}]\n');
+  await writeFile(f.paths.project, "secrets = []\n");
+  const got = await f.call(set("global", "secrets", [{ env: "TOKEN", value: "NEW_PRIVATE_SENTINEL", allowHosts: ["new.example"] }]));
+  assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews);
+  assert.match(f.reviews.at(-1)!, /- allow_hosts: <invalid>/); assert.match(f.reviews.at(-1)!, /credential: <redacted> \(changed\)/);
+});
+
+
+const consequenceTheme = { fg: (role: string, text: string) => `<${role}>${text}</${role}>`, bold: (text: string) => text };
+const hostWriteWarning = "! Writable mount: the guest can change actual HOST files.";
+
+for (const type of ["dir", "file"] as const) for (const readonly of [false, true]) {
+  test(`inherited consequences: ${type} mount readonly=${readonly} reaches plain and themed backend review`, async (t) => {
+    const f = await fixture(t);
+    const hostPath = join(f.root, "data");
+    if (type === "dir") await mkdir(hostPath); else await writeFile(hostPath, "fixture");
+    const mount = { type, hostPath, guestPath: "/mnt/data", readonly, options: [] };
+    const policy = (value: typeof mount) => `mounts = [{type=${JSON.stringify(value.type)},host_path=${JSON.stringify(value.hostPath)},guest_path="/mnt/data",readonly=${value.readonly}}]\n`;
+    await writeFile(f.paths.global, "auto_start = false\n" + policy(mount));
+    await writeFile(f.paths.project, policy({ ...mount, readonly: true }));
+    const got = await f.call({ scope: "project", path: "mounts", operation: "inherit" });
+    assert.equal(got.details.outcome, "applied");
+    const lines = settingsDiff(got.details.review);
+    const plain = formatSettingsDiff(lines).join("\n");
+    const themed = formatSettingsDiff(lines, consequenceTheme).join("\n");
+    assert.equal(got.details.review.focus[0].writableMount, !readonly);
+    assert.equal(plain.includes(hostWriteWarning), !readonly);
+    assert.equal(f.reviews.at(-1)!.includes(hostWriteWarning), !readonly);
+    assert.equal(themed.includes(`<warning>${hostWriteWarning}</warning>`), !readonly);
+    if (!readonly) { assert.match(plain, /\+ readonly: false/); assert.match(themed, /<toolDiffAdded>false<\/toolDiffAdded>/); }
+    else assert.doesNotMatch(plain, /HOST/);
+    noPrivate(got);
+  });
+}
+
+for (const scope of ["global", "project"] as const) {
+  test(`inherited consequences: shadowed ${scope} target retains lower-scope writable HOST intent`, async (t) => {
+    const f = await fixture(t);
+    const hostPath = join(f.root, "data"); await mkdir(hostPath);
+    const writable = { type: "dir", hostPath, guestPath: "/mnt/data", readonly: false, options: [] };
+    const policy = `mounts = [{type="dir",host_path=${JSON.stringify(hostPath)},guest_path="/mnt/data",readonly=true}]\n`;
+    if (scope === "global") {
+      f.input.env!.PI_MSB_MOUNTS = JSON.stringify([writable]);
+      await writeFile(f.paths.global, "auto_start = false\n" + policy);
+      await writeFile(f.paths.project, policy);
+    } else {
+      await writeFile(f.paths.global, `auto_start = false\nmounts = [{type="dir",host_path=${JSON.stringify(hostPath)},guest_path="/mnt/data",readonly=false}]\n`);
+      await writeFile(f.paths.project, policy);
+      const temp = await f.editor.open("temporary"); temp.set("mounts", [{ ...writable, readonly: true }]); await temp.apply();
+    }
+    const got = await f.call({ scope, path: "mounts", operation: "inherit" });
+    assert.equal(got.details.outcome, "applied");
+    assert.equal(got.details.review.desired.before.mounts[0].readonly, true);
+    assert.equal(got.details.review.desired.after.mounts[0].readonly, true);
+    assert.equal(got.details.review.focus[0].writableMount, true);
+    assert.match(f.reviews.at(-1)!, /Desired value unchanged; scope intent only/);
+    assert.match(f.reviews.at(-1)!, /Shadowed/);
+    assert.ok(f.reviews.at(-1)!.includes(hostWriteWarning));
+    assert.ok(formatSettingsDiff(settingsDiff(got.details.review), consequenceTheme).join("\n").includes(`<warning>${hostWriteWarning}</warning>`));
+    noPrivate(got);
+  });
+}
+
+test("inherited consequences: native mount warnings remain isolated to the selected entry", async (t) => {
+  const f = await fixture(t);
+  const hostPath = join(f.root, "data"); await mkdir(hostPath);
+  const selected = { type: "dir", hostPath, guestPath: "/mnt/selected", readonly: true, options: [] };
+  const sibling = { ...selected, guestPath: "/mnt/unrelated", readonly: false };
+  const draft = await f.editor.open("global"); draft.set("mounts", [selected, sibling]); await draft.apply();
+  const edit = { scope: "global", path: "mounts", operation: "upsert", value: { ...selected, options: ["nodev"] } };
+  const safe = await f.call(edit); assert.equal(safe.details.outcome, "applied");
+  assert.equal(safe.details.review.focus[0].writableMount, false);
+  for (const theme of [undefined, consequenceTheme]) {
+    const text = formatSettingsDiff(settingsDiff(safe.details.review), theme).join("\n");
+    assert.doesNotMatch(text, /HOST|unrelated/);
+  }
+  const writable = await f.call({ ...edit, value: { ...edit.value, readonly: false } });
+  assert.equal(writable.details.outcome, "applied");
+  assert.equal(writable.details.review.focus[0].writableMount, true);
+  assert.ok(f.reviews.at(-1)!.includes(hostWriteWarning));
+  assert.doesNotMatch(f.reviews.at(-1)!, /unrelated/);
+});
+
+for (const [path, inherited, override] of [
+  ["block_third_party", false, true], ["pass_through_tools", ["trusted"], []],
+  ["allow_host_execution", true, false], ["allow_skill_reads", true, false], ["fallback_mode", "host", "block"],
+] as const) {
+  test(`inherited consequences: shadowed ${path} inherit and no-op retain their specific HOST warning`, async (t) => {
+    const f = await fixture(t);
+    await writeFile(f.paths.global, `auto_start = false\n${path} = ${JSON.stringify(inherited)}\n`);
+    await writeFile(f.paths.project, `${path} = ${JSON.stringify(override)}\n`);
+    const temp = await f.editor.open("temporary"); temp.set(path, override); await temp.apply();
+    for (const outcome of ["applied", "no_op"]) {
+      const got = await f.call({ scope: "project", path, operation: "inherit" });
+      assert.equal(got.details.outcome, outcome);
+      assert.deepEqual(got.details.review.focus[0].hostBypass, [path]);
+      const lines = settingsDiff(got.details.review);
+      const hostWarnings = lines.filter((line) => line.kind === "warning" && line.text.includes("HOST"));
+      assert.equal(hostWarnings.length, 1); assert.ok(hostWarnings[0]!.text.includes(path));
+      assert.match(f.reviews.at(-1)!, /HOST/); assert.match(f.reviews.at(-1)!, /Shadowed/);
+      assert.match(formatSettingsDiff(lines, consequenceTheme).join("\n"), /<warning>! HOST/);
+      noPrivate(got);
+    }
+  });
+}

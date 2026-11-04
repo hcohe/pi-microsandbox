@@ -59,6 +59,7 @@ extensions/pi-msb/config-template.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/control-panel.ts required
 extensions/pi-msb/settings.ts required
+extensions/pi-msb/settings-diff.ts required
 extensions/pi-msb/settings-json.ts required
 extensions/pi-msb/settings-redaction.ts required
 extensions/pi-msb/settings-approval.ts required

@@ -97,16 +97,27 @@ execution. `allow_host_execution` does not waive it. No UI, print/JSON mode, or 
 competing panel/review rejects without mutation. Interactive RPC requires a client
 that supports Pi's UI selector; there is no timeout/automatic approval.
 
-The sanitized review identifies scope, setting, operation, raw before/after,
-desired before/after, known adopted runtime, collection origins, promotions,
-shadowing, replacement/removal and restart/guest-state-loss effects. HOST bypass
-warnings include pass-through tools and `block_third_party = false`.
+Approval shows a compact diff, not a configuration dump: a short accented
+heading, muted scope/setting/entry identity, and only added/removed/changed
+values in your theme's diff colors. Native entry edits omit siblings and
+unchanged fields. Credentials/references stay `<redacted>`; a real rotation
+shows `(changed)` even when both safe values look identical. Retained credentials
+are not marked changed.
+
+Target-scope assignment and inherited-baseline context remain distinct from
+desired settings. No-op, promotion and higher-scope shadowing are explicit, even
+when the effective value does not change. Only relevant consequences accompany
+the diff: restart/guest-state loss, inactive sandbox start, whole-list replacement
+or clearing, removal/inherit, writable host mounts, and the proposal's HOST bypass
+policy (including pass-through tools and `block_third_party = false`). Unrelated
+HOST reminders and full raw/desired/adopted/provenance JSON are not displayed.
 
 In TUI, Cancel is initially selected. Scroll with arrows/j/k, PageUp/PageDown,
 or g/G; Tab/left/right chooses Cancel/Approve, Enter activates, Escape cancels.
 Approve stays disabled until the review's end has been visible. Resize as needed;
-viewports below 32×10 cannot approve. RPC sends the complete sanitized review in
-a Cancel-first selector. Oversized reviews reject instead of hiding content.
+viewports below 32×10 cannot approve. RPC sends the equivalent compact plain-text
+diff, without ANSI, in a Cancel-first selector. Oversized diffs reject instead of
+hiding changed values.
 Abort, cancellation, session replacement or changed source/ephemeral/runtime
 state invalidates approval; nothing is automatically rebased/retried.
 
@@ -117,3 +128,9 @@ while off adopts extension policy but does not claim a running VM. Environment-
 disabled reloads report saved-but-reload-failed. `apply_failed` with
 `saved: "unknown"` means an I/O error may have occurred after atomic replacement;
 inspect storage before retrying. No success result means only persistence.
+
+The setter's transcript row does not echo raw arguments. Results show a brief,
+truthful save/reload outcome; expanding shows the same focused diff, never the
+full review JSON. Model-facing text is compact too, while structured `details`
+retain the complete sanitized review and machine-readable outcome. The read-only
+`msb_config_get` JSON inventory is unchanged.

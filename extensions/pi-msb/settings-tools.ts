@@ -1,7 +1,8 @@
 import { approveSettings } from "./settings-approval.ts";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { HOST_BOUNDARY_WARNINGS } from "./control-panel.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { formatSettingsDiff, settingsDiff, settingsOutcome } from "./settings-diff.ts";
 import { COLLECTION_REMOVALS, SETTINGS_PATHS, SettingsConflictError, type SettingsDraft } from "./settings.ts";
 import type { Config, MsbControl } from "./types.ts";
 
@@ -71,6 +72,10 @@ function mutate(draft: SettingsDraft, input: Request): void {
 function result(details: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 }
+function setterResult(details: Record<string, unknown>) {
+  const lines = details.review ? formatSettingsDiff(settingsDiff(details.review as Record<string, unknown>)) : [];
+  return { content: [{ type: "text" as const, text: [settingsOutcome(details), ...lines].join("\n") }], details };
+}
 function runtime(control: MsbControl) {
   return {
     status: control.getState().status,
@@ -96,6 +101,22 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
     name: "msb_config_set", label: "Propose Microsandbox setting",
     description: "Propose ONE setting operation in ONE explicit scope. Every invocation requires fresh, cancel-first user approval. No headless mutation. Arrays set replaces/clears the whole list; prefer native upsert/remove to preserve siblings and credentials. Ephemeral lasts only this session. No lifecycle/reset/file-path overrides.",
     parameters, executionMode: "sequential",
+    // Arguments may contain credentials or repeat them in arbitrary identity fields.
+    // Until execute has produced a bound sanitized review, display no argument data.
+    renderCall(_args, theme) {
+      return new Text(theme.bold(theme.fg("accent", "Microsandbox setting")), 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      if (isPartial) return new Text(theme.fg("muted", "Awaiting configuration outcome…"), 0, 0);
+      const details = result.details as Record<string, unknown> | undefined;
+      if (context.isError || !details || typeof details.outcome !== "string") return new Text(theme.fg("error", "Configuration tool failed · no confirmed activation. Request a fresh review."), 0, 0);
+      const failed = !["applied", "no_op", "cancelled"].includes(details.outcome);
+      const lines = details.review ? settingsDiff(details.review as Record<string, unknown>) : [];
+      return new Text([
+        theme.fg(failed ? "error" : "muted", settingsOutcome(details)),
+        ...formatSettingsDiff(expanded ? lines : lines.slice(0, 1), theme),
+      ].join("\n"), 0, 0);
+    },
     async execute(_id, params, signal, _onUpdate, ctx) {
       let draft: SettingsDraft | undefined;
       let release: (() => void) | undefined;
@@ -103,11 +124,11 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
       let saved = false;
       try {
         const input = request(params);
-        if (!ctx.hasUI || !["tui", "rpc"].includes(ctx.mode)) return result({ outcome: "rejected", reason: "Configuration changes require explicit user approval in an interactive TUI or RPC UI." });
-        if (signal?.aborted) return result({ outcome: "cancelled" });
+        if (!ctx.hasUI || !["tui", "rpc"].includes(ctx.mode)) return setterResult({ outcome: "rejected", reason: "Configuration changes require explicit user approval in an interactive TUI or RPC UI." });
+        if (signal?.aborted) return setterResult({ outcome: "cancelled" });
         const editor = control.settings!;
         const lease = editor.acquireInteraction();
-        if (!lease) return result({ outcome: "rejected", reason: "Another settings panel or review is open. Retry as a new invocation after it closes." });
+        if (!lease) return setterResult({ outcome: "rejected", reason: "Another settings panel or review is open. Retry as a new invocation after it closes." });
         release = lease.release;
         const abort = AbortSignal.any([lease.signal, ...(signal ? [signal] : [])]);
         const identity = session(ctx);
@@ -121,36 +142,25 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
         const preview = await (control.previewSettings?.(draft) ?? draft.preview());
         const review = await draft.reviewForApproval(preview.effect, runtime(control));
         check();
-        const title = [
-          "Approve ONE Microsandbox configuration change?",
-          `Scope: ${input.scope}. Setting: ${input.path}. Operation: ${input.operation}.`,
-          input.scope === "ephemeral" ? "Memory only until session/workspace identity changes; no disk write." : "Persist host-owned defaults for this scope; reload only this session. Other sessions pick up on their next start/reload.",
-          "HOST boundary reminders below describe consequences WHEN configured, not changes to every listed field:",
-          ...Object.values(HOST_BOUNDARY_WARNINGS),
-          "Host bypass, network, mount and environment settings can widen access. Existing host-execution permission does NOT approve configuration changes.",
-          preview.effect === "restart" ? "RESTART authorized by approval: guest ephemeral state and nested containers may be lost." : `Runtime effect: ${preview.effect}. No guest recreation authorized.`,
-          "Approved reload may start an inactive sandbox when desired auto_start=true; active guest recreation requires the restart approval above.",
-          "set on an array REPLACES/CLEARS that scope's entire list. remove/inherit can be destructive. Collections show origins, promotion and shadowing. Before/after below are desired, not adopted VM state.",
-          JSON.stringify(review, null, 2),
-        ].join("\n");
+        const diff = settingsDiff(review);
         // Refuse oversized proposals instead of hiding affected values from approval.
-        if (title.length > 48_000) return result({ outcome: "rejected", reason: "Review too large. Use a smaller per-entry operation." });
+        if (formatSettingsDiff(diff).join("\n").length > 48_000) return setterResult({ outcome: "rejected", reason: "Review too large. Use a smaller per-entry operation." });
         phase = "review";
-        const approved = await approveSettings(ctx, title, abort);
-        if (!approved || abort.aborted) return result({ outcome: "cancelled" });
+        const approved = await approveSettings(ctx, diff, abort);
+        if (!approved || abort.aborted) return setterResult({ outcome: "cancelled" });
         check();
         phase = "commit";
         const applied = await draft.apply({ guard: check });
         saved = applied.saved;
-        if (!saved) return result({ outcome: "no_op", saved: false, reloaded: false, review });
+        if (!saved) return setterResult({ outcome: "no_op", saved: false, reloaded: false, review });
         phase = "reload";
         await control.reload({ allowRestart: preview.effect === "restart", guard: async () => { check(); await applied.assertUnchanged?.(); check(); } });
-        return result({ outcome: "applied", saved: true, reloaded: true, runtimeStatus: control.getState().status, review });
+        return setterResult({ outcome: "applied", saved: true, reloaded: true, runtimeStatus: control.getState().status, review });
       } catch (error) {
-        if (phase === "reload") return result({ outcome: "saved_but_reload_failed", saved, reloaded: false, reason: "Settings were saved but not fully activated. Inspect settings/runtime and request a new approved change or use /msb to reload." });
-        if (signal?.aborted) return result({ outcome: "cancelled" });
-        if (error instanceof SettingsConflictError) return result({ outcome: "conflict", saved: false, reloaded: false, reason: "Sources, ephemeral settings, session or runtime changed. Request a fresh review; nothing was retried." });
-        return result({ outcome: phase === "commit" ? "apply_failed" : "rejected", saved: phase === "commit" ? "unknown" : false, reloaded: false,
+        if (phase === "reload") return setterResult({ outcome: "saved_but_reload_failed", saved, reloaded: false, reason: "Settings were saved but not fully activated. Inspect settings/runtime and request a new approved change or use /msb to reload." });
+        if (signal?.aborted) return setterResult({ outcome: "cancelled" });
+        if (error instanceof SettingsConflictError) return setterResult({ outcome: "conflict", saved: false, reloaded: false, reason: "Sources, ephemeral settings, session or runtime changed. Request a fresh review; nothing was retried." });
+        return setterResult({ outcome: phase === "commit" ? "apply_failed" : "rejected", saved: phase === "commit" ? "unknown" : false, reloaded: false,
           reason: phase === "commit" ? "Persistence failed; storage may have changed after an I/O error. Inspect before retrying. Runtime was not reloaded." : "Invalid or unavailable settings proposal. Check setting, scope, value shape, credential references and mount safety. Nothing applied." });
       } finally { draft?.discard(); release?.(); }
     },

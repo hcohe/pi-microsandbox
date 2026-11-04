@@ -60,13 +60,18 @@ Run `just dev-image` by itself when you only need to refresh the local image.
 revalidates runtime arguments inside execute and always requests explicit
 approval. `settings-json.ts` is the strict JSON/redaction boundary, and
 `settings-approval.ts` provides a bounded scrollable Cancel-first public custom
-overlay in TUI (documented native selector in interactive RPC). Print/JSON/no-UI
-modes cannot mutate. The panel and tool share one editor modal lease. Tools use
+overlay in TUI (documented native selector in interactive RPC). `settings-diff.ts`
+shares semantic added/removed/context/warning lines across TUI, plain-text RPC,
+and setter results. Build display data only from the sanitized approval-bound
+review: private comparisons in SettingsDraft emit changed-field metadata before
+credential masking, not raw arguments or credential/reference text. The setter's
+public tool renderers never echo arguments or dump review JSON; getter output
+remains full JSON. Print/JSON/no-UI modes cannot mutate. The panel and tool share one editor modal lease. Tools use
 the same SettingsDraft CRUD, validation, atomic persistence and controller reload
 rather than their own writer. Read/proposal construction must never bootstrap.
 
-`settings-tools.test.ts`, `settings-approval.test.ts` and `settings.test.ts` cover
-all layers/inventory/origins, headless reads, serialized redaction, sparse/entry
+`settings-tools.test.ts`, `settings-diff.test.ts`, `settings-approval.test.ts` and
+`settings.test.ts` cover all layers/inventory/origins, headless reads, serialized redaction, sparse/entry
 isolation, approval cancellation/concurrency/races, hidden owned credentials,
 mount guards and truthful save/reload failure. `tools.test.ts` checks exact-name
 routing exemptions. The gate requires both an exact tool name and public
@@ -75,8 +80,9 @@ missing/mismatched metadata fails closed, with no basename/directory fallback.
 Real-loader tests include a symlinked package entry and duplicate-winning foreign
 registrations under both selected runtimes. `control-panel-runtime.test.ts` also executes both actual
 loaded config tools using the native context and both terminal renderers,
-including scrollable review, Cancel default, Escape, abort, deliberate approval,
-wrapped/narrow/tall/resize composition, live/restart fake-SDK reconciliation and
+including actual theme diff colors, compact masked secret edits/rotations,
+quiet setter call/result rendering, scrollable review, Cancel default, Escape,
+abort, deliberate approval, wrapped/narrow/tall/resize composition, live/restart fake-SDK reconciliation and
 focus restoration. SDK/terminals are
 doubled; none of these tests executes a live VM. Set `PI_PACKAGE_DIR` to this
 checkout's pinned coding-agent package when running direct Node tests so an
