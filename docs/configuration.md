@@ -10,6 +10,11 @@ to apply each change to the current running sandbox, project defaults or global
 defaults, or cancel. Collapsed settings trees sit directly below MICROSANDBOX and edit desired policy; Status shows
 read-only runtime metadata, not duplicate settings.
 
+The model can inspect settings headlessly with `msb_config_get` or propose one
+ephemeral/project/global change with `msb_config_set`. Changes always require
+fresh explicit user approval; secrets and credential references are masked.
+See the [tool schemas and scope lifetimes](tools.md).
+
 Settings take precedence in this order: built-ins < environment
 < **host-owned defaults** < **host-owned project overrides** < **ephemeral settings**.
 Ephemeral settings are memory-only and authoritative, including empty lists;
@@ -48,7 +53,8 @@ allow_hosts = ["registry.npmjs.org"]
 
 ## Host-owned project overrides
 
-Keep settings the agent must not change outside the mounted worktree:
+Keep settings protected from unapproved sandbox writes outside the mounted
+worktree. Configuration tools can change them only after explicit user approval:
 
 ```text
 <agent-dir>/pi-microsandbox/default.toml

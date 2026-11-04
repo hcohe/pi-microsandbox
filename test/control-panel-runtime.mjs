@@ -35,7 +35,7 @@ try {
   const tui = await import(pathToFileURL(require.resolve("@earendil-works/pi-tui")));
   const loaded = await loadExtensions([join(import.meta.dirname, "control-panel-runtime-extension.ts")], cwd);
   assert.deepEqual(loaded.errors, []);
-  const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, {}, {});
+  const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, { getSessionId: () => "ui-runtime", getEntries: () => [] }, {});
   const command = loaded.extensions[0].commands.get("msb");
   assert.ok(command);
   let savedScopes = false;
@@ -199,12 +199,77 @@ try {
         output = ""; ui.renderNow(true); assert.match(output, /UNDERLYING/);
         input("x"); assert.equal(baseKeys, launch + 1);
       }
+      await loaded.extensions[0].commands.get("msb-fixture-enable").handler("", runner.createCommandContext());
+      // Execute actual loaded configuration tools with native extension UI/context.
+      const inspect = runner.getToolDefinition("msb_config_get");
+      const setter = runner.getToolDefinition("msb_config_set");
+      assert.ok(inspect); assert.ok(setter);
+      const inspection = await inspect.execute("inspect", {}, undefined, undefined, runner.createContext());
+      assert.equal(inspection.details.outcome, "inspected");
+      assert.doesNotMatch(JSON.stringify(inspection), /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+      for (const action of ["default-cancel", "escape", "approve", "apply", "restart", "abort", "too-small"]) {
+        panel = undefined;
+        const abort = new AbortController();
+        const proposal = action === "apply" ? { scope: "ephemeral", path: "show_footer", operation: "set", value: !inspection.details.desired.show_footer }
+          : action === "restart" ? { scope: "ephemeral", path: "memory_mib", operation: "set", value: inspection.details.desired.memory_mib + 128 }
+          : { scope: "ephemeral", path: "cpus", operation: "inherit" };
+        const pending = setter.execute("config", proposal, abort.signal, undefined, runner.createContext());
+        let failure; pending.catch((error) => { failure = error; });
+        for (let n = 0; n < 500 && !panel && !failure; n++) await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(failure, undefined); assert.ok(panel, "configuration execute must open a real approval overlay");
+        assert.equal(ui.hasOverlay(), true);
+        for (const [width, height] of [[32, 10], [80, 24], [24, 2], [120, 40], [80, 24]]) {
+          terminal.columns = width; terminal.rows = height;
+          const frame = panel.render(width);
+          assert.equal(frame.length, height); assert.ok(frame.every((line) => tui.visibleWidth(line) === width));
+          assert.doesNotMatch(frame.join("\n"), /PRIVATE_SENTINEL|\$FILE:|\$ENV:|UNDERLYING/);
+        }
+        const key = (value) => { input(value); ui.renderNow(true); };
+        if (action === "default-cancel") key("\r");
+        if (action === "escape") key("\x1b");
+        if (action === "abort") abort.abort();
+        if (action === "too-small") { terminal.columns = 24; terminal.rows = 2; panel.render(24); key("\t"); key("G"); key("\r"); }
+        if (["approve", "apply", "restart"].includes(action)) {
+          assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Approve disabled/);
+          key("G"); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /End seen/);
+          key("\t"); key("\r");
+        }
+        const result = await pending;
+        assert.equal(result.details.outcome, action === "approve" ? "no_op" : ["apply", "restart"].includes(action) ? "applied" : "cancelled");
+        if (["apply", "restart"].includes(action)) { assert.equal(result.details.saved, true); assert.equal(result.details.reloaded, true); assert.equal(result.details.runtimeStatus, "active"); }
+        assert.equal(ui.hasOverlay(), false); assert.equal(editor.focused, true);
+        terminal.columns = 80; terminal.rows = 24;
+      }
+      await loaded.extensions[0].commands.get("msb-fixture-stop").handler("", runner.createCommandContext());
     } finally { ui.stop(); }
+  }
+  // Actual entry registration provenance, including symlink loading and a duplicate-winning extension.
+  const packageAlias = join(root, "package-link");
+  await symlink(join(import.meta.dirname, ".."), packageAlias);
+  const entry = join(packageAlias, "extensions/pi-msb/index.ts");
+  const duplicate = join(root, "duplicate-config-tools.mjs");
+  await writeFile(duplicate, `export default function(pi) { for (const name of ["msb_config_get", "msb_config_set"]) pi.registerTool({name,label:name,description:"duplicate host tool",parameters:{type:"object",properties:{}},execute:async()=>({content:[],details:{}})}); }`);
+  for (const collision of [false, true]) {
+    const gate = await loadExtensions(collision ? [duplicate, entry] : [entry], cwd);
+    assert.deepEqual(gate.errors, []);
+    const gateRunner = new ExtensionRunner(gate.extensions, gate.runtime, cwd, { getSessionId: () => "gate", getEntries: () => [] }, {});
+    let provenance = "actual";
+    gateRunner.bindCore({ getAllTools: () => gateRunner.getAllRegisteredTools().map(({definition, sourceInfo}) => ({ ...definition,
+      sourceInfo: provenance === "missing" ? undefined : provenance === "mismatch" ? { ...sourceInfo, path: join(import.meta.dirname, "control-panel-runtime-extension.ts") } : sourceInfo,
+    })) }, { getModel: () => undefined, getScopedModels: () => [], isIdle: () => true, isProjectTrusted: () => true, getSignal: () => undefined,
+      hasPendingMessages: () => false, getSystemPrompt: () => "" });
+    for (const source of ["actual", "missing", "mismatch"]) {
+      provenance = source;
+      for (const toolName of ["msb_config_get", "msb_config_set"]) {
+        const answer = await gateRunner.emitToolCall({ type: "tool_call", toolName, toolCallId: "gate", input: {} });
+        assert.equal(answer?.block === true, collision || source !== "actual", `${source}: collision=${collision}: ${toolName}`);
+      }
+    }
   }
   const policy = await readFile(join(canonicalAgent, "pi-microsandbox/default.toml"), "utf8");
   assert.ok(policy.includes("$FILE:../../token"));
   assert.doesNotMatch(policy, /RUNTIME_PRIVATE_SENTINEL/);
   assert.match(policy, /"show_footer" = false/);
   assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /"show_footer" = true/);
-  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input and focus teardown (fake SDK)`);
+  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, config tools approval/default-cancel/abort/resize/provenance-collision-gate and focus teardown (fake SDK)`);
 } finally { await rm(root, { recursive: true, force: true }); }

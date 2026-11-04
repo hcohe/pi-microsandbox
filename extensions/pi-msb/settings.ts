@@ -6,6 +6,8 @@ import {
   normalizeConfigPath, parseTomlConfig, readRawConfig, removeOverride,
   resolveConfig, toEffectiveToml, validateConfig, type ResolveConfigInput,
 } from "./config.ts";
+import type { SettingsSanitizer } from "./settings-redaction.ts";
+import { projectSettingsJson } from "./settings-json.ts";
 import type { Config, DeepPartial, ResolvedConfig } from "./types.ts";
 
 export type SettingsScope = "temporary" | "project" | "global";
@@ -74,6 +76,8 @@ export interface SettingsSnapshot {
 export interface SettingsApplyResult extends SettingsPreview {
   saved: boolean;
   runtimeApplied: false;
+  /** Private activation guard for an approval-bound commit; never serialize this result. */
+  assertUnchanged?: () => Promise<void>;
 }
 
 const snake = (key: string): string => key.replace(/MiB/g, "Mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -238,11 +242,14 @@ export class SettingsDraft {
   #scopeBase?: ResolvedConfig;
   #referencePaths: { global: string; project: string };
   #closed = false;
+  #reviewState: string;
+  #sanitize: SettingsSanitizer;
+  #approval?: { state: string; patch: string; candidate: string; afterCommit: () => Promise<void> };
   #patch = new Map<string, DraftPatch>();
   readonly scope: SettingsScope;
   readonly path: string | null;
-  constructor(editor: SettingsEditor, scope: SettingsScope, path: string | null, source: Source, revision: number, base: ResolvedConfig, referencePaths: { global: string; project: string }) {
-    this.#editor = editor; this.scope = scope; this.path = path; this.#source = source; this.#revision = revision; this.#contextRevision = editor.contextRevision; this.#base = base; this.#referencePaths = referencePaths;
+  constructor(editor: SettingsEditor, scope: SettingsScope, path: string | null, source: Source, revision: number, base: ResolvedConfig, referencePaths: { global: string; project: string }, reviewState: string, sanitize: SettingsSanitizer) {
+    this.#editor = editor; this.scope = scope; this.path = path; this.#source = source; this.#revision = revision; this.#contextRevision = editor.contextRevision; this.#base = base; this.#referencePaths = referencePaths; this.#reviewState = reviewState; this.#sanitize = sanitize;
   }
   /** I/O uses path; raw relative FILE references use the original lexical policy location. */
   get #referencePath(): string | null { return this.scope === "temporary" ? null : this.#referencePaths[this.scope]; }
@@ -308,15 +315,21 @@ export class SettingsDraft {
   /** CRUD retains identity-level intent; it never exports unrelated effective entries across scopes. */
   upsertSecret(secret: { env: string; allowHosts: string[]; value?: string }, previousEnv = secret.env): void {
     this.#assertOpen();
-    const prior = (this.#visibleCollection("secrets") as Config["secrets"]).find((entry) => entry.env === previousEnv);
+    const visible = (this.#visibleCollection("secrets") as Config["secrets"]).find((entry) => entry.env === previousEnv);
+    const patch = this.#patch.get("secrets");
+    // A hidden target-owned credential may be retained, but never resurrect discarded intent.
+    const mayRetainOwned = !patch || !!patch.entries && !patch.entries.some((entry) => entry.identity === previousEnv || entry.previousIdentity === previousEnv);
+    const owned = !visible && mayRetainOwned ? (this.#ownCollection("secrets") as Config["secrets"] | undefined)?.find((entry) => entry.env === previousEnv) : undefined;
+    const prior = visible ?? owned;
+    const ownedOrigin: EntryOrigin | undefined = owned ? { source: this.scope === "global" ? "host-default" : this.scope === "project" ? "host-project" : "temporary", path: this.#referencePath, rank: scopeRank(this.scope) } : undefined;
     const value = secret.value ?? prior?.value;
     if (value === undefined) throw new ConfigError(["new secrets require a value or reference"]);
     const previous = this.#latestEntry("secrets", previousEnv);
     this.#editEntry("secrets", {
       operation: "upsert", identity: secret.env, previousIdentity: previousEnv,
       value: { ...secret, value },
-      valueOrigin: secret.value !== undefined ? this.#referencePath : (previous ? previous.valueOrigin ?? null : this.#origin("secrets", previousEnv).path),
-      origin: previous?.origin ?? this.#origin("secrets", previousEnv),
+      valueOrigin: secret.value !== undefined ? this.#referencePath : (previous ? previous.valueOrigin ?? null : (ownedOrigin ?? this.#origin("secrets", previousEnv)).path),
+      origin: previous?.origin ?? ownedOrigin ?? this.#origin("secrets", previousEnv),
     });
   }
   removeSecret(env: string): void { this.#removeEntry("secrets", env); }
@@ -397,19 +410,64 @@ export class SettingsDraft {
     this.#editor.assertRevision(this.#revision);
   }
   discard(): void {
+    this.#approval = undefined; this.#reviewState = ""; this.#sanitize = (value) => value;
     this.#patch.clear(); this.#source = { text: null, raw: {}, version: "closed" };
     this.#base = { config: structuredClone(DEFAULT_CONFIG) as Config, provenance: {}, warnings: [] };
     this.#scopeBase = this.#base;
     this.#closed = true;
   }
   async preview(runtimeBaseline?: Config): Promise<SettingsPreview> { return (await this.#candidate(runtimeBaseline)).preview; }
-  async apply(): Promise<SettingsApplyResult> {
+  /** Bind the complete source state and private intent to this exact review; never rebase approval. */
+  async reviewForApproval(effect: SettingsEffect, adoptedRuntime?: unknown): Promise<Record<string, unknown>> {
+    await this.#assertReviewState(this.#reviewState);
     const candidate = await this.#candidate();
+    await this.#assertReviewState(this.#reviewState);
+    this.#approval = {
+      state: this.#reviewState, patch: JSON.stringify([...this.#patch]), candidate: hash(JSON.stringify(candidate.next)),
+      afterCommit: await this.#editor.guardAfterCommit(this.#reviewState, this.path, this.path ? serializeRaw(candidate.raw) : null, candidate.next),
+    };
+    const { effectiveToml: _privateToml, ...preview } = candidate.preview;
+    preview.changes = preview.changes.map((change) => {
+      const safeValue = (value: unknown) => {
+        if (value === undefined) return null;
+        const container: Record<string, unknown> = {};
+        patchRaw(container, normalizeConfigPath(change.path), value, false);
+        return rawValue(projectSettingsJson(container), normalizeConfigPath(change.path));
+      };
+      return { ...change, before: safeValue(change.before), after: safeValue(change.after) };
+    });
+    return this.#sanitize({
+      adoptedRuntime, ...preview, effect, scope: this.scope === "temporary" ? "ephemeral" : this.scope,
+      storage: { before: projectSettingsJson(this.#source.raw), changes: preview.changes },
+      desired: { before: projectSettingsJson(this.#base.config), after: projectSettingsJson(candidate.next.config) },
+    }, [this.#source.raw, this.#base.config, candidate.raw, candidate.temporary, candidate.next.config]);
+  }
+  async #assertReviewState(expected: string): Promise<void> {
+    try {
+      this.#assertOpen();
+      if (expected !== await this.#editor.reviewState()) throw new SettingsConflictError();
+      this.#assertOpen();
+    } catch { throw new SettingsConflictError(); }
+  }
+  async apply(options?: { guard?: () => void }): Promise<SettingsApplyResult> {
+    const guard = async (resolved?: ResolvedConfig) => {
+      options?.guard?.();
+      if (this.#approval) {
+        if (this.#approval.patch !== JSON.stringify([...this.#patch])) throw new SettingsConflictError();
+        await this.#assertReviewState(this.#approval.state);
+        if (resolved && this.#approval.candidate !== hash(JSON.stringify(resolved))) throw new SettingsConflictError();
+      }
+      options?.guard?.();
+    };
+    await guard();
+    const candidate = await this.#candidate();
+    await guard(candidate.next);
     if (!candidate.preview.changes.length) return { ...candidate.preview, saved: false, runtimeApplied: false };
-    const next = await this.#editor.commit(this.#revision, this.scope, this.path, this.#source, candidate.raw, candidate.temporary);
+    const next = await this.#editor.commit(this.#revision, this.scope, this.path, this.#source, candidate.raw, candidate.temporary, guard);
     const preview = this.#preview(candidate.preview.changes, next);
+    const assertUnchanged = this.#approval?.afterCommit;
     this.discard();
-    return { ...preview, saved: true, runtimeApplied: false };
+    return { ...preview, saved: true, runtimeApplied: false, assertUnchanged };
   }
   async #candidate(runtimeBaseline?: Config) {
     this.#assertOpen();
@@ -448,7 +506,7 @@ export class SettingsDraft {
     const collections: SettingsCollectionIntent[] = [];
     for (const [path, patch] of this.#patch) {
       if (!COLLECTION_REMOVALS[path]) continue;
-      const owner = (identity: string): string | undefined => next.provenance[path === "secrets" || path === "mounts" ? `${path}[${identity}]` : normalizeConfigPath(path).join(".")];
+      const owner = (identity: string): string | undefined => next.provenance[path === "secrets" || path === "mounts" ? `${path}[${identity}]` : normalizeConfigPath(path).join(".")] ?? next.provenance[normalizeConfigPath(path).join(".")];
       const higher = (identity: string): boolean => (LAYER_RANK[owner(identity) ?? ""] ?? 0) > targetRank;
       if (patch.entries) for (const entry of patch.entries) {
         const present = (get(next.config, normalizeConfigPath(path)) as unknown[]).some((item) => entryIdentity(path, item) === entry.identity);
@@ -468,6 +526,10 @@ export class SettingsDraft {
   }
 }
 
+export class SettingsConflictError extends Error {
+  constructor() { super("Configuration changed; request a fresh review."); }
+}
+
 /** One instance per integration, not per UI. Never serializes temporary state. */
 export class SettingsEditor {
   #input: ResolveConfigInput;
@@ -476,8 +538,16 @@ export class SettingsEditor {
   #contextRevision = 0;
   #sessionId: string;
   #busy = false;
+  #interaction?: AbortController;
   #workspaceIdentity: string;
   constructor(input: ResolveConfigInput, sessionId: string) { this.#input = input; this.#sessionId = sessionId; this.#workspaceIdentity = resolve(input.repoRoot ?? input.cwd); }
+  /** Shared panel/tool modal lease. A competing caller fails rather than replacing a review. */
+  acquireInteraction(): { signal: AbortSignal; release: () => void } | undefined {
+    if (this.#interaction) return;
+    const controller = new AbortController();
+    this.#interaction = controller;
+    return { signal: controller.signal, release: () => { if (this.#interaction === controller) this.#interaction = undefined; } };
+  }
   get contextRevision(): number { return this.#contextRevision; }
   assertContextRevision(revision: number): void { if (revision !== this.#contextRevision) throw new ConfigError(["settings context changed; reopen the panel"]); }
   async rebaseSecretReference(value: string, sourcePath: string | null): Promise<string> {
@@ -490,17 +560,22 @@ export class SettingsEditor {
     if (this.#busy) throw new ConfigError(["settings apply in progress"]);
     if (sessionId !== this.#sessionId) { this.#temporary = {}; this.#contextRevision++; }
     else if (input.cwd !== this.#input.cwd) this.#contextRevision++;
+    this.#interaction?.abort();
     this.#input = input; this.#sessionId = sessionId; this.#revision++;
+  }
+  assertSession(input: ResolveConfigInput, sessionId: string): void {
+    if (sessionId !== this.#sessionId || input.cwd !== this.#input.cwd || resolve(input.repoRoot ?? input.cwd) !== this.#workspaceIdentity) throw new SettingsConflictError();
   }
   /** Call on every discovered workspace change, before resolving/booting the new session. */
   configureSession(input: ResolveConfigInput, sessionId: string): void {
     if (this.#busy) throw new ConfigError(["settings apply in progress"]);
     if (sessionId !== this.#sessionId || resolve(input.repoRoot ?? input.cwd) !== this.#workspaceIdentity) { this.#temporary = {}; this.#contextRevision++; }
     else if (input.cwd !== this.#input.cwd) this.#contextRevision++;
+    this.#interaction?.abort();
     this.#input = input; this.#sessionId = sessionId; this.#workspaceIdentity = resolve(input.repoRoot ?? input.cwd); this.#revision++;
   }
   /** Call on session shutdown even when the same session may later resume. */
-  endSession(): void { this.#temporary = {}; this.#revision++; this.#contextRevision++; }
+  endSession(): void { this.#interaction?.abort(); this.#temporary = {}; this.#revision++; this.#contextRevision++; }
   assertRevision(revision: number): void { if (revision !== this.#revision) throw new ConfigError(["stale settings draft; reopen it"]); }
   async open(scope: SettingsScope): Promise<SettingsDraft> {
     const revision = this.#revision;
@@ -510,10 +585,76 @@ export class SettingsEditor {
     const anchor = await captureAnchor(targets.agentDir, targets.canonicalAgentDir);
     const path = scope === "temporary" ? null : paths[scope];
     const source = path ? await readSource(path) : { text: null, raw: structuredClone(this.#temporary) as Record<string, unknown>, version: "memory" };
-    const base = await this.resolveCandidate(null, null, this.#temporary);
+    const view = await this.#readView();
+    const base = view.resolved;
+    if (path && source.text !== view.sources[path]) throw new SettingsConflictError();
     await assertAnchor(anchor);
     this.assertRevision(revision);
-    return new SettingsDraft(this, scope, path, { ...source, anchor }, revision, base, targets.lexicalPaths);
+    return new SettingsDraft(this, scope, path, { ...source, anchor }, revision, base, targets.lexicalPaths, view.fingerprint, view.sanitize);
+  }
+  /** Read each policy once. No bootstrap, secret resolution, SDK, or overrides are involved. */
+  #viewFingerprint(revision: number, sources: Record<string, string | null>, resolved: ResolvedConfig, versions: Record<string, string>): string {
+    return hash(JSON.stringify({ revision, sources, resolved, env: this.#input.env ?? process.env, versions }));
+  }
+  async #readView() {
+    const revision = this.#revision;
+    const sources: Record<string, string | null> = {};
+    const versions: Record<string, string> = {};
+    const version = async (file: string): Promise<string> => {
+      try {
+        const stat = await fs.stat(file);
+        return `${await fs.realpath(file)}:${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing"; throw error; }
+    };
+    const read = this.#input.readFile ?? (async (file: string) => {
+      try { return await fs.readFile(file, "utf8"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    });
+    let sanitize!: SettingsSanitizer;
+    const resolved = await resolveConfig({ ...this.#input, temporaryOverrides: this.#temporary, readFile: async (file) => {
+      if (!(file in sources)) {
+        versions[file] = await version(file);
+        sources[file] = await read(file);
+        if (versions[file] !== await version(file)) throw new SettingsConflictError();
+      }
+      return sources[file]!;
+    } }, (captured) => { this.assertRevision(revision); sanitize = captured; });
+    this.assertRevision(revision);
+    const fingerprint = this.#viewFingerprint(revision, sources, resolved, versions);
+    return { resolved, sources, versions, revision, fingerprint, sanitize };
+  }
+  async reviewState(): Promise<string> { return (await this.#readView()).fingerprint; }
+  async guardAfterCommit(expected: string, path: string | null, text: string | null, next: ResolvedConfig): Promise<() => Promise<void>> {
+    const view = await this.#readView();
+    if (view.fingerprint !== expected) throw new SettingsConflictError();
+    const sources = { ...view.sources, ...(path ? { [path]: text } : {}) };
+    const versions = { ...view.versions };
+    if (path) delete versions[path]; // Our own atomic replacement necessarily changes the target inode.
+    const fingerprint = this.#viewFingerprint(this.#revision + 1, sources, next, versions);
+    return async () => {
+      const current = await this.#readView();
+      if (path) delete current.versions[path];
+      if (fingerprint !== this.#viewFingerprint(current.revision, current.sources, current.resolved, current.versions)) throw new SettingsConflictError();
+    };
+  }
+  async inspect(extra?: unknown, privateSources: unknown[] = []): Promise<Record<string, unknown>> {
+    const revision = this.#revision;
+    const targets = await hostConfigTargets(this.#input);
+    const view = await this.#readView();
+    const raw = Object.fromEntries(Object.entries(view.sources).map(([path, text]) => [path, readRawConfig(text ?? "")]));
+    const layers = {
+      global: projectSettingsJson(raw[targets.paths.global] ?? {}),
+      project: projectSettingsJson(raw[targets.paths.project] ?? {}),
+      ephemeral: projectSettingsJson(this.#temporary),
+    };
+    const origins = Object.fromEntries(SETTINGS_PATHS.map((path) => [path, view.resolved.provenance[normalizeConfigPath(path).join(".")] ?? "defaults"]));
+    this.assertRevision(revision);
+    return view.sanitize({
+      runtime: extra, supportedPaths: SETTINGS_PATHS, desired: projectSettingsJson(view.resolved.config), layers,
+      origins, provenance: view.resolved.provenance, warnings: view.resolved.warnings,
+      layerSemantics: "Sparse raw scope intent; absent means inherit. Arrays are authoritative in these scopes. Desired is fully resolved, not necessarily adopted by the runtime.",
+      otherOrigins: "defaults, legacy global, environment and CLI may contribute below these layers; provenance uses resolver layer names. Scalar-list provenance is field-level, not per-item history.",
+    }, privateSources);
   }
   /** A ceiling is only for collection baselines. Preview/commit always validate the full layered candidate. */
   async resolveCandidate(path: string | null, text: string | null, temporary: DeepPartial<Config>, ceiling: SettingsScope = "temporary"): Promise<ResolvedConfig> {
@@ -521,7 +662,7 @@ export class SettingsEditor {
     const read = this.#input.readFile ?? (async (file: string) => { try { return await fs.readFile(file, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } });
     return resolveConfig({ ...this.#input, temporaryOverrides: temporary, readFile: (file) => ceiling === "global" && file === paths.project ? Promise.resolve(null) : file === path ? Promise.resolve(text) : read(file) });
   }
-  async commit(revision: number, scope: SettingsScope, path: string | null, source: Source, raw: Record<string, unknown>, temporary: DeepPartial<Config>): Promise<ResolvedConfig> {
+  async commit(revision: number, scope: SettingsScope, path: string | null, source: Source, raw: Record<string, unknown>, temporary: DeepPartial<Config>, approvalGuard?: (resolved?: ResolvedConfig) => Promise<void>): Promise<ResolvedConfig> {
     this.assertRevision(revision);
     if (this.#busy) throw new ConfigError(["settings apply in progress"]);
     this.#busy = true;
@@ -531,15 +672,17 @@ export class SettingsEditor {
       validateConfig(scope === "temporary" ? temporary : parseTomlConfig(serializeRaw(raw), "global").value);
       let validated: ResolvedConfig;
       const guard = async () => {
+        await approvalGuard?.();
         this.assertRevision(revision);
         await assertAnchor(source.anchor);
         if (path) await assertPolicyOutsideWorkspace(path, [resolve(this.#input.repoRoot ?? this.#input.cwd), await fs.realpath(this.#input.repoRoot ?? this.#input.cwd)]);
         validated = await this.resolveCandidate(path, path ? serializeRaw(raw) : null, temporary);
+        await approvalGuard?.(validated);
         await assertAnchor(source.anchor);
         this.assertRevision(revision);
       };
       await guard();
-      if (scope === "temporary") this.#temporary = structuredClone(temporary);
+      if (scope === "temporary") { await approvalGuard?.(); this.#temporary = structuredClone(temporary); }
       else await atomicWrite(path!, serializeRaw(raw), source, guard);
       this.#revision++;
       return validated!;

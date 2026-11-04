@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveSecretValue } from "../extensions/pi-msb/config.ts";
 import { createMsbIntegration } from "../extensions/pi-msb/control.ts";
 import { fakeSdk } from "./fake-msb-sdk.ts";
+import { registerConfigTools } from "../extensions/pi-msb/settings-tools.ts";
 import { registerMsbCommand } from "../extensions/pi-msb/command.ts";
 
 export default async function (pi: ExtensionAPI) {
@@ -10,6 +11,7 @@ export default async function (pi: ExtensionAPI) {
   const integration = createMsbIntegration({ sessionId: "ui-runtime", cwd, agentDir: process.env.PI_CODING_AGENT_DIR!, configDirName: ".pi", env: { HOME: process.env.HOME, PI_MSB_AUTO_START: "false" }, sdkLoader: async () => fakeSdk([]), acquireOwnerLock: async () => ({ path: `${cwd}/../fixture.lock`, release: async () => {} }) });
   await integration.configureSession({ sessionId: "ui-runtime", cwd, projectTrusted: true });
   registerMsbCommand(pi, integration.control);
+  registerConfigTools(pi, integration.control);
   pi.registerCommand("msb-fixture-enable", { handler: async () => { await integration.control.setEnabled(true); assert.equal(integration.control.getState().status, "active"); } });
   pi.registerCommand("msb-fixture-stop", { handler: async () => { await integration.control.setEnabled(false); } });
   pi.registerCommand("msb-fixture-verify-origin", { handler: async () => {

@@ -21,7 +21,7 @@ const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib
 /** Strip terminal controls from every external label, log, path and value. */
 export const safeText = (value: unknown): string => String(value ?? "").replace(/\x1b\][^\x07]*(?:\x07|$)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, " ");
 const display = (value: unknown): string => value === null ? "automatic session name" : value === undefined ? "inherit" : typeof value === "string" ? value : JSON.stringify(value);
-const HOST_BOUNDARY_WARNINGS: Readonly<Record<string, string>> = {
+export const HOST_BOUNDARY_WARNINGS: Readonly<Record<string, string>> = {
   pass_through_tools: "HOST execution / sandbox bypass: tools allowed by pass_through_tools execute on the HOST outside the sandbox without per-call host approval.",
   block_third_party: "HOST execution / sandbox bypass: block_third_party = false allows unrecognized third-party tools to execute on the HOST outside the sandbox without per-call host approval.",
   allow_skill_reads: "HOST read / sandbox bypass: allow_skill_reads = true permits constrained reads of discovered skills and generated prompts from the HOST outside the sandbox.",
@@ -628,10 +628,14 @@ export async function openControlPanel(ctx: Context, control: MsbControl): Promi
   opening = true;
   const currentGeneration = generation;
   let draft: SettingsDraft | undefined;
+  let releaseInteraction: (() => void) | undefined;
   let stage: PanelLaunchStage = "settings access";
   try {
     const settings = control.settings;
     if (!settings) throw new Error("This control adapter does not support settings");
+    const interaction = settings.acquireInteraction();
+    if (!interaction) throw new Error("A Microsandbox settings review is already open");
+    releaseInteraction = interaction.release;
     stage = "ephemeral settings";
     draft = await settings.open("temporary");
     const paths: Record<string, string> = { temporary: "Current session memory (no disk writes)" };
@@ -646,5 +650,5 @@ export async function openControlPanel(ctx: Context, control: MsbControl): Promi
       return activePanel;
     }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 } });
   } catch (error) { throw new PanelLaunchError(stage, error); }
-  finally { await closeControlPanel(); activePanel = undefined; draft?.discard(); opening = false; }
+  finally { await closeControlPanel(); activePanel = undefined; draft?.discard(); releaseInteraction?.(); opening = false; }
 }

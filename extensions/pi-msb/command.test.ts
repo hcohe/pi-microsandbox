@@ -20,6 +20,10 @@ function state(status: RuntimeState["status"]): RuntimeState {
   };
 }
 
+function acquireInteraction() {
+  return { signal: new AbortController().signal, release() {} };
+}
+
 function fixture() {
   const notices: Array<{ message: string; type?: string }> = [];
   const calls: Array<{ method: string; args: unknown[] }> = [];
@@ -85,7 +89,7 @@ test("launch diagnostics identify settings stage without echoing messages, cause
   const f = fixture(); f.ctx.mode = "tui";
   const error = new ConfigError(["PRIVATE_CONFIG_SENTINEL"]);
   Object.assign(error, { name: "PRIVATE_NAME_SENTINEL", code: "PRIVATE_CODE_SENTINEL", cause: new Error("PRIVATE_CAUSE_SENTINEL") });
-  Object.defineProperty(f.control, "settings", { configurable: true, value: { open: async (scope: string) => {
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async (scope: string) => {
     if (scope === "project") throw error;
     return { discard() {} };
   } } });
@@ -101,11 +105,11 @@ test("launch I/O diagnostics allow only known safe codes; programmer errors prop
   const { PanelLaunchError } = await import("./control-panel.ts");
   const f = fixture(); f.ctx.mode = "tui";
   const error = Object.assign(new Error("PRIVATE_IO_SENTINEL"), { code: "EACCES" });
-  Object.defineProperty(f.control, "settings", { configurable: true, value: { open: async () => { throw error; } } });
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async () => { throw error; } } });
   await createCommandHandler(f.control)("", f.ctx);
   assert.match(f.notices.at(-1)!.message, /ephemeral settings \(Error \/ EACCES\)/);
   assert.doesNotMatch(f.notices.at(-1)!.message, /PRIVATE_/);
-  Object.defineProperty(f.control, "settings", { configurable: true, value: { open: async () => { throw new TypeError("PRIVATE_PROGRAMMER_SENTINEL", { cause: error }); } } });
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async () => { throw new TypeError("PRIVATE_PROGRAMMER_SENTINEL", { cause: error }); } } });
   await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
     assert.ok(error instanceof PanelLaunchError);
     assert.match(error.message, /ephemeral settings \(TypeError\)/);
@@ -118,7 +122,7 @@ test("launch I/O diagnostics allow only known safe codes; programmer errors prop
 test("panel-construction failures propagate with a safe UI stage, not a hidden blanket catch", async () => {
   const f = fixture(); f.ctx.mode = "tui";
   const draft = { discard() {}, snapshot() { throw new TypeError("PRIVATE_CONSTRUCTION_SENTINEL"); } };
-  Object.defineProperty(f.control, "settings", { value: { open: async () => draft } });
+  Object.defineProperty(f.control, "settings", { value: { acquireInteraction, open: async () => draft } });
   f.ctx.ui.custom = async (factory: any) => factory({}, {}, {}, () => {});
   await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
     assert.ok(error instanceof Error);

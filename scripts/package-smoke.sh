@@ -52,12 +52,17 @@ docs/safety.md required
 docs/settings-backend.md required
 docs/storage.md required
 docs/troubleshooting.md required
+docs/tools.md required
 extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
 extensions/pi-msb/config-template.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/control-panel.ts required
 extensions/pi-msb/settings.ts required
+extensions/pi-msb/settings-json.ts required
+extensions/pi-msb/settings-redaction.ts required
+extensions/pi-msb/settings-approval.ts required
+extensions/pi-msb/settings-tools.ts required
 extensions/pi-msb/settings-fields.ts required
 extensions/pi-msb/settings-input.ts required
 extensions/pi-msb/masked-input.ts required

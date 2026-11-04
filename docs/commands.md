@@ -8,6 +8,11 @@ settings or starts a sandbox.
 Headless/RPC/print invocations report an actionable error; configure host-owned
 files or `PI_MSB_*` before starting a session instead.
 
+Model-facing [`msb_config_get` / `msb_config_set`](tools.md) are separate tools,
+not `/msb` subcommands. Inspection works headlessly; tool mutations always need
+fresh Cancel-first approval in an interactive TUI/RPC client. The panel and tool
+review cannot overlap. Existing panel navigation and scope actions are unchanged.
+
 ## Top-level trees
 
 - **Resources**, **Network**, **Secrets**, **Variables**, **Mounts**, **Tools**,

@@ -368,13 +368,22 @@ export interface RuntimePolicySnapshot {
   automaticSandboxName: boolean;
   adoptedAt: number;
 }
+/** Agent-safe projection frozen at successful adoption, independent of current desired credentials. */
+export interface AgentRuntimePolicySnapshot {
+  settings: Record<string, unknown>;
+  provenance: Record<string, string>;
+  knownFields: Array<keyof Config>;
+  verification: "created" | "reconnected";
+  adoptedAt: number;
+}
 export interface MsbControl {
+  getAgentRuntimePolicy?(): AgentRuntimePolicySnapshot | undefined;
   getRuntimePolicy?(): RuntimePolicySnapshot | undefined;
   /** Present on the native integration; optional for third-party control adapters. */
   readonly settings?: import("./settings.ts").SettingsEditor;
   getState(): RuntimeState;
   setEnabled(enabled: boolean): Promise<void>;
-  reload(options?: { allowRestart?: boolean }): Promise<void>;
+  reload(options?: { allowRestart?: boolean; guard?: () => Promise<void> }): Promise<void>;
   /** Native facade compares candidate to the actual adopted runtime configuration privately. */
   previewSettings?(draft: import("./settings.ts").SettingsDraft): Promise<import("./settings.ts").SettingsPreview>;
   pruneNow(): Promise<PruneReport>;

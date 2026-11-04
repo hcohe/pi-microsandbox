@@ -62,6 +62,17 @@ addon. Unsupported hosts can still load Pi and remain blocked or explicitly
 off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64
 with KVM; Windows, Intel macOS, and musl Linux are not supported.
 
+## Approved configuration tools
+
+`msb_config_get` is read-only, including headless use. `msb_config_set` can edit
+one explicit ephemeral/project/global setting only after a fresh sanitized
+Cancel-first review; host-execution permission never substitutes for approval.
+No UI means no mutation. Secrets/references and arbitrary unknown raw values
+are not exposed. Changed files/session/ephemeral state invalidate approval;
+conflicts never silently retry. Only these two exact tool names bypass the
+third-party tool gate, not other host tools or `msb_*` prefixes. See
+[schemas, review navigation and truthful save/reload outcomes](tools.md).
+
 ## Host-owned configuration
 
 Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)

@@ -10,6 +10,8 @@ import {
   resolveSecretValue,
   toEffectiveToml,
 } from "./config.ts";
+import { projectSettingsJson } from "./settings-json.ts";
+import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { classifySettingsEffect, LIVE_SETTINGS_KEYS, SettingsEditor } from "./settings.ts";
 import { buildSandboxLabels, decodeSessionState, normalizeSandboxRecord, encodeSessionState } from "./labels.ts";
 import { acquireOwnerLock, createLocksPort } from "./locks.ts";
@@ -22,6 +24,7 @@ import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } 
 import {
   LOCKFILE_VERSION,
   sandboxNameFor,
+  type AgentRuntimePolicySnapshot,
   type BootRequest,
   type Config,
   type LockInfo,
@@ -233,6 +236,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   let cwd = options.cwd;
   let workspace: Workspace | null = null;
   let resolved: ResolvedConfig = { config: configRef.value, provenance: {}, warnings: [] };
+  const resolutionSanitizers = new WeakMap<ResolvedConfig, SettingsSanitizer>();
+  const requestSanitizers = new WeakMap<Config, SettingsSanitizer>();
   let projectTrusted = true;
   const settingsInput = () => ({ cwd, repoRoot: workspace?.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env });
   const settings = new SettingsEditor(settingsInput(), sessionId);
@@ -474,7 +479,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     persist: (state) => options.appendEntry?.(STATE_ENTRY, encodeSessionState(state)),
   };
 
-  let adopted: { sessionId: string; cwd: string; policy: RuntimePolicySnapshot } | undefined;
+  let adopted: { sessionId: string; cwd: string; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot } | undefined;
   deps.adopted = (request, verification) => {
     const sameRuntime = adopted?.sessionId === request.sessionId && adopted.cwd === request.cwd;
     const knownFields = verification === "created" ? Object.keys(request.config) as Array<keyof Config>
@@ -485,10 +490,16 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     const provenance: Record<string, string> = Object.fromEntries(Object.entries(resolved.provenance).filter(([key]) => knownFields.some((field) => key === field || key.startsWith(`${field}.`) || key.startsWith(`${field}[`))));
     const effectiveToml = toEffectiveToml({ ...resolved, config: safeConfig });
     if (verification === "reconnected" && sameRuntime && adopted!.policy.verification === "reconnected" && adopted!.policy.effectiveToml === effectiveToml) return;
-    adopted = { sessionId: request.sessionId, cwd: request.cwd, policy: {
+    const policy: RuntimePolicySnapshot = {
       effectiveToml, provenance, automaticSandboxName: knownFields.includes("sandboxName") && request.config.sandboxName === null,
       knownFields: [...knownFields], verification: verification === "created" || verification === "live" && sameRuntime && adopted!.policy.verification === "created" ? "created" : "reconnected", adoptedAt: Date.now(),
-    } };
+    };
+    const sanitize = requestSanitizers.get(request.config) ?? createSettingsSanitizer([request.config]);
+    const agentPolicy = sanitize({
+      settings: projectSettingsJson(safeConfig), knownFields: policy.knownFields,
+      provenance: policy.provenance, verification: policy.verification, adoptedAt: policy.adoptedAt,
+    }, [request.config]);
+    adopted = { sessionId: request.sessionId, cwd: request.cwd, policy, agentPolicy };
   };
   const manager = createSandboxManager(deps);
   const notifyState = (state: RuntimeState) => options.onState?.(state);
@@ -503,11 +514,22 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     withRuntime: (callback) => manager.withRuntime(callback),
   };
   const effective = (): ResolvedConfig => resolved;
-  const configSnapshot = (): Config => structuredClone(configRef.value);
-  const resolveForWorkspace = async (selected: Workspace): Promise<ResolvedConfig> => {
-    settings.configureSession({ ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot }, sessionId);
-    await ensureDefaultHostConfig(selected.guestRoot, options.agentDir);
-    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary() });
+  const configSnapshot = (): Config => {
+    const snapshot = structuredClone(configRef.value);
+    requestSanitizers.set(snapshot, resolutionSanitizers.get(resolved) ?? createSettingsSanitizer([snapshot]));
+    return snapshot;
+  };
+  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false): Promise<ResolvedConfig> => {
+    const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
+    if (approvedSettingsReload) settings.assertSession(input, sessionId);
+    else {
+      settings.configureSession(input, sessionId);
+      await ensureDefaultHostConfig(selected.guestRoot, options.agentDir);
+    }
+    let sanitize!: SettingsSanitizer;
+    const next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary() }, (captured) => { sanitize = captured; });
+    resolutionSanitizers.set(next, sanitize);
+    return next;
   };
 
   const configureSession = async (setup: SessionSetup): Promise<RuntimeState> => {
@@ -567,6 +589,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return settings;
     },
     getState: visibleState,
+    getAgentRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.agentPolicy) : undefined,
     getRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.policy) : undefined,
     async setEnabled(enabled) {
       if (enabled && isDisabledByEnv(options.env ?? process.env)) {
@@ -607,10 +630,12 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     previewSettings: (draft) => draft.preview(configSnapshot()),
     async reload(reloadOptions) {
+      await reloadOptions?.guard?.();
       if (isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
         failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
         notifyState(failureState);
+        if (reloadOptions?.guard) throw new Error("Runtime reload disabled by environment");
         return;
       }
       let next: ResolvedConfig;
@@ -618,13 +643,14 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         workspace = await discoverWorkspace(cwd);
         cwd = workspace.cwd;
         activeProjectRoot = workspace.guestRoot;
-        next = await resolveForWorkspace(workspace);
+        next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
       } catch (error) {
         configReady = false;
         if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
         notifyState(visibleState());
         throw error;
       }
+      await reloadOptions?.guard?.();
       pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
       if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
         throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");

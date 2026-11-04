@@ -802,3 +802,44 @@ test("agent alias raw components support dots, leading parents, absolute/relativ
     assert.equal(editor.temporary().mounts![0]!.hostPath, f.sibling);
   }
 });
+
+for (const scope of ["global", "project"] as const) {
+  test(`hidden ${scope} secret metadata retains only target-owned literal/ENV/relative FILE credentials and origins`, async (t) => {
+    const { editor, paths } = await fixture(t);
+    await writeFile(join(dirname(paths[scope]), "private-token"), "HIDDEN_BYTES_SENTINEL");
+    const raw = 'secrets = [{ env="LITERAL",value="HIDDEN_LITERAL_SENTINEL",allow_hosts=["a.example"] }, { env="ENV_TOKEN",value="$ENV:PRIVATE_ENV",allow_hosts=["a.example"] }, { env="FILE",value="$FILE:private-token",allow_hosts=["a.example"] }]\n';
+    await writeFile(paths[scope], raw);
+    if (scope === "global") await writeFile(paths.project, 'secrets = []\n');
+    const temp = await editor.open("temporary"); temp.set("secrets", []); await temp.apply();
+    for (const env of ["LITERAL", "ENV_TOKEN", "FILE"]) {
+      const draft = await editor.open(scope); draft.upsertSecret({ env, allowHosts: ["b.example"] });
+      const preview = await draft.preview();
+      assert.equal(preview.collections[0]!.source, scope === "global" ? "host-default" : "host-project");
+      assert.equal(preview.collections[0]!.sourcePath, paths[scope]);
+      assert.equal(preview.collections[0]!.promoted, false); assert.equal(preview.collections[0]!.shadowed, true);
+      const review = await draft.reviewForApproval(preview.effect);
+      assert.doesNotMatch(JSON.stringify(review), /HIDDEN_LITERAL_SENTINEL|HIDDEN_BYTES_SENTINEL|\$FILE:|\$ENV:/);
+      await draft.apply();
+    }
+    const saved = parseTomlConfig(await readFile(paths[scope], "utf8"), "global").value;
+    assert.deepEqual(saved.secrets!.map((secret) => secret.value), ["HIDDEN_LITERAL_SENTINEL", "$ENV:PRIVATE_ENV", "$FILE:private-token"]);
+    assert.deepEqual(saved.secrets!.map((secret) => secret.env), ["LITERAL", "ENV_TOKEN", "FILE"]);
+    for (const action of ["remove", "clear", "replace", "inherit"] as const) {
+      const draft = await editor.open(scope);
+      if (action === "remove") draft.removeSecret("FILE");
+      else if (action === "inherit") draft.inherit("secrets");
+      else draft.set("secrets", action === "clear" ? [] : [{ env: "OTHER", value: "new", allowHosts: ["a.example"] }]);
+      assert.throws(() => draft.upsertSecret({ env: "FILE", allowHosts: ["b.example"] }), /new secrets require/);
+      draft.discard();
+    }
+  });
+}
+
+test("same-name visible higher-scope secret still takes precedence over hidden target-owned fallback", async (t) => {
+  const { editor, paths } = await fixture(t);
+  await writeFile(paths.global, 'secrets = [{env="TOKEN",value="target-private",allow_hosts=["a.example"]}]\n');
+  await writeFile(paths.project, 'secrets = [{env="TOKEN",value="$ENV:VISIBLE_PRIVATE",allow_hosts=["a.example"]}]\n');
+  const draft = await editor.open("global"); draft.upsertSecret({ env: "TOKEN", allowHosts: ["b.example"] });
+  const preview = await draft.preview(); assert.equal(preview.collections[0]!.promoted, true); assert.equal(preview.collections[0]!.source, "host-project");
+  await draft.apply(); assert.equal(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets![0]!.value, "$ENV:VISIBLE_PRIVATE");
+});

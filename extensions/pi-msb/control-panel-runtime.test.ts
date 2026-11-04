@@ -7,7 +7,7 @@ import test from "node:test";
 
 const localPackage = resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..");
 for (const pkg of new Set([localPackage, ...(process.env.PI_MSB_TEST_PI_PACKAGE ? [resolve(process.env.PI_MSB_TEST_PI_PACKAGE)] : [])])) {
-  test(`real /msb command, custom overlay and teardown: ${pkg}`, { timeout: 30_000 }, async () => {
+  test(`real /msb and config tools, approval/provenance, custom overlay and teardown: ${pkg}`, { timeout: 30_000 }, async () => {
     const { stdout, stderr } = await promisify(execFile)(process.execPath, ["test/control-panel-runtime.mjs", pkg], {
       env: { PATH: process.env.PATH, TMPDIR: "/tmp" }, timeout: 25_000,
     });

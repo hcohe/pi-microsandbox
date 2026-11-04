@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { Type } from "typebox";
 import type {
   BashOperations,
@@ -110,6 +113,8 @@ export interface RegisterToolsDeps {
   config: Config;
   cwd: string;
   hostReads: HostReadAccess;
+  /** Exact entry module that owns the configuration tools; missing provenance never exempts them. */
+  ownedConfigToolEntry?: string;
   createGrepExecute: (args: {
     provider: ToolOpsProvider;
     cwd: string;
@@ -193,6 +198,12 @@ function resultFullOutputPath(result: unknown): string | undefined {
  * and execution policy are not accidentally replaced.
  */
 export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps): void {
+  const canonicalEntry = (path: string | undefined): string | undefined => {
+    if (!path || path.startsWith("<")) return;
+    try { return realpathSync(resolve(deps.cwd, path.startsWith("~/") ? `${homedir()}/${path.slice(2)}` : path)); }
+    catch { return; }
+  };
+  const ownedConfigToolEntry = canonicalEntry(deps.ownedConfigToolEntry);
   const hostDefinitions: Record<RoutedToolName, AnyToolDefinition> = {
     bash: createBashToolDefinition(deps.cwd),
     edit: createEditToolDefinition(deps.cwd),
@@ -358,6 +369,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const registered = (typeof (pi as ExtensionAPI).getAllTools === "function"
       ? pi.getAllTools()
       : []).find((candidate) => candidate.name === tool);
+    if ((tool === "msb_config_get" || tool === "msb_config_set") && ownedConfigToolEntry
+      && canonicalEntry(registered?.sourceInfo?.path) === ownedConfigToolEntry) return;
     const source = registered?.sourceInfo?.source;
     if (source === "builtin") return;
     if (!deps.config.blockThirdParty) return;

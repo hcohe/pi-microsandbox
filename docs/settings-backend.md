@@ -1,6 +1,7 @@
 # Settings backend integration contract
 
-This is the backend seam used by the full-screen `/msb` control panel. All modules remain flat and ship with
+This is the backend seam used by the full-screen `/msb` control panel and the
+[model-facing configuration tools](tools.md). All modules remain flat and ship with
 the existing package manifest. No SDK import, configuration creation, or write
 occurs when constructing the editor.
 
@@ -136,7 +137,63 @@ rename. Portable Node filesystem APIs do **not** provide an atomic compare-and-s
 rename or openat-style ancestor pinning: a hostile host process racing directories
 or another editor's final rename window is outside the complete guarantee. This
 is not a replacement for host-owned, workspace-inaccessible policy directories.
-Only the target has an external-edit fingerprint; other layers are re-read and
-validated at commit rather than locked. Filesystem errors after atomic replacement
+For ordinary, unbound `draft.apply()`, only the target has an external-edit
+fingerprint; other layers are re-read and validated at commit rather than locked.
+Approval-bound tool commits additionally guard all contributing sources as described
+below. Filesystem errors after atomic replacement
 (e.g. directory sync) may mean the file was saved despite an error: reload/reopen
 before retrying. Runtime is not mutated by the settings editor in that case.
+
+## Agent-safe inspection and approval-bound commits
+
+`editor.inspect(runtime?, privateSources?)` reads each contributing policy once,
+returns all supported effective settings, sparse global/project/ephemeral layers,
+origins and warnings as JSON, and does not bootstrap/write/reload. `settings-json.ts`
+whitelists schema fields and omits arbitrary unknown raw values. The dependency-free
+`settings-redaction.ts` masks literal credentials plus ENV/FILE references (including
+repeated occurrences and bare reference identifiers in metadata).
+Do not send the older reference-preserving TOML APIs to the model.
+
+`draft.reviewForApproval(effect)` binds the draft's private intent and resolved
+candidate digest (including proposed mount/FILE canonical identities) to every source
+content/identity/metadata fingerprint, resolver/environment state, and editor
+revision captured at open. It returns a strict masked JSON before/after review.
+`apply({guard})` rechecks that binding and caller abort/session/runtime conditions
+through the existing atomic-write guards; stale approval conflicts without retry.
+Successful approved applies return a private `assertUnchanged` activation guard.
+Pass it through native `reload({allowRestart, guard})`, which checks before/after
+resolution, preserves the established settings context and skips bootstrap. This
+prevents adopting newly changed unreviewed live policy after saving. Disabled
+environment reloads fail explicitly for this guarded path. Ordinary panel/reload
+behavior is unchanged. Portable final rename races remain subject to the bounded
+filesystem guarantees above; target metadata necessarily changes on our save,
+while its exact expected content and all other source metadata remain guarded.
+
+`editor.acquireInteraction()` is the shared integration-local panel/tool modal
+lease. Competing callers fail busy; release it in finally. Session lifecycle
+invalidates its AbortSignal. `settings-approval.ts` uses only public custom-overlay
+APIs for a scrollable TUI review; RPC uses the documented Cancel-first selector.
+No ordinary panel conditional-confirmation path authorizes tool mutations.
+
+Secret upsert with omitted value prefers the selected effective identity as
+before. If absent there, it can retain only a target-owned hidden raw identity,
+with that target's lexical reference origin and truthful shadowing metadata.
+Earlier removal/clear/replacement/inheritance prevents fallback resurrection.
+This fallback never selects unrelated scope credentials or promotes siblings.
+
+Privacy context is captured from all original contributing raw files, parsed
+`PI_MSB_*` settings, raw CLI settings and temporary/resolved layers, including
+credentials shadowed by higher scopes. The optional internal second argument of
+`resolveConfig` receives only a bound sanitizer after successful resolution; it
+adds no reads or credential resolution and returns no raw layers. Read views bind
+that sanitizer to the same revision/source snapshot as inspection and approval.
+Adopted metadata is assembled before the review's final sanitization.
+
+Native `getAgentRuntimePolicy()` returns a separate already-safe JSON projection
+frozen at successful adoption using that request's private resolution context.
+Failed/proposed resolutions do not replace it, and later desired-source changes
+cannot remove its historical masking context. Existing `getRuntimePolicy()` and
+panel metadata remain unchanged. Agent tools never reconstruct safety from the
+older value-masked TOML snapshot; adapters without the safe accessor report
+adopted values unavailable. No sanitizer closure/private context crosses an
+agent result, error or log boundary.

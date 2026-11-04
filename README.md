@@ -46,6 +46,11 @@ and `q` closes. One contextual hint line stays pinned at the bottom, with accent
 keys and muted actions; narrow screens use grouped keys. Menus offer short hints;
 value editors explain the format with examples. [All keys →](docs/commands.md)
 
+The agent can also inspect all settings with `msb_config_get` or propose a
+scoped change with `msb_config_set`. Every change needs your explicit approval;
+secrets/references stay masked, and headless inspection is read-only.
+[Configuration tools →](docs/tools.md)
+
 The Pi footer shows **`msb-ID ●`**: a green circle when live, or a yellow/grey
 pulse while booting. Sandbox failures, host fallback, and unavailable Docker show
 red. Colors follow your theme; only the booting circle flashes.
@@ -103,6 +108,7 @@ after failure. Keep the default `"block"` for untrusted work.
 | Understand the workspace mount | [Storage](docs/storage.md) |
 | Pick or build an image | [Images](docs/images.md) |
 | Tune networking, secrets, and mounts | [Configuration](docs/configuration.md) |
+| Inspect/propose settings through the model | [Configuration tools](docs/tools.md) |
 | Use the `/msb` control panel | [Commands](docs/commands.md) |
 | Understand host access | [Safety model](docs/safety.md) |
 | Unstick a sandbox | [Troubleshooting](docs/troubleshooting.md) |

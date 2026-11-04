@@ -54,6 +54,36 @@ settings.
 
 Run `just dev-image` by itself when you only need to refresh the local image.
 
+### Configuration-tool integration and testing
+
+`settings-tools.ts` registers `msb_config_get` and `msb_config_set`; the latter
+revalidates runtime arguments inside execute and always requests explicit
+approval. `settings-json.ts` is the strict JSON/redaction boundary, and
+`settings-approval.ts` provides a bounded scrollable Cancel-first public custom
+overlay in TUI (documented native selector in interactive RPC). Print/JSON/no-UI
+modes cannot mutate. The panel and tool share one editor modal lease. Tools use
+the same SettingsDraft CRUD, validation, atomic persistence and controller reload
+rather than their own writer. Read/proposal construction must never bootstrap.
+
+`settings-tools.test.ts`, `settings-approval.test.ts` and `settings.test.ts` cover
+all layers/inventory/origins, headless reads, serialized redaction, sparse/entry
+isolation, approval cancellation/concurrency/races, hidden owned credentials,
+mount guards and truthful save/reload failure. `tools.test.ts` checks exact-name
+routing exemptions. The gate requires both an exact tool name and public
+`sourceInfo.path` canonically matching the entry path pinned by `index.ts`;
+missing/mismatched metadata fails closed, with no basename/directory fallback.
+Real-loader tests include a symlinked package entry and duplicate-winning foreign
+registrations under both selected runtimes. `control-panel-runtime.test.ts` also executes both actual
+loaded config tools using the native context and both terminal renderers,
+including scrollable review, Cancel default, Escape, abort, deliberate approval,
+wrapped/narrow/tall/resize composition, live/restart fake-SDK reconciliation and
+focus restoration. SDK/terminals are
+doubled; none of these tests executes a live VM. Set `PI_PACKAGE_DIR` to this
+checkout's pinned coding-agent package when running direct Node tests so an
+inherited installed-package theme override cannot contaminate them. Add
+`PI_MSB_TEST_PI_PACKAGE` to run the loader fixture against another installed Pi;
+report that actual package version (do not infer 1.4.0 compatibility from 1.5.0).
+
 ### Control-panel integration and testing
 
 `/msb` is the only command surface. `control-panel.ts` owns collapsed Resources,

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR_NAME,
   DEFAULT_MAX_BYTES,
@@ -14,6 +15,7 @@ import { registerMsbCommand, systemPromptNote } from "./command.ts";
 import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
+import { registerConfigTools } from "./settings-tools.ts";
 import { registerSandboxTools } from "./tools.ts";
 import { displayId, type ResolvedConfig, type RuntimeState } from "./types.ts";
 
@@ -119,12 +121,14 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     config: integration.configRef.value,
     cwd: process.cwd(),
     hostReads,
+    ownedConfigToolEntry: fileURLToPath(import.meta.url),
     createGrepExecute: ({ provider, cwd, grepHelpers }) =>
       createSandboxGrepExecute({ provider, cwd, helpers: grepHelpers }),
     grepHelpers: { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead: truncateHead as (content: string, options?: unknown) => any, truncateLine, formatSize },
     systemPromptNote,
   });
   registerMsbCommand(pi, integration.control);
+  registerConfigTools(pi, integration.control);
 
   pi.on("session_start", async (_event, ctx) => {
     stopBootAnimation();

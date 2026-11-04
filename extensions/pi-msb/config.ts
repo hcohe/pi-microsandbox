@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { defaultConfigTemplate } from "./config-template.ts";
 import type {
   Config,
@@ -813,7 +814,9 @@ export function readRawConfig(text: string): Record<string, unknown> {
   try { return readToml(text); } catch { throw new ConfigError(["invalid raw configuration"]); }
 }
 
-export async function resolveConfig(input: ResolveConfigInput): Promise<ResolvedConfig> {
+/** Optional internal capture exposes only a redactor bound to the successfully resolved original layers. */
+export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?: (sanitize: SettingsSanitizer) => void): Promise<ResolvedConfig> {
+  const privateSources: unknown[] = [];
   const env = input.env ?? process.env;
   const readFile = input.readFile ?? defaultRead;
   const realpath = input.realpath ?? defaultRealpath;
@@ -839,6 +842,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
       throw new ConfigError(["global configuration must be outside the mounted workspace; migrate to host-owned pi-microsandbox/default.toml or a per-project override"]);
     }
     layers.push(layerFromText("global", text, file));
+    if (captureSanitizer) privateSources.push(readRawConfig(text));
   }
   const targets = await hostConfigTargets(input);
   const { global: hostDefaultFile, project: hostProjectFile } = targets.paths;
@@ -862,6 +866,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
     const policy = layerFromText(name, text, lexicalFile);
+    if (captureSanitizer) privateSources.push(readRawConfig(text));
     // Normalize relative references against the original lexical policy path,
     // before realpath: an upward reference must not jump to the agent link target.
     if (Array.isArray(policy.value.secrets)) {
@@ -882,10 +887,16 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     }
     hostPolicyPaths.push(hostPolicyRoot, join(targets.agentDir, "pi-microsandbox"));
   }
-  layers.push(parseEnvConfig(env));
-  if (input.cliOverridesToml !== undefined) layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
+  const environment = parseEnvConfig(env);
+  layers.push(environment);
+  if (captureSanitizer) privateSources.push(environment.value);
+  if (input.cliOverridesToml !== undefined) {
+    layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
+    if (captureSanitizer) privateSources.push(readRawConfig(input.cliOverridesToml));
+  }
   layers.push(...hostLayers);
   if (input.temporaryOverrides) {
+    if (captureSanitizer) privateSources.push(clone(input.temporaryOverrides));
     const temporary = clone(input.temporaryOverrides);
     if (Array.isArray(temporary.secrets)) for (const secret of temporary.secrets) {
       if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) secret.value = `$FILE:${await canonicalPath(resolve(input.cwd, secret.value.slice(6)), true)}`;
@@ -932,6 +943,7 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     if (unsafe) policyIssues.push(issueForPath(`mounts[${index}].hostPath`, "must not mount a host socket or Docker socket path"));
   }
   if (policyIssues.length) throw new ConfigError(policyIssues);
+  captureSanitizer?.(createSettingsSanitizer([...privateSources, config]));
   return { config, provenance: merged.provenance, warnings: warnings.map(warning) };
 }
 
