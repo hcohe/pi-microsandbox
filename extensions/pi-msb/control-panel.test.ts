@@ -6,7 +6,7 @@ import { visibleWidth, stripTerminalSequences } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, resolveConfig, toEffectiveToml, parseTomlConfig } from "./config.ts";
 import { ControlPanel, openControlPanel, closeControlPanel } from "./control-panel.ts";
 import { SettingsEditor, SETTINGS_PATHS } from "./settings.ts";
-import { SETTINGS_FIELDS } from "./settings-fields.ts";
+import { SETTINGS_FIELDS, SECRET_HOST_HELP, MOUNT_OPTION_HELP } from "./settings-fields.ts";
 import { MaskedInput } from "./masked-input.ts";
 import { createMsbIntegration } from "./control.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
@@ -60,6 +60,18 @@ async function fixture(t: any, theme = plainTheme, native = false) {
 test("settings inventory describes every public schema leaf", () => {
   assert.deepEqual(SETTINGS_FIELDS.map((field) => field.path), SETTINGS_PATHS);
   assert.ok(SETTINGS_FIELDS.every((field) => field.description?.length > 10));
+  for (const field of SETTINGS_FIELDS) {
+    assert.ok(field.hint.length > 10 && field.hint.length < 65, field.path);
+    assert.doesNotMatch(field.hint, /[\n.;]/, field.path);
+    assert.ok(field.editorHelp.includes("\n"), field.path);
+    assert.match(field.editorHelp, /[Ee]xample/, field.path);
+    assert.notEqual(field.hint, field.editorHelp, field.path);
+    for (const choice of field.choices ?? []) {
+      const instructions = field.choiceHelp?.[String(choice)];
+      assert.ok(instructions && instructions.length > 10, `${field.path}: ${choice}`);
+      assert.notEqual(field.choiceHelp?.[String(choice)], field.hint, field.path);
+    }
+  }
 });
 
 test("collapsed groups are direct roots under MICROSANDBOX with vim and arrow tree parity", async (t) => {
@@ -193,10 +205,11 @@ test("menu and input headings use the main title accent and bold styling", async
   const f = await fixture(t, theme);
   const assertHeading = (label: string) => assert.ok(f.panel.render(160).join("\n").includes(theme.bold(theme.fg("accent", label))), label);
   await f.list("Mounts", "Mounts:"); await f.key("a"); assertHeading("Mount"); assertHeading("MICROSANDBOX");
-  assert.match(f.full(), /dir\/file mounts a host directory\/file; named uses a named volume; tmpfs creates temporary memory-backed storage\./);
-  assert.match(f.full(), /true prevents guest writes; false permits writes, including host files for dir\/file mounts\./);
-  await f.choose("Type:"); assert.match(f.full(), /tmpfs creates temporary memory-backed storage/);
-  await f.key("\x1b"); await f.choose("Read only:"); assert.match(f.full(), /true prevents guest writes/);
+  assert.match(f.full(), /What kind of storage to attach/);
+  assert.doesNotMatch(f.full(), /temporary memory-backed|absolute host path/);
+  assert.match(f.full(), /Whether the sandbox can change files/);
+  await f.choose("Type:"); assert.match(f.full(), /tmpfs uses temporary memory-backed storage/);
+  await f.key("\x1b"); await f.choose("Read only:"); assert.match(f.full(), /true to prevent guest writes/);
   await f.key("\x1b"); await f.key("\x1b");
   await f.edit("General", "Show Footer:"); assertHeading("Show Footer");
   await f.choose("false"); assertHeading("Apply change");
@@ -655,4 +668,138 @@ test("Reset current sandbox overrides is confirmed memory-only maintenance and r
   await f.action("Reset current sandbox overrides"); await f.choose("Confirm");
   assert.deepEqual(f.settings.temporary(), {}); assert.deepEqual((await committedPanelSettings(f)).files, before.files); assert.equal(f.integration!.configRef.value.cpus, 2); assert.equal(f.control.getState().status, "active");
   assert.equal(f.calls.filter((call) => call === "idle").length, 1); assert.equal(f.calls.filter((call) => call === "reload").length, 1);
+});
+
+test("Secret forms separate friendly hints from multiline Allowed hosts editor help", async (t) => {
+  const colors: Array<[string, string]> = [];
+  const f = await fixture(t, { ...plainTheme, fg: (role: string, text: string) => { colors.push([role, text]); return text; } });
+  await f.list("Secrets", "Secrets:"); await f.key("a"); await f.seek("Allowed hosts:");
+  const frames: string[] = [];
+  for (const [width, height] of [[32, 12], [80, 20]]) {
+    f.terminal.columns = width!; f.terminal.rows = height!;
+    const menu = f.text(); frames.push(`Secret menu ${width}x${height}\n${menu}`);
+    assert.match(menu.replace(/\s+/g, " "), /Which services are allowed to use this secret/);
+    assert.doesNotMatch(menu, /comma-separated|at least one|api\.typesafe|api\.example/);
+  }
+  colors.length = 0; f.panel.render(80);
+  assert.ok(colors.some(([role, text]) => role === "muted" && text === SECRET_HOST_HELP.hint));
+  await f.key("\r");
+  for (const [width, height] of [[32, 12], [80, 20]]) {
+    f.terminal.columns = width!; f.terminal.rows = height!;
+    const input = f.text(); frames.push(`Allowed hosts input ${width}x${height}\n${input}`);
+    assert.match(input.replace(/\s+/g, " "), /Enter a comma-separated list; at least one host is required\. Example: api\.typesafe\.ai, api\.example\.com/);
+    assert.doesNotMatch(input, /Which services/);
+    const lines = input.split("\n");
+    assert.ok(lines.findIndex((line) => line.includes("Enter a comma")) < lines.findIndex((line) => line.includes("Example:")));
+    assert.match(lines.at(-1)!, /Enter keep.*Esc cancel/);
+  }
+  // Saved review frames contain no credentials, references or configured secret values.
+  await writeFile("/tmp/pi-msb-two-level-helpers.frames.txt", frames.join("\n\n") + "\n");
+  await f.key("\x1b"); await f.seek("Environment name:"); await f.key("\r");
+  assert.match(f.text(), /SERVICE_TOKEN/); assert.match(f.text(), /Process-control/);
+  await f.key("\x1b"); await f.key("\x1b");
+  const source = await f.settings.open("project");
+  source.upsertSecret({ env: "EDIT_HELP", value: "private-help-sentinel", allowHosts: ["first.example"] }); await source.apply(); source.discard();
+  await f.action("Reload"); await f.choose("Confirm"); await f.list("Secrets", "Secrets:"); await f.seek("EDIT_HELP:"); await f.key("e");
+  await f.seek("Allowed hosts:"); assert.match(f.full(), /Which services are allowed to use this secret/);
+  assert.doesNotMatch(f.full(), /comma-separated|api\.typesafe|private-help-sentinel/);
+  await f.key("\r"); assert.match(f.text().replace(/\s+/g, " "), /at least one host is required/);
+  await f.key("\x1b"); await f.choose("Replace value / reference:");
+  assert.match(f.text().replace(/\s+/g, " "), /Leave blank to keep the existing secret and its original reference/);
+  assert.doesNotMatch(f.text(), /private-help-sentinel/);
+});
+
+test("nested secret hosts, network hosts and mount options explain one-item inputs", async (t) => {
+  const f = await fixture(t);
+  const source = await f.settings.open("project");
+  source.upsertSecret({ env: "ONE_HOST", value: "one-item-private", allowHosts: ["first.example"] });
+  source.upsertMount({ type: "tmpfs", guestPath: "/mnt/help", readonly: true, options: ["nodev"] });
+  source.upsertListEntry("network.allow_hosts", "network.example");
+  await source.apply(); source.discard(); await f.action("Reload"); await f.choose("Confirm");
+  const oneItem = (text: string, example: string) => {
+    assert.match(text.replace(/\s+/g, " "), /Enter one .*not a comma-separated list/);
+    assert.match(text, new RegExp(`Example: ${example}`));
+    assert.doesNotMatch(text, /Enter a comma-separated list|api\.typesafe|one-item-private/);
+  };
+  await f.list("Secrets", "Secrets:"); await f.expand("ONE_HOST:"); await f.expand("Allowed hosts:");
+  await f.key("a"); oneItem(f.text(), "api.example.com"); assert.match(f.text().replace(/\s+/g, " "), /At least one allowed host must remain/); await f.key("\x1b");
+  await f.seek("first.example"); await f.key("e"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
+  await f.list("Network", "Allowed hosts:"); await f.key("a"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
+  await f.seek("network.example"); await f.key("e"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
+  await f.list("Mounts", "Mounts:"); await f.expand("/mnt/help:"); await f.expand("Options:");
+  await f.key("a"); oneItem(f.text(), "noexec"); await f.key("\x1b");
+  await f.seek("nodev"); await f.key("e"); oneItem(f.text(), "noexec"); await f.key("\x1b");
+  await f.seek("Options:"); await f.key("e"); await f.choose("Options:");
+  assert.match(f.text().replace(/\s+/g, " "), /Enter a comma-separated list of mount options/);
+  assert.match(f.text(), /Example: noexec, nosuid, nodev/);
+  assert.notEqual(MOUNT_OPTION_HELP.itemHelp, MOUNT_OPTION_HELP.editorHelp);
+});
+
+test("mount add/edit forms have brief hints and accurate field and choice guidance", async (t) => {
+  const f = await fixture(t);
+  await f.list("Mounts", "Mounts:"); await f.key("a");
+  assert.doesNotMatch(f.full(), /absolute|sockets|noexec|tmpfs creates/);
+  await f.choose("Type:"); assert.match(f.full(), /Choose dir, file, named or tmpfs/);
+  await f.seek("named"); assert.match(f.text(), /volume.*name instead of a host path/);
+  await f.seek("tmpfs"); assert.match(f.text(), /leave Host path blank/);
+  await f.choose("Back");
+  for (const [field, patterns] of [
+    ["Host path / volume name:", [/absolute host path/, /for named, enter a volume name/, /for tmpfs, leave blank/, /Host sockets are blocked/, /Writable mounts must not expose host configuration/]],
+    ["Guest path:", [/absolute guest path/, /Example: \/mnt\/data/, /workspace, \/tmp, protected guest system/, /another mount/]],
+    ["Options:", [/comma-separated/, /Example: noexec, nosuid, nodev/]],
+  ] as const) {
+    await f.choose(field); for (const pattern of patterns) assert.match(f.full().replace(/\s+/g, " "), pattern); await f.key("\x1b");
+  }
+  await f.choose("Read only:"); await f.seek("false");
+  assert.match(f.full(), /actual HOST files/); assert.match(f.full(), /Writable policy exposure is blocked/);
+  await f.choose("true"); assert.match(f.full(), /Read only: true/);
+});
+
+test("every scalar/list editor and choice has specific guidance, with static examples", async (t) => {
+  const bootstrap = SETTINGS_FIELDS.find((field) => field.path === "bootstrap_tools")!;
+  assert.equal(bootstrap.choiceHelp!.true, "Install missing guest tools when needed.");
+  assert.doesNotMatch(bootstrap.description, /always/i);
+  const f = await fixture(t);
+  for (const field of SETTINGS_FIELDS.filter((field) => !["secrets", "mounts"].includes(field.path))) {
+    await f.node(field.section, "");
+    // Match the label from the schema's path without coupling this test to friendly label overrides.
+    const labels: Record<string, string> = { image: "Guest image:", cpus: "Virtual CPUs:", memory_mib: "Memory (MiB):", sandbox_name: "Sandbox name:", "network.mode": "Network mode:", "network.allow_hosts": "Allowed hosts:", "docker.mode": "Docker mode:" };
+    const label = labels[field.path] ?? field.path.split(".").pop()!.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ") + ":";
+    await f.seek(label);
+    // Collections expose add, scalars expose edit.
+    const isList = ["route_tools", "pass_through_tools", "host_env", "host_ro_allowlist", "network.allow_hosts", "network.publish_ports"].includes(field.path);
+    await f.key(isList ? "a" : "e");
+    assert.ok(f.full().replace(/\s+/g, " ").includes(field.editorHelp.replace(/\s+/g, " ")), field.path);
+    if (field.choices) {
+      for (const choice of field.choices) { await f.seek(String(choice)); assert.ok(f.full().includes(field.choiceHelp![String(choice)]!), field.path); }
+    }
+    await f.key("\x1b");
+  }
+});
+
+test("long instructions preserve paragraphs safely and never displace masked input or editor keys", async (t) => {
+  const f = await fixture(t);
+  await f.list("Secrets", "Secrets:"); await f.key("a"); await f.choose("Replace value / reference:");
+  await f.key("\x1b[200~masked-guidance-sentinel\x1b[201~");
+  for (const width of [24, 32, 80]) for (const height of [1, 2, 3, 12, 20]) {
+    f.terminal.columns = width; f.terminal.rows = height;
+    const lines = f.panel.render(width).map(stripTerminalSequences);
+    assert.equal(lines.length, height); assert.ok(lines.every((line) => visibleWidth(line) === width));
+    assert.doesNotMatch(lines.join("\n"), /masked-guidance-sentinel/);
+    assert.ok(lines.some((line) => line.includes("***")), `${width}x${height}: masked input visible`);
+    if (height >= 2) assert.match(lines.at(-1)!, /Enter keep.*Esc cancel/);
+    if (height >= 12) assert.match(lines.join("\n").replace(/\s+/g, " "), /input stays masked/);
+  }
+  await f.key("\x1b[D"); await f.key("q"); await f.key("\r");
+  assert.match(f.full(), /replacement/); assert.equal(f.closed(), false); assert.doesNotMatch(f.full(), /masked-guidance-sentinel/);
+  // Exercise the static-help sanitizer without passing configured or secret data into help.
+  const field = SETTINGS_FIELDS.find((field) => field.path === "cpus")!;
+  const original = field.editorHelp;
+  try {
+    field.editorHelp = "First paragraph\n\nSecond \x1b[2Jparagraph\x1b]0;unsafe-title\x07\nExample: 2";
+    await f.key("\x1b"); await f.edit("Resources", "Virtual CPUs:");
+    f.terminal.columns = 80; f.terminal.rows = 20;
+    assert.match(f.text(), /First paragraph *\n *\nSecond paragraph *\nExample: 2/);
+    assert.doesNotMatch(f.panel.render(80).join("\n"), /\x1b\[2J|unsafe-title/);
+  } finally { field.editorHelp = original; }
 });

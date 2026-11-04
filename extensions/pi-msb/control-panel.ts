@@ -3,13 +3,13 @@ import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-a
 import { ConfigError, DEFAULT_CONFIG, normalizeConfigPath, parseTomlConfig } from "./config.ts";
 import { SettingsInput } from "./settings-input.ts";
 import { MaskedInput } from "./masked-input.ts";
-import { SECTIONS, SETTINGS_FIELDS, valueAt, type SettingsField } from "./settings-fields.ts";
+import { SECTIONS, SETTINGS_FIELDS, valueAt, SECRET_HOST_HELP, MOUNT_OPTION_HELP, type FieldHelp, type SettingsField } from "./settings-fields.ts";
 import type { SettingsDraft, SettingsScope } from "./settings.ts";
 import type { MsbControl, Config } from "./types.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
-type Row = { id: string; label: string; detail?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
-type FormField = { name: string; value: string; secret?: boolean; choices?: string[]; description: string };
+type Row = { id: string; label: string; detail?: string; instructions?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
+type FormField = FieldHelp & { name: string; value: string; secret?: boolean; choices?: string[] };
 const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "ephemeral", env: "environment", defaults: "default" }[source] ?? source);
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
 /** Strip terminal controls from every external label, log, path and value. */
@@ -58,7 +58,7 @@ export class ControlPanel implements Component, Focusable {
   #paths: Record<string, string>;
   #warnings: string[];
   #scalarIntent = new Map<string, unknown>();
-  #editing?: { input: SettingsInput | MaskedInput; accept: (value: string) => void | Promise<void>; cancel: () => void; label: string };
+  #editing?: { input: SettingsInput | MaskedInput; accept: (value: string) => void | Promise<void>; cancel: () => void; label: string; editorHelp: string };
   #back?: () => void | Promise<void>;
   #formCleanup?: () => void;
   #formDirty = false;
@@ -142,7 +142,7 @@ export class ControlPanel implements Component, Focusable {
         const origin = !known ? "unverified" : originLabel(provenance[normalizeConfigPath(path).join(".")] ?? fallbackSource);
         const edit = readonly ? undefined : () => this.#field(field);
         const add = readonly || !collection ? undefined : () => this.#addEntry(field);
-        const row: Row = { id, label: fieldLabel(path), value: !known ? "unknown — not verified" : Array.isArray(value) ? `${value.length} entries` : display(value), origin, detail: `${path}: ${field.description}`, readonly, edit: collection ? undefined : edit, add, removeLabel: "inherit", remove: readonly || collection ? undefined : () => this.#inherit(path) };
+        const row: Row = { id, label: fieldLabel(path), value: !known ? "unknown — not verified" : Array.isArray(value) ? `${value.length} entries` : display(value), origin, detail: field.hint, readonly, edit: collection ? undefined : edit, add, removeLabel: "inherit", remove: readonly || collection ? undefined : () => this.#inherit(path) };
         if (collection && known) {
           row.children = (Array.isArray(value) ? value : []).map((entry: any) => {
             const identity = path === "secrets" ? entry.env : path === "mounts" ? entry.guestPath : String(entry);
@@ -201,12 +201,12 @@ export class ControlPanel implements Component, Focusable {
   #field(field: SettingsField): void {
     const value = this.#rowValue(field.path) ?? valueAt(DEFAULT_CONFIG, field.path);
     const set = (next: unknown) => this.#set(field.path, next);
-    const input = () => this.#input(field.path, String(value ?? ""), false, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text));
+    const input = () => this.#input(field.path, String(value ?? ""), false, field.editorHelp, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text));
     if (field.choices || field.path === "sandbox_name") this.#page([
-      { id: "description", label: fieldLabel(field.path), detail: `${field.description} Source: ${this.#owner(field.path)}` },
-      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: String(choice), detail: field.description, action: () => set(choice) })) : [
-        { id: "automatic-name", label: "Automatic session name (ephemeral only)", action: () => set(null) },
-        { id: "edit", label: "Edit value", action: input },
+      { id: "description", label: fieldLabel(field.path), detail: `${field.hint}. Source: ${this.#owner(field.path)}`, instructions: field.editorHelp },
+      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: String(choice), instructions: field.choiceHelp![String(choice)]!, action: () => set(choice) })) : [
+        { id: "automatic-name", label: "Automatic session name (ephemeral only)", instructions: "Keep a session-generated name without persisting it to project or global defaults.", action: () => set(null) },
+        { id: "edit", label: "Edit value", instructions: "Enter a custom name, such as my-project, instead of a session-generated name.", action: input },
       ]),
       { id: "back", label: "Back", action: () => this.#home() },
     ], () => this.#home());
@@ -225,7 +225,7 @@ export class ControlPanel implements Component, Focusable {
       this.#expanded.add(`configuration/${path}/${identity}`); this.#expanded.add(parent);
       this.#treeFocus = value === undefined ? parent : `${parent}/${value}`;
     });
-    if (remove) return apply(); else this.#input(label, previous ?? "", false, apply);
+    if (remove) return apply(); else this.#input(label, previous ?? "", false, path === "secrets" ? SECRET_HOST_HELP.itemHelp : MOUNT_OPTION_HELP.itemHelp, apply);
   }
   #addEntry(field: SettingsField): void { this.#editEntry(field); }
   #entryDone(path: string, identity: string, previous?: string): void {
@@ -245,16 +245,16 @@ export class ControlPanel implements Component, Focusable {
   #editEntry(field: SettingsField, entry?: any, child?: string): void {
     if (field.path === "secrets") { this.#secret(entry, child); return; }
     if (field.path === "mounts") { this.#mount(entry, child); return; }
-    this.#input(field.path, entry ?? "", false, (value) => this.#propose((draft) => {
+    this.#input(field.path, entry ?? "", false, field.editorHelp, (value) => this.#propose((draft) => {
       draft.upsertListEntry(field.path, value, entry);
       this.#entryDone(field.path, value, entry);
     }));
   }
   #secret(entry?: { env: string; allowHosts: string[] }, child?: string): void {
     this.#form("Secret (never displayed)", [
-      { name: "Environment name", value: entry?.env ?? "", description: "A valid environment variable, not a process-control name." },
-      { name: "Allowed hosts", value: (entry?.allowHosts ?? []).join(", "), description: "Comma-separated destinations; at least one is required." },
-      { name: "Replace value / reference", value: "", secret: true, description: entry ? "Leave blank to retain the private existing value. $ENV:NAME or $FILE:path recommended." : "Masked entry. $ENV:NAME or $FILE:path recommended." },
+      { name: "Environment name", value: entry?.env ?? "", hint: "The variable your app reads", editorHelp: "Enter an environment variable name using letters, digits and underscores; do not start with a digit.\nExample: SERVICE_TOKEN\nProcess-control variable names are not allowed." },
+      { name: "Allowed hosts", value: (entry?.allowHosts ?? []).join(", "), ...SECRET_HOST_HELP },
+      { name: "Replace value / reference", value: "", secret: true, hint: entry ? "Keep or replace the private value" : "A private value for your app", editorHelp: (entry ? "Leave blank to keep the existing secret and its original reference.\n" : "Enter a secret value or reference; input stays masked.\n") + "Reference syntax: $ENV:NAME or $FILE:/absolute/path (recommended).\nReferences are resolved privately; never paste credentials into help or logs." },
     ], (fields, scope) => this.#propose((draft) => {
       const env = fields[0]!.value; const allowHosts = fields[1]!.value.split(",").map((host) => host.trim()).filter(Boolean); const value = fields[2]!.value;
       draft.upsertSecret({ env, allowHosts, ...(value ? { value } : {}) }, entry?.env);
@@ -263,11 +263,11 @@ export class ControlPanel implements Component, Focusable {
   }
   #mount(entry?: Config["mounts"][number], child?: string): void {
     this.#form("Mount", [
-      { name: "Type", value: entry?.type ?? "dir", choices: ["dir", "file", "named", "tmpfs"], description: "dir/file mounts a host directory/file; named uses a named volume; tmpfs creates temporary memory-backed storage." },
-      { name: "Host path / volume name", value: entry?.hostPath ?? "", description: "Absolute host path for dir/file; no host socket or writable policy exposure." },
-      { name: "Guest path", value: entry?.guestPath ?? "", description: "Absolute path; cannot shadow workspace, /tmp or guest system paths." },
-      { name: "Read only", value: String(entry?.readonly ?? true), choices: ["true", "false"], description: "true prevents guest writes; false permits writes, including host files for dir/file mounts." },
-      { name: "Options", value: (entry?.options ?? []).join(", "), description: "Comma-separated noexec, nosuid, nodev." },
+      { name: "Type", value: entry?.type ?? "dir", choices: ["dir", "file", "named", "tmpfs"], hint: "What kind of storage to attach", editorHelp: "Choose dir, file, named or tmpfs storage.\nFor example, dir shares a host directory; tmpfs uses temporary memory-backed storage.", choiceHelp: { dir: "Mount a host directory; Host path must be absolute.", file: "Mount a host file; Host path must be absolute.", named: "Use a named volume; enter its name instead of a host path.", tmpfs: "Create temporary memory-backed storage; leave Host path blank." } },
+      { name: "Host path / volume name", value: entry?.hostPath ?? "", hint: "Where this storage comes from", editorHelp: "For dir/file, enter an absolute host path; for named, enter a volume name; for tmpfs, leave blank.\nExamples: /opt/shared-data or app-data\nHost sockets are blocked. Writable mounts must not expose host configuration or policy paths." },
+      { name: "Guest path", value: entry?.guestPath ?? "", hint: "Where the sandbox sees this storage", editorHelp: "Enter an absolute guest path.\nExample: /mnt/data\nIt must not overlap the workspace, /tmp, protected guest system or Docker runtime paths, or another mount." },
+      { name: "Read only", value: String(entry?.readonly ?? true), choices: ["true", "false"], hint: "Whether the sandbox can change files", editorHelp: "Choose true to prevent guest writes, or false to allow them.\nFor example, true is appropriate for shared reference data.", choiceHelp: { true: "Prevent guest writes through this mount.", false: "Permit writes; dir/file mounts let the guest change the actual HOST files. Writable policy exposure is blocked." } },
+      { name: "Options", value: (entry?.options ?? []).join(", "), ...MOUNT_OPTION_HELP },
     ], (fields, scope) => this.#propose((draft) => {
       const mount = { type: fields[0]!.value as Config["mounts"][number]["type"], ...(fields[1]!.value ? { hostPath: fields[1]!.value } : {}), guestPath: fields[2]!.value, readonly: fields[3]!.value === "true", options: fields[4]!.value.split(",").map((option) => option.trim()).filter(Boolean) };
       draft.upsertMount(mount, entry?.guestPath); this.#entryDone("mounts", mount.guestPath, entry?.guestPath);
@@ -278,9 +278,13 @@ export class ControlPanel implements Component, Focusable {
     this.#formDirty = false; this.#formCleanup = clear;
     const show = () => this.#page([
       { id: "title", label: title },
-      ...fields.map((field) => ({ id: field.name, label: `${field.name}: ${field.secret ? field.value ? "******** (replacement)" : "not replaced" : field.value}`, detail: field.description, action: () => {
-        if (field.choices) this.#page(field.choices.map((value) => ({ id: value, label: value, detail: field.description, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })), show);
-        else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, (value) => { this.#formDirty ||= field.value !== value; field.value = value; show(); }, show);
+      ...fields.map((field) => ({ id: field.name, label: `${field.name}: ${field.secret ? field.value ? "******** (replacement)" : "not replaced" : field.value}`, detail: field.hint, action: () => {
+        if (field.choices) this.#page([
+          { id: "title", label: field.name, instructions: field.editorHelp },
+          ...field.choices.map((value) => ({ id: value, label: value, instructions: field.choiceHelp![value]!, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })),
+          { id: "back", label: "Back", action: show },
+        ], show);
+        else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, field.editorHelp, (value) => { this.#formDirty ||= field.value !== value; field.value = value; show(); }, show);
       } })),
       ...this.#scopeRows((scope) => save(fields, scope)),
       { id: "cancel-item", label: "Cancel", button: true, action: () => { clear(); back(); } },
@@ -288,11 +292,11 @@ export class ControlPanel implements Component, Focusable {
     show();
     if (selected) this.#focus = Math.max(0, this.#rows.findIndex((row) => row.id === selected));
   }
-  #input(label: string, value: string, secret: boolean, accept: (value: string) => void | Promise<void>, cancel = () => this.#home()): void {
+  #input(label: string, value: string, secret: boolean, editorHelp: string, accept: (value: string) => void | Promise<void>, cancel = () => this.#home()): void {
     const input = secret ? new MaskedInput() : new SettingsInput();
     if (input instanceof SettingsInput) { input.setValue(safeText(value)); input.handleInput("\x1b[F"); }
     input.focused = this.focused;
-    this.#editing = { input, label, accept, cancel }; this.#refresh();
+    this.#editing = { input, label, editorHelp, accept, cancel }; this.#refresh();
   }
   #confirm(title: string, detail: string, action: () => void | Promise<void>, back: () => void | Promise<void> = () => this.#home()): void {
     this.#page([
@@ -388,7 +392,7 @@ export class ControlPanel implements Component, Focusable {
       dangerous("Turn off (HOST execution)", "DANGER: stops/removes the sandbox. Routed tools execute on the HOST. Guest ephemeral state is lost.", () => this.#control.setEnabled(false)),
       dangerous("Reload settings", "Re-read host configuration/environment. Changed runtime settings recreate the guest and lose ephemeral state.", () => this.#control.reload()),
       { id: "prune", label: "Prune stale sandboxes", detail: "Remove only stale owned sandboxes, never host files or volumes.", action: () => this.#confirm("Prune stale sandboxes?", "Current session and live owners are kept. Host files and named volumes are not deleted.", async () => { await this.#ctx.waitForIdle(); if (this.#closed) return; const report = await this.#control.pruneNow(); this.#text("Prune result", `Inspected: ${report.inspected}\nRemoved: ${report.removed.join(", ")}\nKept: ${report.kept.join(", ")}\nErrors: ${report.errors.length}\n${report.errors.join("\n")}`); }) },
-      { id: "logs", label: "Recent logs (redacted)", detail: "Choose a non-negative tail count; guest logs may contain sensitive application data.", action: () => this.#input("Log tail lines (non-negative integer)", "100", false, async (value) => {
+      { id: "logs", label: "Recent logs (redacted)", detail: "Choose a non-negative tail count; guest logs may contain sensitive application data.", action: () => this.#input("Log tail lines (non-negative integer)", "100", false, "Enter a non-negative integer for the number of recent log lines.\nExample: 100\nGuest logs may contain sensitive application data even when redacted.", async (value) => {
         if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) { this.#report("Invalid log tail. Enter one non-negative safe integer."); return; }
         this.#text("Recent logs", await this.#control.getLogs(Number(value)));
       }) },
@@ -506,6 +510,10 @@ export class ControlPanel implements Component, Focusable {
     const candidate = candidates.find(({ hints, separator }) => visibleWidth(hints.map(text).join(separator)) <= width) ?? candidates[candidates.length - 1]!;
     return candidate.hints.map(([key, action]) => this.#theme.bold(this.#theme.fg("accent", key)) + (action ? this.#theme.fg("muted", ` ${action}`) : "")).join(this.#theme.fg("muted", candidate.separator));
   }
+  #instructions(help: string, width: number): string[] {
+    // Only static help gets intentional line breaks; every line still strips terminal controls.
+    return help.split("\n").flatMap((line) => wrapTextWithAnsi(this.#theme.fg("text", safeText(line)), width));
+  }
   render(width: number): string[] {
     width = Math.max(1, Math.floor(width));
     const height = Math.max(1, Math.floor(this.#tui.terminal.rows));
@@ -521,7 +529,11 @@ export class ControlPanel implements Component, Focusable {
     if (this.#editing) {
       const edit = this.#editing;
       const prompt = wrapTextWithAnsi(this.#theme.bold(this.#theme.fg("accent", safeText(edit.label))), width);
-      lines.push(...prompt.slice(0, Math.max(0, capacity - 1)));
+      // Input and the pinned footer win over help on tiny screens; editing keys never scroll help.
+      const promptLines = prompt.slice(0, Math.max(0, capacity - 1));
+      lines.push(...promptLines);
+      const helpLines = this.#instructions(edit.editorHelp, width);
+      lines.push(...helpLines.slice(0, Math.max(0, capacity - promptLines.length - 1)));
       edit.input.focused = this.focused;
       lines.push(...edit.input.render(width).slice(0, 1).map((line) => truncateToWidth(line, width)));
     } else {
@@ -537,7 +549,8 @@ export class ControlPanel implements Component, Focusable {
           + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "");
         const labelLines = wrapTextWithAnsi(label, width);
         body.push(...labelLines.map((line) => active ? this.#theme.inverse(line) : line));
-        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "configuration/status/state")) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));
+        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "configuration/status/state")) body.push(...wrapTextWithAnsi(this.#theme.fg("muted", safeText(row.detail)), width));
+        if (row.instructions && (active || width >= 80)) body.push(...this.#instructions(row.instructions, width));
         this.#rowHeights.push(body.length - rowStart);
       }
       this.#detailOffset = Math.min(this.#detailOffset, Math.max(0, (this.#rowHeights[this.#focus] ?? 1) - capacity));

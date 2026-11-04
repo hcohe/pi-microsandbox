@@ -59,8 +59,10 @@ settings or runtime, and clears secret buffers.
 The contextual footer is exactly one line pinned to the terminal's last row,
 with bold, theme-accented keys and muted action words. It keeps full labels when
 space permits and compacts to grouped keys (`e/a/d`) and arrow navigation
-at mobile widths. Editors show keep/cancel hints, not tree commands; busy screens
-ask you to wait. Content has a separate viewport and cannot displace the footer.
+at mobile widths. Menus show short, friendly field hints. Value and choice editors
+add format guidance and examples; on tiny screens, input takes priority over that
+guidance. Editors show keep/cancel hints, not tree commands; busy screens ask you
+to wait. Content has a separate viewport and cannot displace the footer.
 At the physical limit of a one-row terminal only, selected content/errors take
 priority over hints. Selection scrolls into view and reflows on resize.
 Results/errors become focused, scrollable rows even at one or three terminal

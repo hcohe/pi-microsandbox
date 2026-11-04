@@ -42,7 +42,8 @@ and **Actions** trees directly below **MICROSANDBOX**, initially focused on Gene
 **Status** contains read-only **[runtime]** metadata, not duplicate settings.
 Expand with `l`/right, fold or go to parent with `h`/left, move with `j`/`k` or up/down. `e` edits, `a` adds, `d` deletes/inherits,
 and `q` closes. One contextual hint line stays pinned at the bottom, with accented
-keys and muted actions; narrow screens use grouped keys. [All keys →](docs/commands.md)
+keys and muted actions; narrow screens use grouped keys. Menus offer short hints;
+value editors explain the format with examples. [All keys →](docs/commands.md)
 
 ## Your project, your sandbox
 
