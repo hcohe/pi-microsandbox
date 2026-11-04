@@ -188,6 +188,23 @@ test("edit choices omit Use and Back uses the muted theme color", async (t) => {
   assert.match(f.selected(), /^Automatic session name/);
 });
 
+test("menu and input headings use the main title accent and bold styling", async (t) => {
+  const theme = { ...plainTheme, fg: (role: string, text: string) => `\x1b[${role === "accent" ? 36 : 37}m${text}\x1b[39m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` };
+  const f = await fixture(t, theme);
+  const assertHeading = (label: string) => assert.ok(f.panel.render(160).join("\n").includes(theme.bold(theme.fg("accent", label))), label);
+  await f.list("Mounts", "Mounts:"); await f.key("a"); assertHeading("Mount"); assertHeading("MICROSANDBOX");
+  assert.match(f.full(), /dir\/file mounts a host directory\/file; named uses a named volume; tmpfs creates temporary memory-backed storage\./);
+  assert.match(f.full(), /true prevents guest writes; false permits writes, including host files for dir\/file mounts\./);
+  await f.choose("Type:"); assert.match(f.full(), /tmpfs creates temporary memory-backed storage/);
+  await f.key("\x1b"); await f.choose("Read only:"); assert.match(f.full(), /true prevents guest writes/);
+  await f.key("\x1b"); await f.key("\x1b");
+  await f.edit("General", "Show Footer:"); assertHeading("Show Footer");
+  await f.choose("false"); assertHeading("Apply change");
+  await f.choose("Cancel");
+  await f.edit("Resources", "Virtual CPUs:"); assertHeading("cpus");
+  await f.key("\x1b");
+});
+
 test("diagnostics preserve log-tail validation, prune errors and Docker reasons", async (t) => {
   const f = await fixture(t); let tail: number | undefined; f.control.getLogs = async (value) => { tail = value; return "selected log"; };
   f.control.pruneNow = async () => ({ inspected: 1, removed: [], kept: ["live"], errors: ["Test diagnostic: owner conflict"] });

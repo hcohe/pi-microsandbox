@@ -9,7 +9,7 @@ import type { MsbControl, Config } from "./types.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
 type Row = { id: string; label: string; detail?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
-type FormField = { name: string; value: string; secret?: boolean; choices?: string[]; description?: string };
+type FormField = { name: string; value: string; secret?: boolean; choices?: string[]; description: string };
 const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "ephemeral", env: "environment", defaults: "default" }[source] ?? source);
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
 /** Strip terminal controls from every external label, log, path and value. */
@@ -204,7 +204,7 @@ export class ControlPanel implements Component, Focusable {
     const input = () => this.#input(field.path, String(value ?? ""), false, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text));
     if (field.choices || field.path === "sandbox_name") this.#page([
       { id: "description", label: fieldLabel(field.path), detail: `${field.description} Source: ${this.#owner(field.path)}` },
-      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: String(choice), action: () => set(choice) })) : [
+      ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: String(choice), detail: field.description, action: () => set(choice) })) : [
         { id: "automatic-name", label: "Automatic session name (ephemeral only)", action: () => set(null) },
         { id: "edit", label: "Edit value", action: input },
       ]),
@@ -263,10 +263,10 @@ export class ControlPanel implements Component, Focusable {
   }
   #mount(entry?: Config["mounts"][number], child?: string): void {
     this.#form("Mount", [
-      { name: "Type", value: entry?.type ?? "dir", choices: ["dir", "file", "named", "tmpfs"] },
+      { name: "Type", value: entry?.type ?? "dir", choices: ["dir", "file", "named", "tmpfs"], description: "dir/file mounts a host directory/file; named uses a named volume; tmpfs creates temporary memory-backed storage." },
       { name: "Host path / volume name", value: entry?.hostPath ?? "", description: "Absolute host path for dir/file; no host socket or writable policy exposure." },
       { name: "Guest path", value: entry?.guestPath ?? "", description: "Absolute path; cannot shadow workspace, /tmp or guest system paths." },
-      { name: "Read only", value: String(entry?.readonly ?? true), choices: ["true", "false"] },
+      { name: "Read only", value: String(entry?.readonly ?? true), choices: ["true", "false"], description: "true prevents guest writes; false permits writes, including host files for dir/file mounts." },
       { name: "Options", value: (entry?.options ?? []).join(", "), description: "Comma-separated noexec, nosuid, nodev." },
     ], (fields, scope) => this.#propose((draft) => {
       const mount = { type: fields[0]!.value as Config["mounts"][number]["type"], ...(fields[1]!.value ? { hostPath: fields[1]!.value } : {}), guestPath: fields[2]!.value, readonly: fields[3]!.value === "true", options: fields[4]!.value.split(",").map((option) => option.trim()).filter(Boolean) };
@@ -279,7 +279,7 @@ export class ControlPanel implements Component, Focusable {
     const show = () => this.#page([
       { id: "title", label: title },
       ...fields.map((field) => ({ id: field.name, label: `${field.name}: ${field.secret ? field.value ? "******** (replacement)" : "not replaced" : field.value}`, detail: field.description, action: () => {
-        if (field.choices) this.#page(field.choices.map((value) => ({ id: value, label: value, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })), show);
+        if (field.choices) this.#page(field.choices.map((value) => ({ id: value, label: value, detail: field.description, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })), show);
         else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, (value) => { this.#formDirty ||= field.value !== value; field.value = value; show(); }, show);
       } })),
       ...this.#scopeRows((scope) => save(fields, scope)),
@@ -520,7 +520,7 @@ export class ControlPanel implements Component, Focusable {
     const capacity = Math.max(1, height - lines.length - footerCount); this.#capacity = capacity;
     if (this.#editing) {
       const edit = this.#editing;
-      const prompt = wrapTextWithAnsi(safeText(edit.label), width);
+      const prompt = wrapTextWithAnsi(this.#theme.bold(this.#theme.fg("accent", safeText(edit.label))), width);
       lines.push(...prompt.slice(0, Math.max(0, capacity - 1)));
       edit.input.focused = this.focused;
       lines.push(...edit.input.render(width).slice(0, 1).map((line) => truncateToWidth(line, width)));
@@ -531,7 +531,8 @@ export class ControlPanel implements Component, Focusable {
         const rowStart = body.length;
         if (active) focusedLine = rowStart;
         const prefix = `${active ? ">" : " "} ${"  ".repeat(row.depth ?? 0)}${row.children ? this.#expanded.has(row.id) ? "▾ " : "▸ " : this.#tree ? "  " : ""}`;
-        const label = prefix + this.#theme.fg(row.children || row.button && !row.disabled && !row.id.includes("cancel") ? "accent" : row.id === "back" || row.id.includes("cancel") || row.disabled ? "muted" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", row.button ? this.#theme.bold(`[ ${safeText(row.label)} ]`) : safeText(row.label))
+        const heading = !this.#tree && ["title", "description", "proposal"].includes(row.id);
+        const label = prefix + (heading ? this.#theme.bold(this.#theme.fg("accent", safeText(row.label))) : this.#theme.fg(row.children || row.button && !row.disabled && !row.id.includes("cancel") ? "accent" : row.id === "back" || row.id.includes("cancel") || row.disabled ? "muted" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", row.button ? this.#theme.bold(`[ ${safeText(row.label)} ]`) : safeText(row.label)))
           + (row.value !== undefined ? this.#theme.fg(row.id === "configuration/status/state" ? this.#control.getState().status === "active" ? "success" : ["unavailable", "host-fallback"].includes(this.#control.getState().status) ? "error" : "warning" : "syntaxString", `: ${safeText(row.value)}`) : "")
           + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "");
         const labelLines = wrapTextWithAnsi(label, width);
