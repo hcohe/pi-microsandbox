@@ -15,19 +15,29 @@ import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
 import { registerSandboxTools } from "./tools.ts";
-import type { ResolvedConfig, RuntimeState } from "./types.ts";
+import { displayId, type ResolvedConfig, type RuntimeState } from "./types.ts";
 
-export function footerStatus(state: RuntimeState, visible: boolean): string | undefined {
+export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: string): string | undefined {
   if (!visible) return undefined;
+  const sessionDisplayId = sessionId ? displayId(sessionId) : undefined;
   switch (state.status) {
-    case "active": return `msb-${state.info?.displayId ?? "active"}`;
+    case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}`;
     case "off": return "MSB host";
     case "host-fallback": return "MSB host fallback";
     case "unavailable": return "MSB blocked";
-    case "booting": return "(msb) preparing sandbox...";
+    case "booting": return `msb-${sessionDisplayId ?? state.info?.displayId ?? "…"}`;
     case "stopping": return "MSB stopping";
     default: return "MSB disabled";
   }
+}
+
+export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "fg">, text: string, status: RuntimeState["status"], frame = 0): string {
+  let circleColor: "success" | "warning" | "dim" | "error" = "dim";
+  if (status === "active") circleColor = "success";
+  else if (status === "booting") circleColor = frame % 2 === 0 ? "warning" : "dim";
+  else if (status === "unavailable") circleColor = "error";
+  else if (status === "off" || status === "host-fallback" || status === "stopping") circleColor = "warning";
+  return `\x1b[22m${theme.fg("dim", text)} ${theme.fg(circleColor, "●")}\x1b[22m`;
 }
 
 /**
@@ -56,9 +66,6 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
   let customFooterInstalled = false;
 
-  const styleFooterStatus = (ctx: ExtensionContext, text: string): string =>
-    `\x1b[22m${ctx.ui.theme.fg("dim", text)}\x1b[22m`;
-
   const stopBootAnimation = (): void => {
     if (bootAnimation !== undefined) {
       clearInterval(bootAnimation);
@@ -66,17 +73,16 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     }
   };
 
-  const startBootAnimation = (ctx: ExtensionContext): void => {
+  const startBootAnimation = (): void => {
     if (bootAnimation !== undefined) return;
-    const frames = [
-      "(msb) preparing sandbox.",
-      "(msb) preparing sandbox..",
-      "(msb) preparing sandbox...",
-    ];
     let frame = 0;
     const render = (): void => {
-      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, frames[frame]));
-      frame = (frame + 1) % frames.length;
+      // Read the current session and theme on every tick, never a previous context.
+      const ctx = currentContext;
+      if (!ctx) return;
+      const text = footerStatus({ status: "booting", info: null }, true, ctx.sessionManager.getSessionId())!;
+      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, "booting", frame));
+      frame = (frame + 1) % 2;
     };
     render();
     bootAnimation = setInterval(render, 400);
@@ -89,7 +95,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   };
 
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
-    const text = footerStatus(state, integration.configRef.value.showFooter);
+    const text = footerStatus(state, integration.configRef.value.showFooter, ctx.sessionManager.getSessionId());
     if (text !== undefined) ensureCustomFooter(ctx);
     if (text === undefined) {
       stopBootAnimation();
@@ -97,11 +103,11 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       return;
     }
     if (state.status === "booting") {
-      startBootAnimation(ctx);
+      startBootAnimation();
       return;
     }
     stopBootAnimation();
-    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, text));
+    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state.status));
   };
 
   registerSandboxTools(pi, {
@@ -117,6 +123,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   registerMsbCommand(pi, integration.control);
 
   pi.on("session_start", async (_event, ctx) => {
+    stopBootAnimation();
     currentContext = ctx;
     currentSessionId = ctx.sessionManager.getSessionId();
     currentCwd = ctx.cwd;
@@ -163,6 +170,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       currentContext = ctx;
       currentSessionId = ctx.sessionManager.getSessionId();
       currentCwd = ctx.cwd;
+      stopBootAnimation();
+      updateStatus(ctx, { status: "booting", info: null });
       await integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
     }
     updateStatus(ctx, integration.control.getState());

@@ -45,6 +45,9 @@ and `q` closes. One contextual hint line stays pinned at the bottom, with accent
 keys and muted actions; narrow screens use grouped keys. Menus offer short hints;
 value editors explain the format with examples. [All keys →](docs/commands.md)
 
+The Pi footer shows **`msb-ID ●`**: a green circle when live, or a yellow/grey
+pulse while booting. Colors follow your theme; only the circle flashes.
+
 ## Your project, your sandbox
 
 The first enabled session creates
