@@ -378,7 +378,7 @@ export class ControlPanel implements Component, Focusable {
     if (this.#closed) { fresh.discard(); return; }
     this.#draft = fresh; this.#load();
   }
-  #feedbackRow(): Row { return { id: "feedback", label: `Result: ${this.#feedback}`, detail: "Enter for full result; arrows scroll wrapped text.", action: () => this.#text("Operation result", this.#feedback!) }; }
+  #feedbackRow(): Row { return { id: "feedback", label: `Result: ${this.#feedback}`, action: () => this.#text("Operation result", this.#feedback!) }; }
   #report(message: string): void {
     if (this.#closed) return;
     this.#formCleanup?.(); this.#feedback = message;

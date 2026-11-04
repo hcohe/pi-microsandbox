@@ -660,7 +660,7 @@ for (const scope of [0, 1, 2]) {
 
   test(`benign footer edit still applies immediately and reloads once: ${scope}`, async (t) => {
     const f = await fixture(t); await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(scope);
-    assert.match(f.full(), /Result: Applied/); assert.doesNotMatch(f.full(), /Review change/); assert.equal((await storage(f, scope)).showFooter, false); assert.deepEqual(f.calls, ["idle", "reload"]);
+    assert.match(f.full(), /Result: Applied/); assert.match(f.full(), /Back/); assert.doesNotMatch(f.full(), /Review change|Enter for full result|arrows scroll wrapped text/); assert.equal((await storage(f, scope)).showFooter, false); assert.deepEqual(f.calls, ["idle", "reload"]);
   });
 }
 
