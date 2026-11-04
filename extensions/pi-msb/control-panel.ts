@@ -300,7 +300,7 @@ export class ControlPanel implements Component, Focusable {
   }
   #confirm(title: string, detail: string, action: () => void | Promise<void>, back: () => void | Promise<void> = () => this.#home()): void {
     this.#page([
-      { id: "warning", label: title, detail },
+      { id: "warning", label: title, instructions: detail },
       { id: "cancel", label: "Cancel", button: true, action: back },
       { id: "confirm", label: "Confirm", button: true, action },
     ], back);
@@ -318,11 +318,24 @@ export class ControlPanel implements Component, Focusable {
       if (this.#closed) { target.discard(); return; }
       const preview = await (this.#control.previewSettings?.(target) ?? target.preview());
       if (this.#closed) { target.discard(); return; }
-      const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${originLabel(intent.source)}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`).join("; ");
+      const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${originLabel(intent.source)}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`);
       const effective = displayConfig(preview.effectiveToml);
       const intentPaths = new Set([...this.#scalarIntent.keys(), ...preview.changes.map((change) => change.path), ...preview.collections.map((entry) => entry.path)]);
       const hostBoundaryWarnings = [...intentPaths].map((path) => HOST_BOUNDARY_WARNINGS[path]).filter((warning): warning is string => warning !== undefined);
-      const summary = `${hostBoundaryWarnings.length ? `${hostBoundaryWarnings.join(" ")} ` : ""}${scope === "temporary" ? "Current integration session memory only" : `${target.path}. Persist defaults; reload this sandbox only. Others pick up on next start/reload`}. ${preview.changes.map((change) => `${change.path}: ${change.operation === "inherit" ? "inherit → " : ""}${/secret/i.test(change.path) ? "<redacted>" : display(valueAt(effective, change.path))}`).join("; ")}. ${entries ? `Collection intent: ${entries}. ` : ""}${preview.effect === "restart" ? "RESTART: guest ephemeral state and nested containers may be lost. In-flight tools must finish." : "Live routing/presentation update; no guest restart required."} ${preview.shadowed.length ? `Shadowed (NOT effective): ${preview.shadowed.join(", ")}.` : ""} Conflicting same-scope removal controls shown in changed fields are reconciled. Host bypass/network/mount/environment settings can widen access.`;
+      const summary = [
+        ...hostBoundaryWarnings,
+        ...(scope === "temporary" ? ["Current integration session memory only."] : [
+          `Settings file: ${target.path}`,
+          "Persist defaults; reload this sandbox only.",
+          "Others pick up on next start/reload.",
+        ]),
+        ...preview.changes.map((change) => `${change.path}: ${change.operation === "inherit" ? "inherit → " : ""}${/secret/i.test(change.path) ? "<redacted>" : display(valueAt(effective, change.path))}`),
+        ...entries.map((entry) => `Collection intent: ${entry}.`),
+        preview.effect === "restart" ? "RESTART: guest ephemeral state and nested containers may be lost. In-flight tools must finish." : "Live routing/presentation update; no guest restart required.",
+        ...(preview.shadowed.length ? [`Shadowed (NOT effective): ${preview.shadowed.join(", ")}.`] : []),
+        "Conflicting same-scope removal controls shown in changed fields are reconciled.",
+        "Host bypass/network/mount/environment settings can widen access.",
+      ].map(safeText).join("\n");
       const pending = target; this.#pending = pending;
       const apply = async () => {
         let saved = false; let applied = false; let message = "";
@@ -511,7 +524,7 @@ export class ControlPanel implements Component, Focusable {
     return candidate.hints.map(([key, action]) => this.#theme.bold(this.#theme.fg("accent", key)) + (action ? this.#theme.fg("muted", ` ${action}`) : "")).join(this.#theme.fg("muted", candidate.separator));
   }
   #instructions(help: string, width: number): string[] {
-    // Only static help gets intentional line breaks; every line still strips terminal controls.
+    // Preserve intentional help/review line breaks; every line still strips terminal controls.
     return help.split("\n").flatMap((line) => wrapTextWithAnsi(this.#theme.fg("muted", safeText(line)), width));
   }
   render(width: number): string[] {

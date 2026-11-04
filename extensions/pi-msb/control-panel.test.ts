@@ -183,6 +183,26 @@ test("long dangerous confirmations remain readable with arrows at short heights"
   assert.match(seen, /HOST/); assert.match(seen, /ephemeral/); assert.match(seen, /lost/);
 });
 
+test("Review change puts each point on its own line and keeps Cancel selected", async (t) => {
+  const f = await fixture(t, plainTheme, true);
+  await f.edit("Advanced", "Block Third Party:"); await f.choose("false"); await f.save(0);
+  assert.equal(f.selected(), "Cancel");
+  for (const width of [160, 80]) {
+    f.terminal.columns = width; f.terminal.rows = 24;
+    const frame = f.text(), lines = frame.split("\n");
+    for (const point of ["HOST execution / sandbox bypass:", "Current integration session memory only.", "block_third_party: false", "Live routing/presentation update;", "Conflicting same-scope removal controls", "Host bypass/network/mount/environment settings"]) {
+      assert.ok(lines.some((line) => line.startsWith(point)), `${width}: ${point}`);
+    }
+    assert.doesNotMatch(frame, /\. \.|Collection intent: \./);
+  }
+  f.terminal.columns = 24; f.terminal.rows = 3; await f.key("k");
+  let seen = "";
+  for (let n = 0; n < 100; n++) { seen += f.text() + "\n"; await f.key("\x1b[B"); }
+  assert.match(seen, /HOST/); assert.match(seen, /reconciled/); assert.match(seen, /widen access/);
+  f.terminal.columns = 80; f.terminal.rows = 24; await f.choose("Cancel");
+  assert.deepEqual(f.settings.temporary(), {});
+});
+
 test("edit choices omit Use and Back uses the muted theme color", async (t) => {
   const colors: Array<[string, string]> = [];
   const theme = { ...plainTheme, fg: (role: string, text: string) => { colors.push([role, text]); return text; } };
