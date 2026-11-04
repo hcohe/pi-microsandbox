@@ -105,8 +105,8 @@ export class ControlPanel implements Component, Focusable {
     const active = this.#control.getState().status === "active";
     return [
       { id: "apply-temporary", label: "Apply for current running sandbox only", button: true, disabled: !active, detail: active ? "Current integration session memory only; no disk writes." : "Unavailable: no running sandbox. Enable a sandbox first, or choose project/global defaults.", action: active ? () => apply("temporary") : undefined },
-      { id: "apply-project", label: "Apply for all sandboxes in this project", button: true, detail: "Persist project defaults and reload this sandbox. Others pick up on next start/reload. Higher overrides may shadow this change.", action: () => apply("project") },
-      { id: "apply-global", label: "Apply for all sandboxes globally on this host", button: true, detail: "Persist host defaults and reload this sandbox. Others pick up on next start/reload. Project/session overrides may shadow this change.", action: () => apply("global") },
+      { id: "apply-project", label: "Apply for all sandboxes in this project", button: true, detail: "Persist project defaults and reload this sandbox.", action: () => apply("project") },
+      { id: "apply-global", label: "Apply for all sandboxes globally on this host", button: true, detail: "Persist host defaults and reload this sandbox.", action: () => apply("global") },
     ];
   }
   #scopeActions(): void {

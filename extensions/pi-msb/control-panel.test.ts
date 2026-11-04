@@ -494,6 +494,9 @@ test("one compact themed footer and distinct focusable actions remain accessible
     const lines = f.panel.render(width).map(stripTerminalSequences); assert.match(lines.at(-1)!, /q close/); assert.doesNotMatch(lines.at(-1)!, /w\/P\/G|w ephemeral/); assert.equal(lines.filter((line) => line.includes("q close")).length, 1); assert.equal(lines.length, height); assert.ok(lines.every((line) => visibleWidth(line) === width));
   }
   f.terminal.columns = 80; f.terminal.rows = 20; await f.number("2");
+  assert.match(f.full(), /Persist project defaults and reload this sandbox\./);
+  assert.match(f.full(), /Persist host defaults and reload this sandbox\./);
+  assert.doesNotMatch(f.full(), /Others pick up on next|(?:Project\/session|Higher) overrides may shadow/);
   for (const label of [...APPLY, "Cancel"]) { await f.seek(label); assert.equal(f.selected(), label); }
   const frame = f.panel.render(160).join("\n"); assert.ok(frame.includes(theme.fg("accent", theme.bold(`[ ${APPLY[0]} ]`)))); assert.ok(frame.includes(theme.fg("muted", theme.bold("[ Cancel ]")))); assert.match(frame, /\x1b\[7m/);
   for (const width of [24, 32]) for (const height of [1, 2, 3, 12]) { f.terminal.columns = width; f.terminal.rows = height; for (const label of [...APPLY, "Cancel"]) { await f.seek(label); let seen = ""; for (let n = 0; n < 30; n++) { seen += (height >= 2 ? f.text().split("\n").slice(0, -1).join("\n") : f.text()) + "\n"; await f.key("\x1b[6~"); } assert.ok(seen.replace(/\s+/g, " ").includes(label), `${width}x${height}: ${label}`); } }
