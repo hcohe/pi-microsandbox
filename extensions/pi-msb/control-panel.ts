@@ -512,7 +512,7 @@ export class ControlPanel implements Component, Focusable {
   }
   #instructions(help: string, width: number): string[] {
     // Only static help gets intentional line breaks; every line still strips terminal controls.
-    return help.split("\n").flatMap((line) => wrapTextWithAnsi(this.#theme.fg("text", safeText(line)), width));
+    return help.split("\n").flatMap((line) => wrapTextWithAnsi(this.#theme.fg("muted", safeText(line)), width));
   }
   render(width: number): string[] {
     width = Math.max(1, Math.floor(width));
@@ -549,7 +549,7 @@ export class ControlPanel implements Component, Focusable {
           + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "");
         const labelLines = wrapTextWithAnsi(label, width);
         body.push(...labelLines.map((line) => active ? this.#theme.inverse(line) : line));
-        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "configuration/status/state")) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));
+        if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "configuration/status/state")) body.push(...wrapTextWithAnsi(this.#theme.fg("muted", safeText(row.detail)), width));
         if (row.instructions && (active || width >= 80)) body.push(...this.#instructions(row.instructions, width));
         this.#rowHeights.push(body.length - rowStart);
       }

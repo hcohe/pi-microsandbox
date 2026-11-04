@@ -682,7 +682,7 @@ test("Secret forms separate friendly hints from multiline Allowed hosts editor h
     assert.doesNotMatch(menu, /comma-separated|at least one|api\.typesafe|api\.example/);
   }
   colors.length = 0; f.panel.render(80);
-  assert.ok(colors.some(([role, text]) => role === "dim" && text === SECRET_HOST_HELP.hint));
+  assert.ok(colors.some(([role, text]) => role === "muted" && text === SECRET_HOST_HELP.hint));
   assert.ok(!colors.some(([role, text]) => role === "text" && text === SECRET_HOST_HELP.hint));
   await f.key("\r");
   for (const [width, height] of [[32, 12], [80, 20]]) {
@@ -693,6 +693,10 @@ test("Secret forms separate friendly hints from multiline Allowed hosts editor h
     const lines = input.split("\n");
     assert.ok(lines.findIndex((line) => line.includes("Enter a comma")) < lines.findIndex((line) => line.includes("Example:")));
     assert.match(lines.at(-1)!, /Enter keep.*Esc cancel/);
+  }
+  for (const line of SECRET_HOST_HELP.editorHelp.split("\n")) {
+    assert.ok(colors.some(([role, text]) => role === "muted" && text === line));
+    assert.ok(!colors.some(([role, text]) => role === "text" && text === line));
   }
   // Saved review frames contain no credentials, references or configured secret values.
   await writeFile("/tmp/pi-msb-two-level-helpers.frames.txt", frames.join("\n\n") + "\n");
