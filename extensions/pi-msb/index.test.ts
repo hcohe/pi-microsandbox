@@ -48,7 +48,7 @@ test("booting shows the real current-session ID before sandbox info exists", () 
 test("live footer puts a theme-success circle on the right of the dim label", () => {
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
-  assert.equal(styleFooterStatus(theme, footerStatus(active, true)!, "active"), "\x1b[22mmsb-bf9379 ●\x1b[22m");
+  assert.equal(styleFooterStatus(theme, footerStatus(active, true)!, active), "\x1b[22mmsb-bf9379 ●\x1b[22m");
   assert.deepEqual(calls, [["dim", "msb-bf9379"], ["success", "●"]]);
 });
 
@@ -58,8 +58,21 @@ test("boot frames flash only the right-hand circle between theme warning and dim
   const label = footerStatus({ status: "booting", info: null }, true, "session-one")!;
   for (let frame = 0; frame < 4; frame++) {
     calls.length = 0;
-    assert.equal(styleFooterStatus(theme, label, "booting", frame), `\x1b[22m${label} ●\x1b[22m`);
+    assert.equal(styleFooterStatus(theme, label, { status: "booting", info: null }, frame), `\x1b[22m${label} ●\x1b[22m`);
     assert.deepEqual(calls, [["dim", label], [frame % 2 === 0 ? "warning" : "dim", "●"]]);
+  }
+});
+
+test("active sandbox Docker issues stay red; ready or intentionally disabled Docker stays green", () => {
+  const calls: Array<[string, string]> = [];
+  const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
+  for (const readiness of ["missing", "unavailable", "ready", "disabled"] as const) {
+    const state: RuntimeState = { ...active, info: { ...active.info!, docker: { mode: readiness === "disabled" ? "disabled" : "auto", readiness } } };
+    for (const frame of [0, 1]) {
+      calls.length = 0;
+      styleFooterStatus(theme, footerStatus(state, true)!, state, frame);
+      assert.deepEqual(calls, [["dim", "msb-bf9379"], [readiness === "missing" || readiness === "unavailable" ? "error" : "success", "●"]]);
+    }
   }
 });
 
@@ -67,12 +80,12 @@ test("non-live footers retain explicit host/blocked/disabled labels and never sh
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
   for (const [status, label, color] of [
-    ["off", "MSB host", "warning"], ["host-fallback", "MSB host fallback", "warning"],
+    ["off", "MSB host", "warning"], ["host-fallback", "MSB host fallback", "error"],
     ["unavailable", "MSB blocked", "error"], ["stopping", "MSB stopping", "warning"], ["disabled", "MSB disabled", "dim"],
   ] as const) {
     calls.length = 0;
     assert.equal(footerStatus({ status, info: null }, true), label);
-    styleFooterStatus(theme, label, status);
+    styleFooterStatus(theme, label, { status, info: null });
     assert.deepEqual(calls, [["dim", label], [color, "●"]]);
   }
 });

@@ -31,12 +31,15 @@ export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: 
   }
 }
 
-export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "fg">, text: string, status: RuntimeState["status"], frame = 0): string {
+export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "fg">, text: string, state: RuntimeState, frame = 0): string {
+  const { status, info } = state;
+  const hasIssue = status === "unavailable" || status === "host-fallback"
+    || status === "active" && (info?.docker.readiness === "missing" || info?.docker.readiness === "unavailable");
   let circleColor: "success" | "warning" | "dim" | "error" = "dim";
-  if (status === "active") circleColor = "success";
+  if (hasIssue) circleColor = "error";
+  else if (status === "active") circleColor = "success";
   else if (status === "booting") circleColor = frame % 2 === 0 ? "warning" : "dim";
-  else if (status === "unavailable") circleColor = "error";
-  else if (status === "off" || status === "host-fallback" || status === "stopping") circleColor = "warning";
+  else if (status === "off" || status === "stopping") circleColor = "warning";
   return `\x1b[22m${theme.fg("dim", text)} ${theme.fg(circleColor, "●")}\x1b[22m`;
 }
 
@@ -80,8 +83,9 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       // Read the current session and theme on every tick, never a previous context.
       const ctx = currentContext;
       if (!ctx) return;
-      const text = footerStatus({ status: "booting", info: null }, true, ctx.sessionManager.getSessionId())!;
-      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, "booting", frame));
+      const state: RuntimeState = { status: "booting", info: null };
+      const text = footerStatus(state, true, ctx.sessionManager.getSessionId())!;
+      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state, frame));
       frame = (frame + 1) % 2;
     };
     render();
@@ -107,7 +111,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       return;
     }
     stopBootAnimation();
-    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state.status));
+    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state));
   };
 
   registerSandboxTools(pi, {

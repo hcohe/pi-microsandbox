@@ -62,7 +62,7 @@ test("MSB status occupies the upper-right footer without adding a status row", (
 
 test("the themed right-hand circle survives upper-right footer alignment", () => {
   const theme = { fg: (role: string, text: string) => `\x1b[${role === "success" ? 32 : 90}m${text}\x1b[39m` };
-  const status = styleFooterStatus(theme, "msb-bf9379", "active");
+  const status = styleFooterStatus(theme, "msb-bf9379", { status: "active", info: null });
   const component = createMsbFooter(tui, plainTheme, context(), footerData(new Map([["pi-msb", status]])));
   const lines = component.render(80);
   assert.equal(lines.length, 2);

@@ -46,7 +46,8 @@ keys and muted actions; narrow screens use grouped keys. Menus offer short hints
 value editors explain the format with examples. [All keys →](docs/commands.md)
 
 The Pi footer shows **`msb-ID ●`**: a green circle when live, or a yellow/grey
-pulse while booting. Colors follow your theme; only the circle flashes.
+pulse while booting. Sandbox failures, host fallback, and unavailable Docker show
+red. Colors follow your theme; only the booting circle flashes.
 
 ## Your project, your sandbox
 
