@@ -22,7 +22,7 @@ export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: 
   const sessionDisplayId = sessionId ? displayId(sessionId) : undefined;
   switch (state.status) {
     case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}`;
-    case "off": return "MSB host";
+    case "off": return "Microsandbox disabled - Running on host";
     case "host-fallback": return "MSB host fallback";
     case "unavailable": return "Microsandbox Blocked";
     case "booting": return `msb-${sessionDisplayId ?? state.info?.displayId ?? "…"}`;
@@ -33,13 +33,13 @@ export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: 
 
 export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "fg">, text: string, state: RuntimeState, frame = 0): string {
   const { status, info } = state;
-  const hasIssue = status === "unavailable" || status === "host-fallback"
+  const needsAttention = status === "off" || status === "unavailable" || status === "host-fallback"
     || status === "active" && (info?.docker.readiness === "missing" || info?.docker.readiness === "unavailable");
   let circleColor: "success" | "warning" | "dim" | "error" = "dim";
-  if (hasIssue) circleColor = "error";
+  if (needsAttention) circleColor = "error";
   else if (status === "active") circleColor = "success";
   else if (status === "booting") circleColor = frame % 2 === 0 ? "warning" : "dim";
-  else if (status === "off" || status === "stopping") circleColor = "warning";
+  else if (status === "stopping") circleColor = "warning";
   return `\x1b[22m${theme.fg("dim", text)} ${theme.fg(circleColor, "●")}\x1b[22m`;
 }
 

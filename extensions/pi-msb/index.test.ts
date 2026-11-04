@@ -80,7 +80,7 @@ test("non-live footers retain explicit host/blocked/disabled labels and never sh
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
   for (const [status, label, color] of [
-    ["off", "MSB host", "warning"], ["host-fallback", "MSB host fallback", "error"],
+    ["off", "Microsandbox disabled - Running on host", "error"], ["host-fallback", "MSB host fallback", "error"],
     ["unavailable", "Microsandbox Blocked", "error"], ["stopping", "MSB stopping", "warning"], ["disabled", "MSB disabled", "dim"],
   ] as const) {
     calls.length = 0;
