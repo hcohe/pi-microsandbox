@@ -102,9 +102,9 @@ reported separately.
 
 The guarded manager adopts routing/access-policy/footer and automatic-start
 preference changes live. `auto_start` never stops an active guest or selects host
-execution when edited. Same-identity lifecycle actions refresh private drafts
-without discarding unsaved edits; committed saves reopen fresh drafts even when
-runtime activation fails.
+execution when edited. The panel uses one isolated private draft per operation;
+apply or cancel resolves it before another edit. Lifecycle actions are separate.
+Committed applies reopen a fresh baseline even when runtime activation fails.
 Other effective changes force recreation after owner-lock and label checks,
 even if inspected workspace/image labels still match. Restart confirmation is
 conservative and warns about ephemeral guest/container loss. Reload waits for

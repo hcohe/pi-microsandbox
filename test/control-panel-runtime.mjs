@@ -1,5 +1,5 @@
 // Process-isolated integration fixture: real Pi loader, command context, custom UI,
-// theme and renderers; the terminal is doubled and sandbox auto-start is disabled.
+// theme and renderers; terminal and SDK are doubled (no live VM).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
@@ -92,7 +92,8 @@ try {
           assert.equal(lines.length, height);
           assert.ok(lines.every((line) => tui.visibleWidth(line) === width));
           if (height >= 2) {
-            assert.match(tui.stripTerminalSequences(lines.at(-1)), /q close.*(?:w\/P\/G|w ephemeral)/);
+            assert.match(tui.stripTerminalSequences(lines.at(-1)), /q close/);
+            assert.doesNotMatch(tui.stripTerminalSequences(lines.at(-1)), /w\/P\/G|w ephemeral/);
             assert.ok(lines.at(-1).includes(theme.bold(theme.fg("accent", "q")) + theme.fg("muted", " close")));
             assert.doesNotMatch(tui.stripTerminalSequences(lines.slice(0, -1).join("\n")), /q close|w\/P\/G|w ephemeral/);
           }
@@ -107,7 +108,7 @@ try {
         const choose = async (label) => {
           for (let n = 0; n < 300; n++) {
             const text = tui.stripTerminalSequences(panel.render(80).join("\n"));
-            if (text.split("\n").some((line) => line.startsWith("> ") && line.slice(2).replace(/^\s*[▾▸]?\s*/, "").startsWith(label))) { return; }
+            if (text.split("\n").some((line) => line.startsWith("> ") && line.slice(2).replace(/^\s*[▾▸]?\s*/, "").replace(/^\[ /, "").startsWith(label))) { return; }
             await key("j");
           }
           assert.fail(`Missing row: ${label}`);
@@ -130,21 +131,43 @@ try {
         await expand("Status");
         const status = tui.stripTerminalSequences(panel.render(80).join("\n"));
         assert.match(status, /State: off \[runtime\]/);
-        assert.match(status, /No running policy adopted: No current policy \[runtime\]/);
+        assert.match(status, savedScopes ? /Last known policy \(not running\)/ : /No running policy adopted: No current policy \[runtime\]/);
         assert.doesNotMatch(status, /Guest image:|Virtual CPUs:|Docker mode:/);
         await choose("State:");
         for (const commandKey of ["e", "a", "d"]) await key(commandKey);
         assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> .*State: off \[runtime\]/);
         await choose("Status"); await key("h");
         if (launch === 1 && !savedScopes) {
-          for (const [saveKey, value] of [["w", "false"], ["P", "true"], ["G", "false"]]) {
-            await expand("General"); await choose("Show Footer:"); await key("e"); await select(String(value));
-            await key(saveKey); await select("Confirm");
+          const labels = ["Apply for current running sandbox only", "Apply for all sandboxes in this project", "Apply for all sandboxes globally on this host"];
+          await expand("General"); await choose("Show Footer:"); await key("e"); await select("false");
+          await choose(labels[0]);
+          assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Unavailable: no running sandbox/);
+          await key("\r"); // Disabled is observable but cannot commit or start a guest.
+          assert.doesNotMatch(tui.stripTerminalSequences(panel.render(80).join("\n")), /Result: Applied/);
+          await select("Cancel");
+          await loaded.extensions[0].commands.get("msb-fixture-enable").handler("", runner.createCommandContext());
+          await expand("Actions"); await select("Reload settings"); await select("Confirm"); await key("\x1b");
+          for (const [scope, value] of [[0, "false"], [1, "true"], [2, "false"]]) {
+            await expand("General"); await choose("Show Footer:"); await key("e"); await select(value);
+            await choose(labels[scope]);
+            const styled = panel.render(160).join("\n");
+            assert.ok(styled.includes(theme.fg("accent", theme.bold(`[ ${labels[scope]} ]`))));
+            assert.ok(styled.includes(theme.fg("muted", theme.bold("[ Cancel ]"))));
+            assert.notEqual(theme.fg("accent", theme.bold(`[ ${labels[scope]} ]`)), theme.fg("text", labels[scope]));
+            if (scope === 0) for (const [width, height] of [[32, 12], [80, 20]]) {
+              terminal.columns = width; terminal.rows = height;
+              await writeFile(`/tmp/pi-msb-action-${width}x${height}.txt`, tui.stripTerminalSequences(panel.render(width).join("\n")) + "\n");
+              await writeFile(`/tmp/pi-msb-action-${width}x${height}.ansi`, panel.render(width).join("\n") + "\n");
+            }
+            terminal.columns = 80; terminal.rows = 24;
+            await key("\r");
+            if (tui.stripTerminalSequences(panel.render(80).join("\n")).includes("Review change")) await select("Confirm");
             assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Result: Applied/);
             await key("\x1b");
           }
           savedScopes = true;
           await loaded.extensions[0].commands.get("msb-fixture-verify-origin").handler("", runner.createCommandContext());
+          await loaded.extensions[0].commands.get("msb-fixture-stop").handler("", runner.createCommandContext());
         }
         await expand("Secrets"); await expand("Secrets:"); await expand("TOKEN:");
         await choose("Value / reference:"); await key("e"); await select("Replace value / reference:");
@@ -171,5 +194,5 @@ try {
   assert.doesNotMatch(policy, /RUNTIME_PRIVATE_SENTINEL/);
   assert.match(policy, /"show_footer" = false/);
   assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /"show_footer" = true/);
-  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, masked input and focus teardown`);
+  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input and focus teardown (fake SDK)`);
 } finally { await rm(root, { recursive: true, force: true }); }

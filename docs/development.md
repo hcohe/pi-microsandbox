@@ -57,8 +57,13 @@ policy; only inner read-only Status metadata is labeled `[runtime]`. Node identi
 and expansion stay stable across compact transient forms. The
 single-line footer stays at the bottom with accented keys and muted action labels;
 narrow terminals use compact hints. Normal keys are
-j/k move, h/l fold/parent/child, e/a/d edit/add/delete-or-inherit, w/P/G scoped
-save + reload, q close; input dispatch precedes all command bindings.
+j/k move, h/l fold/parent/child, e/a/d edit/add/entry-delete-or-scalar-inherit,
+q close; input dispatch precedes all command bindings. Each operation creates
+an isolated private SettingsDraft and exposes themed scope action rows. Apply
+transfers only that intent, persists and automatically reloads; Cancel discards
+it before returning to committed settings. Forms expose scope actions directly.
+Current-only uses authoritative session memory and is unavailable without an
+active sandbox. Project/global defaults never broadcast to unrelated instances.
 `settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
 retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
 never renders plaintext or uses an Input undo/kill ring. The settings backend
@@ -84,14 +89,14 @@ Opening is exclusive; cancel, errors and shutdown dispose drafts and entry buffe
 with terminal doubles (including an installed viewport layout root). Runtime tests
 use an injected SDK to verify live adoption versus guarded resource recreation.
 Regressions also drive the panel through the native integration with the shared
-`test/fake-msb-sdk.ts` fixture: startup-preference safety, draft refresh/recovery,
-short-height feedback, repeated secret editing and removal reconciliation.
+`test/fake-msb-sdk.ts` fixture: startup-preference safety, isolated proposal
+cancellation/retry and saved/runtime failure recovery, short-height feedback, repeated secret editing and removal reconciliation.
 `control-panel-runtime.test.ts` additionally launches a process fixture with the
 actual Pi extension loader, command context, `ui.custom`, theme and both native
-renderers. It covers a symlinked agent root, all save scopes, masked input,
+renderers. It covers a symlinked agent root, all apply scopes, masked input,
 responsive overlay composition, close/reopen and focus restoration without a VM.
-It drives tree keys rather than section menus, including all scoped saves and
-literal command letters in inputs. It always tests the declared Pi 0.84.4 runtime;
+It drives tree keys rather than section menus, including all scoped actions
+(fake SDK, no live VM) and literal command letters in inputs. It always tests the declared Pi 0.84.4 runtime;
 include an installed Pi 1.4.0 runtime with:
 
 ```sh

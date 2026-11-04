@@ -51,10 +51,12 @@ The first enabled session creates
 examples, and safety guidance. Uncomment what you need; existing files are left
 alone.
 
-Use **`w` (ephemeral)**, **`P` (project)**, or **`G` (global)** to save and reload
-only your intended edits. Restarting settings ask before losing guest ephemeral
-state; ephemeral changes reset on session switch/end. Project
-settings for `~/Code/app` live outside the worktree:
+Each edit offers **current running sandbox only**, **all sandboxes in this
+project**, **all sandboxes globally on this host**, or **Cancel**. Apply reloads
+this sandbox automatically; others pick up persisted defaults on next start/reload.
+Restarting settings ask before losing guest ephemeral state. Current-only changes
+are memory-only and reset on session switch/end. Project settings for `~/Code/app`
+live outside the worktree:
 
 ```text
 ~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml

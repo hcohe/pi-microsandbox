@@ -8,13 +8,20 @@ import type { SettingsDraft, SettingsScope } from "./settings.ts";
 import type { MsbControl, Config } from "./types.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
-type Row = { id: string; label: string; detail?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; dirty?: string; edit?: () => void; add?: () => void; remove?: () => void; removeLabel?: string; readonly?: boolean };
+type Row = { id: string; label: string; detail?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
 type FormField = { name: string; value: string; secret?: boolean; choices?: string[]; description?: string };
 const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "ephemeral", env: "environment", defaults: "default" }[source] ?? source);
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
 /** Strip terminal controls from every external label, log, path and value. */
 export const safeText = (value: unknown): string => String(value ?? "").replace(/\x1b\][^\x07]*(?:\x07|$)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, " ");
 const display = (value: unknown): string => value === null ? "automatic session name" : value === undefined ? "inherit" : typeof value === "string" ? value : JSON.stringify(value);
+const HOST_BOUNDARY_WARNINGS: Readonly<Record<string, string>> = {
+  pass_through_tools: "HOST execution / sandbox bypass: tools allowed by pass_through_tools execute on the HOST outside the sandbox without per-call host approval.",
+  block_third_party: "HOST execution / sandbox bypass: block_third_party = false allows unrecognized third-party tools to execute on the HOST outside the sandbox without per-call host approval.",
+  allow_skill_reads: "HOST read / sandbox bypass: allow_skill_reads = true permits constrained reads of discovered skills and generated prompts from the HOST outside the sandbox.",
+  allow_host_execution: "HOST execution: allow_host_execution = true permits explicit execution outside the sandbox after individual tool-call approval.",
+  fallback_mode: "HOST execution / sandbox bypass: fallback_mode = host permits unsandboxed HOST tools after sandbox failure.",
+};
 function displayConfig(toml: string) {
   const value = parseTomlConfig(toml, "global").value;
   return { ...value, ...(value.secrets ? { secrets: value.secrets.map((secret) => ({ env: secret.env, allowHosts: secret.allowHosts, value: "<redacted>" })) } : {}) };
@@ -33,14 +40,15 @@ export class ControlPanel implements Component, Focusable {
   #tree = true;
   #treeFocus = "configuration/General";
   #expanded = new Set<string>();
-  #entryChanges = new Set<string>();
   #rows: Row[] = [];
   #focus = 0;
   #scroll = 0;
   #detailOffset = 0;
   #rowHeights: number[] = [];
   #capacity = 1;
-  #dirty = false;
+  #baselineReady = true;
+  #proposal = false;
+  #proposalTree?: { focus: string; expanded: Set<string> };
   #busy = false;
   #operation: Promise<void> = Promise.resolve();
   #closed = false;
@@ -49,9 +57,9 @@ export class ControlPanel implements Component, Focusable {
   #provenance: Record<string, string>;
   #paths: Record<string, string>;
   #warnings: string[];
-  #changes = new Map<string, unknown>();
+  #scalarIntent = new Map<string, unknown>();
   #editing?: { input: SettingsInput | MaskedInput; accept: (value: string) => void | Promise<void>; cancel: () => void; label: string };
-  #back?: () => void;
+  #back?: () => void | Promise<void>;
   #formCleanup?: () => void;
   #formDirty = false;
   #exitConfirmation = false;
@@ -67,10 +75,55 @@ export class ControlPanel implements Component, Focusable {
   }
   invalidate(): void {}
   #refresh(): void { if (!this.#closed) this.#tui.requestRender(); }
-  #page(rows: Row[], back?: () => void): void { this.#tree = false; this.#rows = rows; this.#focus = 0; this.#scroll = 0; this.#detailOffset = 0; this.#back = back; this.#refresh(); }
-  #rowValue(path: string): unknown { return this.#changes.has(path) ? this.#changes.get(path) : valueAt(this.#values, path); }
-  #set(path: string, value: unknown): void { this.#draft.set(path, value); this.#changes.set(path, value); this.#dirty = true; }
-  #inherit(path: string): void { this.#draft.inherit(path); this.#changes.set(path, undefined); this.#dirty = true; this.#home(); }
+  #page(rows: Row[], back?: () => void | Promise<void>): void { if (this.#closed) return; this.#tree = false; this.#rows = rows; this.#focus = 0; this.#scroll = 0; this.#detailOffset = 0; this.#back = back; this.#refresh(); }
+  #rowValue(path: string): unknown { return valueAt(this.#values, path); }
+  async #propose(mutate: (draft: SettingsDraft) => void, scope?: SettingsScope): Promise<void> {
+    if (!this.#baselineReady) { this.#report("Settings unavailable. Repair host configuration, then Reload or reopen before editing."); return; }
+    // The root owns a clean private baseline. Resolve this one intent before another edit.
+    this.#scalarIntent.clear();
+    this.#proposalTree = { focus: this.#treeFocus, expanded: new Set(this.#expanded) };
+    this.#proposal = true;
+    try { mutate(this.#draft); }
+    catch { this.#formCleanup?.(); this.#proposalError("Invalid entry. Cancel to correct required names, hosts, references and field types.", false); return; }
+    this.#formCleanup?.();
+    if (scope) await this.#applyScope(scope); else this.#scopeActions();
+  }
+  #set(path: string, value: unknown): Promise<void> {
+    return this.#propose((draft) => { draft.set(path, value); this.#scalarIntent.set(path, value); });
+  }
+  #inherit(path: string): Promise<void> {
+    return this.#propose((draft) => { draft.inherit(path); this.#scalarIntent.set(path, undefined); });
+  }
+  async #cancelProposal(): Promise<void> {
+    this.#pending?.discard(); this.#pending = undefined; this.#formCleanup?.();
+    this.#proposal = false; this.#scalarIntent.clear();
+    if (this.#proposalTree) { this.#treeFocus = this.#proposalTree.focus; this.#expanded = this.#proposalTree.expanded; this.#proposalTree = undefined; }
+    try { await this.#reopenDraft(); this.#home(); }
+    catch { this.#report("Settings refresh failed. Close and reopen after repairing host configuration. No proposal was applied."); }
+  }
+  #scopeRows(apply: (scope: SettingsScope) => void | Promise<void>): Row[] {
+    const active = this.#control.getState().status === "active";
+    return [
+      { id: "apply-temporary", label: "Apply for current running sandbox only", button: true, disabled: !active, detail: active ? "Current integration session memory only; no disk writes." : "Unavailable: no running sandbox. Enable a sandbox first, or choose project/global defaults.", action: active ? () => apply("temporary") : undefined },
+      { id: "apply-project", label: "Apply for all sandboxes in this project", button: true, detail: "Persist project defaults and reload this sandbox. Others pick up on next start/reload. Higher overrides may shadow this change.", action: () => apply("project") },
+      { id: "apply-global", label: "Apply for all sandboxes globally on this host", button: true, detail: "Persist host defaults and reload this sandbox. Others pick up on next start/reload. Project/session overrides may shadow this change.", action: () => apply("global") },
+    ];
+  }
+  #scopeActions(): void {
+    this.#page([
+      { id: "proposal", label: "Apply change", detail: "Choose where this one change applies. Cancel leaves committed settings and runtime unchanged." },
+      ...this.#scopeRows((scope) => this.#applyScope(scope)),
+      { id: "cancel", label: "Cancel", button: true, action: () => this.#cancelProposal() },
+    ], () => this.#cancelProposal());
+    this.#focus = 1;
+  }
+  #proposalError(message: string, retry = true): void {
+    this.#page([
+      { id: "feedback", label: `Result: ${message}`, detail: retry ? "Cancel to correct the entry. Retry revalidates the same isolated change; nothing else is included." : "Cancel to correct the entry. No setting changes were applied." },
+      ...(retry ? [{ id: "retry", label: "Retry", button: true, action: () => this.#scopeActions() }] : []),
+      { id: "cancel", label: "Cancel", button: true, action: () => this.#cancelProposal() },
+    ], () => this.#cancelProposal());
+  }
   #home(refresh = true): void {
     if (this.#closed) return;
     this.#tree = true; this.#back = undefined;
@@ -87,32 +140,29 @@ export class ControlPanel implements Component, Focusable {
         const baseline = valueAt(values, path);
         const fallbackSource = collection && Array.isArray(baseline) && baseline.length === 0 ? "defaults" : collection ? "mixed / entry sources" : "unknown";
         const origin = !known ? "unverified" : originLabel(provenance[normalizeConfigPath(path).join(".")] ?? fallbackSource);
-        const dirty = !readonly && this.#changes.has(path) ? value === undefined ? "inherit on save" : "draft" : undefined;
         const edit = readonly ? undefined : () => this.#field(field);
         const add = readonly || !collection ? undefined : () => this.#addEntry(field);
-        const row: Row = { id, label: fieldLabel(path), value: !known ? "unknown — not verified" : Array.isArray(value) ? `${value.length} entries` : display(value), origin, dirty, detail: `${path}: ${field.description}`, readonly, edit: collection ? undefined : edit, add, removeLabel: "inherit", remove: readonly ? undefined : () => this.#inherit(path) };
+        const row: Row = { id, label: fieldLabel(path), value: !known ? "unknown — not verified" : Array.isArray(value) ? `${value.length} entries` : display(value), origin, detail: `${path}: ${field.description}`, readonly, edit: collection ? undefined : edit, add, removeLabel: "inherit", remove: readonly || collection ? undefined : () => this.#inherit(path) };
         if (collection && known) {
           row.children = (Array.isArray(value) ? value : []).map((entry: any) => {
             const identity = path === "secrets" ? entry.env : path === "mounts" ? entry.guestPath : String(entry);
             const entryId = `${id}/${identity}`;
-            const entryOrigin = originLabel(provenance[`${path}[${identity}]`] ?? provenance[normalizeConfigPath(path).join(".")] ?? (!readonly && this.#entryChanges.has(`${path}[${identity}]`) ? "uncommitted" : "inherited / unknown"));
-            const entryDirty = !readonly && this.#entryChanges.has(`${path}[${identity}]`) ? "draft entry" : dirty === "draft" && !this.#entryChanges.size ? "draft" : undefined;
+            const entryOrigin = originLabel(provenance[`${path}[${identity}]`] ?? provenance[normalizeConfigPath(path).join(".")] ?? "inherited / unknown");
             const editEntry = readonly ? undefined : () => this.#editEntry(field, entry);
             const remove = readonly ? undefined : () => this.#removeEntry(field, entry);
-            const result: Row = { id: entryId, label: String(identity), value: path === "secrets" ? "********" : path === "mounts" ? entry.readonly ? "ro" : "rw" : undefined, origin: entryOrigin, dirty: entryDirty, readonly, edit: editEntry, add, remove, removeLabel: "delete" };
+            const result: Row = { id: entryId, label: String(identity), value: path === "secrets" ? "********" : path === "mounts" ? entry.readonly ? "ro" : "rw" : undefined, origin: entryOrigin, readonly, edit: editEntry, add, remove, removeLabel: "delete" };
             if (path === "secrets" || path === "mounts") {
               const children = path === "secrets" ? { "Environment name": entry.env, "Allowed hosts": entry.allowHosts, "Value / reference": "********" } : { Type: entry.type, "Host path / volume name": entry.hostPath ?? "memory", "Guest path": entry.guestPath, "Read only": entry.readonly, Options: entry.options ?? [] };
               result.children = Object.entries(children).map(([label, value]) => {
                 const childId = `${entryId}/${label}`;
                 const listAdd = readonly ? undefined : () => this.#recordList(path, entry, label);
-                return { id: childId, label, value: Array.isArray(value) ? `${value.length} entries` : display(value), origin: entryOrigin, dirty: entryDirty, readonly, edit: readonly ? undefined : () => this.#editEntry(field, entry, label), add: Array.isArray(value) ? listAdd : add,
-                  ...(Array.isArray(value) ? { children: value.map((item: string) => ({ id: `${childId}/${item}`, label: item, readonly, origin: entryOrigin, dirty: entryDirty, edit: readonly ? undefined : () => this.#recordList(path, entry, label, item), add: listAdd, remove: readonly ? undefined : () => this.#recordList(path, entry, label, item, true), removeLabel: "delete" })) } : {}),
+                return { id: childId, label, value: Array.isArray(value) ? `${value.length} entries` : display(value), origin: entryOrigin, readonly, edit: readonly ? undefined : () => this.#editEntry(field, entry, label), add: Array.isArray(value) ? listAdd : add,
+                  ...(Array.isArray(value) ? { children: value.map((item: string) => ({ id: `${childId}/${item}`, label: item, readonly, origin: entryOrigin, edit: readonly ? undefined : () => this.#recordList(path, entry, label, item), add: listAdd, remove: readonly ? undefined : () => this.#recordList(path, entry, label, item, true), removeLabel: "delete" })) } : {}),
                 };
               });
             }
             return result;
           });
-          if (!readonly) row.children.push({ id: `${id}/control:clear`, label: "Clear list (explicit empty)", action: () => { this.#set(path, []); this.#home(); } });
         }
         return row;
       }),
@@ -120,7 +170,7 @@ export class ControlPanel implements Component, Focusable {
     const statusRow = (id: string, label: string, value?: string, detail?: string): Row => ({ id: `configuration/status/${id}`, label, value, detail, origin: "runtime", readonly: true });
     const status: Row = { id: "configuration/status", label: "Status", readonly: true, children: [
       statusRow("state", "State", state.status, state.reason),
-      ...((this.#dirty || policy && SETTINGS_FIELDS.some((field) => policy.knownFields.includes(normalizeConfigPath(field.path)[0] as keyof Config) && JSON.stringify(valueAt(this.#values, field.path)) !== JSON.stringify(valueAt(runtimeValues, field.path)))) ? [statusRow("pending", "Desired changes pending (not running)")] : []),
+      ...((this.#baselineReady && policy && SETTINGS_FIELDS.some((field) => policy.knownFields.includes(normalizeConfigPath(field.path)[0] as keyof Config) && JSON.stringify(valueAt(this.#values, field.path)) !== JSON.stringify(valueAt(runtimeValues, field.path)))) ? [statusRow("pending", "Desired changes pending (not running)")] : []),
       statusRow("adoption", policy ? state.status === "active" ? "Actually adopted policy" : "Last known policy (not running)" : this.#control.getRuntimePolicy ? "No running policy adopted" : "Policy snapshot unavailable", policy ? new Date(policy.adoptedAt).toISOString() : "No current policy"),
       ...(policy?.verification === "reconnected" ? [statusRow("verification", "VM instance not verified", "Existing/reconnected guest: image and other VM settings are unverified.")] : []),
       ...(state.info ? [
@@ -129,11 +179,11 @@ export class ControlPanel implements Component, Focusable {
       ] : []),
     ] };
     const roots: Row[] = [
-      ...fields("configuration", this.#values, this.#provenance, false),
+      ...(this.#baselineReady ? fields("configuration", this.#values, this.#provenance, false) : [{ id: "settings-unavailable", label: "Settings unavailable", detail: "Last apply result remains valid. Repair host configuration, then Reload or reopen before editing." }]),
       status,
       { id: "configuration/sources", label: "Sources & warnings", children: [
         ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${originLabel(scope)} target`, value: path })),
-        { id: "precedence", label: "Inheritance", value: "default → environment → global → project → ephemeral", detail: "Draft is intent, not an adopted policy. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
+        { id: "precedence", label: "Inheritance", value: "default → environment → global → project → ephemeral", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
@@ -150,7 +200,7 @@ export class ControlPanel implements Component, Focusable {
   #owner(path: string): string { return originLabel(this.#provenance[normalizeConfigPath(path).join(".")] ?? "mixed / entry sources"); }
   #field(field: SettingsField): void {
     const value = this.#rowValue(field.path) ?? valueAt(DEFAULT_CONFIG, field.path);
-    const set = (next: unknown) => { this.#set(field.path, next); this.#home(); };
+    const set = (next: unknown) => this.#set(field.path, next);
     const input = () => this.#input(field.path, String(value ?? ""), false, (text) => set(typeof valueAt(DEFAULT_CONFIG, field.path) === "number" ? Number(text) : text));
     if (field.choices || field.path === "sandbox_name") this.#page([
       { id: "description", label: fieldLabel(field.path), detail: `${field.description} Source: ${this.#owner(field.path)}` },
@@ -162,75 +212,68 @@ export class ControlPanel implements Component, Focusable {
     ], () => this.#home());
     else input();
   }
-  #recordList(path: string, entry: any, label: string, previous?: string, remove = false): void {
+  #recordList(path: string, entry: any, label: string, previous?: string, remove = false): void | Promise<void> {
     const key = path === "secrets" ? "allowHosts" : "options";
-    const apply = (value?: string) => {
+    const apply = (value?: string) => this.#propose((draft) => {
       const items = [...(entry[key] ?? [])].filter((item) => item !== previous && item !== value);
       if (value !== undefined) items.push(value);
       const next = { ...entry, [key]: items };
       const identity = path === "secrets" ? entry.env : entry.guestPath;
-      if (path === "secrets") this.#draft.upsertSecret({ env: entry.env, allowHosts: items });
-      else this.#draft.upsertMount(next, identity);
-      this.#changes.set(path, (this.#rowValue(path) as any[]).map((item) => (path === "secrets" ? item.env : item.guestPath) === identity ? next : item));
-      this.#entryDone(path, identity);
+      if (path === "secrets") draft.upsertSecret({ env: entry.env, allowHosts: items });
+      else draft.upsertMount(next, identity);
       const parent = `configuration/${path}/${identity}/${label}`;
       this.#expanded.add(`configuration/${path}/${identity}`); this.#expanded.add(parent);
-      this.#treeFocus = value === undefined ? parent : `${parent}/${value}`; this.#home();
-    };
-    if (remove) apply(); else this.#input(label, previous ?? "", false, apply);
+      this.#treeFocus = value === undefined ? parent : `${parent}/${value}`;
+    });
+    if (remove) return apply(); else this.#input(label, previous ?? "", false, apply);
   }
   #addEntry(field: SettingsField): void { this.#editEntry(field); }
   #entryDone(path: string, identity: string, previous?: string): void {
     const old = `configuration/${path}/${previous ?? identity}`; const next = `configuration/${path}/${identity}`;
     for (const id of [...this.#expanded]) if (id === old || id.startsWith(`${old}/`)) { this.#expanded.delete(id); this.#expanded.add(next + id.slice(old.length)); }
     this.#expanded.add(`configuration/${path}`); this.#treeFocus = next;
-    this.#entryChanges.add(`${path}[${identity}]`); this.#dirty = true; this.#home();
   }
-  #removeEntry(field: SettingsField, entry: any): void {
+  #removeEntry(field: SettingsField, entry: any): Promise<void> {
     const path = field.path; const identity = path === "secrets" ? entry.env : path === "mounts" ? entry.guestPath : String(entry);
-    if (path === "secrets") this.#draft.removeSecret(identity);
-    else if (path === "mounts") this.#draft.removeMount(identity);
-    else this.#draft.removeListEntry(path, identity);
-    this.#changes.set(path, (this.#rowValue(path) as any[]).filter((item) => path === "secrets" ? item.env !== identity : path === "mounts" ? item.guestPath !== identity : String(item) !== identity));
-    this.#treeFocus = `configuration/${path}`; this.#entryChanges.add(`${path}[${identity}]`); this.#dirty = true; this.#home();
+    return this.#propose((draft) => {
+      if (path === "secrets") draft.removeSecret(identity);
+      else if (path === "mounts") draft.removeMount(identity);
+      else draft.removeListEntry(path, identity);
+      this.#treeFocus = `configuration/${path}`;
+    });
   }
   #editEntry(field: SettingsField, entry?: any, child?: string): void {
     if (field.path === "secrets") { this.#secret(entry, child); return; }
     if (field.path === "mounts") { this.#mount(entry, child); return; }
-    this.#input(field.path, entry ?? "", false, (value) => {
-      this.#draft.upsertListEntry(field.path, value, entry);
-      this.#changes.set(field.path, [...((this.#rowValue(field.path) ?? []) as string[]).filter((item) => item !== entry && item !== value), value]);
+    this.#input(field.path, entry ?? "", false, (value) => this.#propose((draft) => {
+      draft.upsertListEntry(field.path, value, entry);
       this.#entryDone(field.path, value, entry);
-    });
+    }));
   }
   #secret(entry?: { env: string; allowHosts: string[] }, child?: string): void {
-    const items = (this.#rowValue("secrets") ?? []) as Array<{ env: string; allowHosts: string[] }>;
     this.#form("Secret (never displayed)", [
       { name: "Environment name", value: entry?.env ?? "", description: "A valid environment variable, not a process-control name." },
       { name: "Allowed hosts", value: (entry?.allowHosts ?? []).join(", "), description: "Comma-separated destinations; at least one is required." },
       { name: "Replace value / reference", value: "", secret: true, description: entry ? "Leave blank to retain the private existing value. $ENV:NAME or $FILE:path recommended." : "Masked entry. $ENV:NAME or $FILE:path recommended." },
-    ], (fields) => {
+    ], (fields, scope) => this.#propose((draft) => {
       const env = fields[0]!.value; const allowHosts = fields[1]!.value.split(",").map((host) => host.trim()).filter(Boolean); const value = fields[2]!.value;
-      this.#draft.upsertSecret({ env, allowHosts, ...(value ? { value } : {}) }, entry?.env);
-      this.#changes.set("secrets", [...items.filter((item) => item.env !== entry?.env && item.env !== env), { env, allowHosts, value: "<redacted>" }]);
+      draft.upsertSecret({ env, allowHosts, ...(value ? { value } : {}) }, entry?.env);
       this.#entryDone("secrets", env, entry?.env);
-    }, entry ? () => this.#removeEntry(SETTINGS_FIELDS.find((field) => field.path === "secrets")!, entry) : undefined, () => this.#home(), child === "Value / reference" ? "Replace value / reference" : child);
+    }, scope), () => this.#home(), child === "Value / reference" ? "Replace value / reference" : child);
   }
   #mount(entry?: Config["mounts"][number], child?: string): void {
-    const items = (this.#rowValue("mounts") ?? []) as Config["mounts"];
     this.#form("Mount", [
       { name: "Type", value: entry?.type ?? "dir", choices: ["dir", "file", "named", "tmpfs"] },
       { name: "Host path / volume name", value: entry?.hostPath ?? "", description: "Absolute host path for dir/file; no host socket or writable policy exposure." },
       { name: "Guest path", value: entry?.guestPath ?? "", description: "Absolute path; cannot shadow workspace, /tmp or guest system paths." },
       { name: "Read only", value: String(entry?.readonly ?? true), choices: ["true", "false"] },
       { name: "Options", value: (entry?.options ?? []).join(", "), description: "Comma-separated noexec, nosuid, nodev." },
-    ], (fields) => {
+    ], (fields, scope) => this.#propose((draft) => {
       const mount = { type: fields[0]!.value as Config["mounts"][number]["type"], ...(fields[1]!.value ? { hostPath: fields[1]!.value } : {}), guestPath: fields[2]!.value, readonly: fields[3]!.value === "true", options: fields[4]!.value.split(",").map((option) => option.trim()).filter(Boolean) };
-      this.#draft.upsertMount(mount, entry?.guestPath);
-      this.#changes.set("mounts", [...items.filter((item) => item.guestPath !== entry?.guestPath && item.guestPath !== mount.guestPath), mount]); this.#entryDone("mounts", mount.guestPath, entry?.guestPath);
-    }, entry ? () => this.#removeEntry(SETTINGS_FIELDS.find((field) => field.path === "mounts")!, entry) : undefined, () => this.#home(), child);
+      draft.upsertMount(mount, entry?.guestPath); this.#entryDone("mounts", mount.guestPath, entry?.guestPath);
+    }, scope), () => this.#home(), child);
   }
-  #form(title: string, fields: FormField[], save: (fields: FormField[]) => void, remove: (() => void) | undefined, back: () => void, selected?: string): void {
+  #form(title: string, fields: FormField[], save: (fields: FormField[], scope: SettingsScope) => Promise<void>, back: () => void, selected?: string): void {
     const clear = () => { for (const field of fields) if (field.secret) field.value = ""; this.#formDirty = false; this.#formCleanup = undefined; };
     this.#formDirty = false; this.#formCleanup = clear;
     const show = () => this.#page([
@@ -239,9 +282,8 @@ export class ControlPanel implements Component, Focusable {
         if (field.choices) this.#page(field.choices.map((value) => ({ id: value, label: value, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })), show);
         else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, (value) => { this.#formDirty ||= field.value !== value; field.value = value; show(); }, show);
       } })),
-      { id: "save-item", label: "Keep draft entry", action: () => { save(fields); clear(); } },
-      ...(remove ? [{ id: "delete-item", label: "Delete entry from draft", action: () => { remove(); clear(); } }] : []),
-      { id: "cancel-item", label: "Cancel entry", action: () => { clear(); back(); } },
+      ...this.#scopeRows((scope) => save(fields, scope)),
+      { id: "cancel-item", label: "Cancel", button: true, action: () => { clear(); back(); } },
     ], () => { clear(); back(); });
     show();
     if (selected) this.#focus = Math.max(0, this.#rows.findIndex((row) => row.id === selected));
@@ -252,18 +294,19 @@ export class ControlPanel implements Component, Focusable {
     input.focused = this.focused;
     this.#editing = { input, label, accept, cancel }; this.#refresh();
   }
-  #confirm(title: string, detail: string, action: () => void | Promise<void>, back = () => this.#home()): void {
+  #confirm(title: string, detail: string, action: () => void | Promise<void>, back: () => void | Promise<void> = () => this.#home()): void {
     this.#page([
       { id: "warning", label: title, detail },
-      { id: "cancel", label: "Cancel", action: back },
-      { id: "confirm", label: "Confirm", action },
+      { id: "cancel", label: "Cancel", button: true, action: back },
+      { id: "confirm", label: "Confirm", button: true, action },
     ], back);
     this.#focus = 1;
   }
-  async #save(scope: SettingsScope): Promise<void> {
+  async #applyScope(scope: SettingsScope): Promise<void> {
+    if (scope === "temporary" && this.#control.getState().status !== "active") { this.#proposalError("Current-only unavailable: no running sandbox. Choose project/global defaults or cancel."); return; }
     let target: SettingsDraft | undefined;
-    if (scope !== "temporary" && this.#changes.has("sandbox_name") && this.#changes.get("sandbox_name") === null) {
-      this.#report("Automatic session naming is an ephemeral-only override. Choose w (save ephemeral), or Inherit sandbox_name to remove a persistent assignment.");
+    if (scope !== "temporary" && this.#scalarIntent.has("sandbox_name") && this.#scalarIntent.get("sandbox_name") === null) {
+      this.#proposalError("Automatic session naming is a current-session-only override. Choose current running sandbox, or cancel and inherit Sandbox name.");
       return;
     }
     try {
@@ -272,13 +315,17 @@ export class ControlPanel implements Component, Focusable {
       const preview = await (this.#control.previewSettings?.(target) ?? target.preview());
       if (this.#closed) { target.discard(); return; }
       const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${originLabel(intent.source)}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`).join("; ");
-      const summary = `${scope === "temporary" ? "Current session memory only" : target.path}. ${preview.changes.length} dirty settings: ${preview.changes.map((change) => change.path).join(", ") || "none"}. ${entries ? `Collection intent: ${entries}. ` : ""}${preview.effect === "restart" ? "RESTART: guest ephemeral state and nested containers may be lost. In-flight tools must finish." : "Live routing/presentation update; no guest restart required."} ${preview.shadowed.length ? `Shadowed (NOT effective): ${preview.shadowed.join(", ")}.` : ""} Conflicting same-scope removal controls shown in changed fields are reconciled. Host bypass/network/mount/environment settings can widen access; review before confirming.`;
+      const effective = displayConfig(preview.effectiveToml);
+      const intentPaths = new Set([...this.#scalarIntent.keys(), ...preview.changes.map((change) => change.path), ...preview.collections.map((entry) => entry.path)]);
+      const hostBoundaryWarnings = [...intentPaths].map((path) => HOST_BOUNDARY_WARNINGS[path]).filter((warning): warning is string => warning !== undefined);
+      const summary = `${hostBoundaryWarnings.length ? `${hostBoundaryWarnings.join(" ")} ` : ""}${scope === "temporary" ? "Current integration session memory only" : `${target.path}. Persist defaults; reload this sandbox only. Others pick up on next start/reload`}. ${preview.changes.map((change) => `${change.path}: ${change.operation === "inherit" ? "inherit → " : ""}${/secret/i.test(change.path) ? "<redacted>" : display(valueAt(effective, change.path))}`).join("; ")}. ${entries ? `Collection intent: ${entries}. ` : ""}${preview.effect === "restart" ? "RESTART: guest ephemeral state and nested containers may be lost. In-flight tools must finish." : "Live routing/presentation update; no guest restart required."} ${preview.shadowed.length ? `Shadowed (NOT effective): ${preview.shadowed.join(", ")}.` : ""} Conflicting same-scope removal controls shown in changed fields are reconciled. Host bypass/network/mount/environment settings can widen access.`;
       const pending = target; this.#pending = pending;
-      this.#confirm(`Save ${originLabel(scope)} + reload?`, summary, async () => {
+      const apply = async () => {
         let saved = false; let applied = false; let message = "";
         try {
           await this.#ctx.waitForIdle();
           if (this.#closed) return;
+          if (scope === "temporary" && this.#control.getState().status !== "active") throw new Error("No running sandbox");
           const result = await pending.apply(); saved = result.saved; applied = true;
           if (this.#closed) return;
           await this.#control.reload({ allowRestart: preview.effect === "restart" });
@@ -288,34 +335,31 @@ export class ControlPanel implements Component, Focusable {
         finally {
           pending.discard(); this.#pending = undefined;
           if (!this.#closed) {
-            try {
-              if (applied) await this.#reopenDraft();
-              else await this.#refreshDraft();
-            } catch { message += " Draft refresh failed; fix host configuration, then retry Reload or reopen the panel."; }
-            if (!this.#closed) { this.#home(); this.#report(message); }
+            if (applied) {
+              this.#proposal = false; this.#proposalTree = undefined; this.#scalarIntent.clear();
+              try { await this.#reopenDraft(); }
+              catch { message += " Settings refresh failed; fix host configuration, then reopen the panel."; }
+              if (!this.#closed) this.#report(message);
+            } else this.#proposalError(message);
           }
         }
-      }, () => { pending.discard(); this.#pending = undefined; this.#home(); });
-    } catch { target?.discard(); this.#report("Validation failed. Check types/ranges, required secret hosts, references and mount/host policy guards. Draft retained."); }
+      };
+      const needsConfirmation = hostBoundaryWarnings.length > 0 || preview.effect === "restart" || preview.collections.some((entry) => entry.promoted || entry.operation === "remove") || preview.shadowed.length > 0 || [...this.#scalarIntent.values()].includes(undefined) || preview.changes.some((change) => /network|mount|host|fallback|docker/.test(change.path));
+      if (needsConfirmation) this.#confirm("Review change", summary, apply, () => this.#cancelProposal());
+      else await apply();
+    } catch { target?.discard(); this.#pending = undefined; this.#proposalError("Validation failed. Check types/ranges, required secret hosts, references and mount/host policy guards. Nothing applied."); }
   }
   #load(): void {
     const snapshot = this.#draft.snapshot(); this.#values = displayConfig(snapshot.effectiveToml);
     if (snapshot.automaticSandboxName) this.#values.sandboxName = null;
-    this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings; this.#changes.clear(); this.#entryChanges.clear(); this.#dirty = false;
+    this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings; this.#scalarIntent.clear(); this.#proposal = false; this.#baselineReady = true;
   }
   async #reopenDraft(): Promise<void> {
+    // A failed refresh must not leave a consumed/canceled proposal usable by the next edit.
+    this.#draft.discard(); this.#baselineReady = false;
     const fresh = await this.#control.settings!.open("temporary");
     if (this.#closed) { fresh.discard(); return; }
-    this.#draft.discard(); this.#draft = fresh; this.#load();
-  }
-  async #refreshDraft(): Promise<void> {
-    const next = await this.#draft.refresh();
-    if (this.#closed) { next.discard(); return; }
-    this.#draft.discard(); this.#draft = next;
-    const snapshot = next.snapshot();
-    this.#values = displayConfig(snapshot.effectiveToml);
-    if (snapshot.automaticSandboxName) this.#values.sandboxName = null;
-    this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings;
+    this.#draft = fresh; this.#load();
   }
   #feedbackRow(): Row { return { id: "feedback", label: `Result: ${this.#feedback}`, detail: "Enter for full result; arrows scroll wrapped text.", action: () => this.#text("Operation result", this.#feedback!) }; }
   #report(message: string): void {
@@ -334,7 +378,7 @@ export class ControlPanel implements Component, Focusable {
       } catch { message = "Action failed. Review settings and sandbox status; no automatic host escape."; }
       finally {
         if (!this.#closed) {
-          try { await this.#refreshDraft(); } catch { message += " Draft refresh failed; fix host configuration and retry Reload."; }
+          try { await this.#reopenDraft(); } catch { message += " Settings refresh failed; fix host configuration and retry Reload."; }
           if (!this.#closed) { this.#home(); this.#report(message); }
         }
       }
@@ -349,9 +393,9 @@ export class ControlPanel implements Component, Focusable {
         this.#text("Recent logs", await this.#control.getLogs(Number(value)));
       }) },
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
-      { id: "seal", label: "Seal network in draft", detail: "Sets deny mode; save with w, P or G.", action: () => { this.#set("network.mode", "deny"); this.#home(); } },
-      dangerous("Reset ephemeral settings", "Discard current memory-only overrides, then reconfigure. Restart may lose guest state. Unsaved panel edits will also be discarded.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "General, Resources, Network, Secrets, Mounts, Advanced, Status, Sources & warnings and Actions start collapsed directly below MICROSANDBOX. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the eventual save scope. w saves ephemeral session memory, P project, G global; all preview and reload. q closes (dirty discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origin, * marks draft intent. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
+      { id: "seal", label: "Seal network", detail: "Set deny mode after choosing where it applies.", action: () => this.#set("network.mode", "deny") },
+      dangerous("Reset current sandbox overrides", "Discard only current memory-only overrides; project/global defaults are unchanged. Reconfigure automatically. Restart may lose guest state.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "General, Resources, Network, Secrets, Mounts, Advanced, Status, Sources & warnings and Actions start collapsed directly below MICROSANDBOX. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers current running sandbox, project defaults, global defaults, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
@@ -365,10 +409,10 @@ export class ControlPanel implements Component, Focusable {
   }
   #exit(): void {
     if (this.#exitConfirmation) return;
-    if (!this.#dirty && !this.#formDirty) { this.close(); return; }
+    if (!this.#proposal && !this.#formDirty) { this.close(); return; }
     const previous = { rows: this.#rows, tree: this.#tree, focus: this.#focus, scroll: this.#scroll, detailOffset: this.#detailOffset, back: this.#back };
     this.#exitConfirmation = true;
-    this.#confirm("Discard unsaved changes?", "No setting changes will be applied. Previously confirmed saves are not undone.", () => this.close(), () => {
+    this.#confirm("Discard proposed change?", "No setting changes will be applied. Previously applied changes are not undone.", () => this.close(), () => {
       this.#exitConfirmation = false;
       this.#rows = previous.rows; this.#tree = previous.tree; this.#focus = previous.focus; this.#scroll = previous.scroll; this.#detailOffset = previous.detailOffset; this.#back = previous.back;
       this.#refresh();
@@ -379,7 +423,7 @@ export class ControlPanel implements Component, Focusable {
   dispose(): void {
     if (this.#closed) return; this.#closed = true; this.focused = false;
     this.#editing?.input.clear();
-    this.#editing = undefined; this.#formCleanup?.(); this.#pending?.discard(); this.#pending = undefined; this.#draft.discard(); this.#changes.clear(); this.#values = {}; this.#rows = [];
+    this.#editing = undefined; this.#formCleanup?.(); this.#pending?.discard(); this.#pending = undefined; this.#draft.discard(); this.#scalarIntent.clear(); this.#values = {}; this.#rows = [];
   }
   handleInput(data: string): void {
     if (this.#closed || this.#busy) return;
@@ -409,8 +453,7 @@ export class ControlPanel implements Component, Focusable {
       this.#operation = Promise.resolve().then(action).catch(() => this.#report("Action failed. Review settings and sandbox status; no automatic host escape.")).finally(() => { this.#busy = false; this.#refresh(); });
     };
     if (key === "q") this.#exit();
-    else if (matchesKey(data, "escape")) { if (this.#back) this.#back(); else this.#exit(); }
-    else if (this.#tree && ["w", "P", "G"].includes(key ?? "")) run(() => this.#save(key === "w" ? "temporary" : key === "P" ? "project" : "global"));
+    else if (matchesKey(data, "escape")) { if (this.#back) run(this.#back); else this.#exit(); }
     else if (this.#tree && key === "e") run(row?.edit);
     else if (this.#tree && key === "a") run(row?.add);
     else if (this.#tree && key === "d") run(row?.remove);
@@ -439,7 +482,6 @@ export class ControlPanel implements Component, Focusable {
     type Hint = [key: string, action: string];
     const close: Hint = ["q", "close"];
     const navigation: Hint = ["j/k h/l", ""];
-    const save: Hint = ["w/P/G", "save"];
     const edits: Hint[] = [
       ...(selected?.edit ? [["e", "edit"] as Hint] : []),
       ...(selected?.add ? [["a", "add"] as Hint] : []),
@@ -451,11 +493,10 @@ export class ControlPanel implements Component, Focusable {
       { hints: [["Enter", "keep"], ["Esc", "cancel"], ["q", "literal text"]], separator: " · " },
       { hints: [["Enter", "keep"], ["Esc", "cancel"]], separator: " " },
     ] : this.#tree ? [
-      { hints: [close, ["j/k", "move"], ["h/l", "fold"], ...edits, ["w", "ephemeral"], ["P", "project"], ["G", "global"]], separator: " · " },
-      { hints: [close, navigation, ...edits, ["w", "ephemeral"], ["P", "project"], ["G", "global"]], separator: " " },
-      { hints: [close, navigation, ...edits, save], separator: " · " },
-      { hints: [close, navigation, ...grouped, save], separator: " " },
-      { hints: [close, ["↑↓←→", ""], ...grouped, ["w/P/G", ""]], separator: " " },
+      { hints: [close, ["j/k", "move"], ["h/l", "fold"], ...edits], separator: " · " },
+      { hints: [close, navigation, ...edits], separator: " " },
+      { hints: [close, navigation, ...grouped], separator: " " },
+      { hints: [close, ["↑↓←→", ""], ...grouped], separator: " " },
     ] : [
       { hints: [close, ["Enter", "select"], ["Esc", "back"], ["↑/↓", "scroll"], ["Tab", "next"]], separator: " · " },
       { hints: [close, ["↵", ""], ["Esc", "back"], ["↑↓", ""], ["Tab", ""]], separator: " " },
@@ -470,7 +511,7 @@ export class ControlPanel implements Component, Focusable {
     const height = Math.max(1, Math.floor(this.#tui.terminal.rows));
     if (this.#tree && !this.#editing) this.#home(false);
     const lines: string[] = [];
-    const title = this.#theme.bold(this.#theme.fg("accent", "MICROSANDBOX")) + (this.#dirty ? this.#theme.fg("warning", " · unsaved draft") : "");
+    const title = this.#theme.bold(this.#theme.fg("accent", "MICROSANDBOX"));
     if (height >= 8) lines.push(truncateToWidth(title, width));
     const selected = this.#rows[this.#focus];
     const footer = this.#footer(width, selected);
@@ -490,10 +531,9 @@ export class ControlPanel implements Component, Focusable {
         const rowStart = body.length;
         if (active) focusedLine = rowStart;
         const prefix = `${active ? ">" : " "} ${"  ".repeat(row.depth ?? 0)}${row.children ? this.#expanded.has(row.id) ? "▾ " : "▸ " : this.#tree ? "  " : ""}`;
-        const label = prefix + this.#theme.fg(row.children ? "accent" : row.id === "back" ? "muted" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", safeText(row.label))
+        const label = prefix + this.#theme.fg(row.children || row.button && !row.disabled && !row.id.includes("cancel") ? "accent" : row.id === "back" || row.id.includes("cancel") || row.disabled ? "muted" : row.id === "feedback" && /failed|invalid/i.test(row.label) ? "error" : row.id.includes("warning") || row.id === "feedback" ? "warning" : "text", row.button ? this.#theme.bold(`[ ${safeText(row.label)} ]`) : safeText(row.label))
           + (row.value !== undefined ? this.#theme.fg(row.id === "configuration/status/state" ? this.#control.getState().status === "active" ? "success" : ["unavailable", "host-fallback"].includes(this.#control.getState().status) ? "error" : "warning" : "syntaxString", `: ${safeText(row.value)}`) : "")
-          + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "")
-          + (row.dirty ? this.#theme.fg("warning", ` * ${row.dirty}`) : "");
+          + (row.origin ? this.#theme.fg("dim", ` [${safeText(row.origin)}]`) : "");
         const labelLines = wrapTextWithAnsi(label, width);
         body.push(...labelLines.map((line) => active ? this.#theme.inverse(line) : line));
         if (row.detail && (!this.#tree && (active || width >= 80) || active && row.id === "configuration/status/state")) body.push(...wrapTextWithAnsi(this.#theme.fg("dim", safeText(row.detail)), width));

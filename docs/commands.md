@@ -15,12 +15,11 @@ files or `PI_MSB_*` before starting a session instead.
   no wrapper. The settings trees edit desired policy. Values show their
   committed origin: default, environment, global, project or ephemeral. Mixed
   collections show entry sources rather than claiming a single group owner.
-  `* draft`, `draft entry` and `inherit on save` mark intent, not a saved origin.
 - **Status** starts collapsed with a plain heading. Its inner
   items are read-only and labeled **[runtime]**: state, adoption/last-known timestamp,
   pending changes, identity (name/displayId/PID/cwd/root/createdAt), and Docker
   readiness/version/storage/reason when known. Configurable policy is not
-  duplicated here. Drafts, external file edits, canceled saves and failed
+  duplicated here. Proposals, external file edits, canceled changes and failed
   activation do not replace the successful-adoption timestamp. Inactive
   adoption is explicitly **last known (not running)**; absent snapshots or
   unsupported adapters are reported honestly. Existing/reconnected guests show
@@ -43,27 +42,23 @@ These bindings apply in normal tree mode, **not while typing**:
 | `l` / right | Expand, otherwise first child |
 | `e` | Edit the selected supported settings item |
 | `a` | Add to the selected collection (or entry's collection) |
-| `d` | Delete an entry; remove a scalar/collection override at the eventual save scope (inherit) |
-| `w` | Save + reload ephemeral current-session edits |
-| `P` | Save + reload host-owned project edits |
-| `G` | Save + reload host-owned global edits |
+| `d` | Propose entry deletion or scalar inheritance at the chosen scope; no action on a collection parent |
 | Enter | Expand a group or activate an action/form control |
-| `q` | Close the TUI from the tree or any non-input screen; confirm unsaved discard |
+| `q` | Close the TUI from the tree or any non-input screen; confirm proposal discard |
 | Esc | Back/cancel; close from tree |
 | Tab / Shift-Tab | Next / previous row, also skipping long diagnostic text |
 | PageDown / PageUp | Scroll a long selected row |
 
-`P` and `G` are uppercase. Save keys always target the desired settings draft,
-including when Status has focus. Status metadata has no edit/add/delete actions.
-In text and masked inputs, `q/e/a/d/w/P/G/j/k/h/l` are ordinary text, including
-Kitty input and bracketed paste. Enter accepts a field; Esc cancels it. Closing a
-dirty draft or edited entry form asks to discard, with **Cancel selected by default**.
-Cancel returns to the same screen without dropping pending entries or saves;
-Escape backs out of transient screens without closing.
+Status metadata has no edit/add/delete actions. Letters are ordinary text in
+text and masked inputs, including Kitty input and bracketed paste. Enter accepts
+a field; Esc cancels it. Closing an active proposal or edited entry form asks to
+discard, with **Cancel selected by default**. Cancel at that prompt returns to the
+same screen. Escape/Cancel backs out of a proposal without changing committed
+settings or runtime, and clears secret buffers.
 
 The contextual footer is exactly one line pinned to the terminal's last row,
 with bold, theme-accented keys and muted action words. It keeps full labels when
-space permits and compacts to grouped keys (`e/a/d`, `w/P/G`) and arrow navigation
+space permits and compacts to grouped keys (`e/a/d`) and arrow navigation
 at mobile widths. Editors show keep/cancel hints, not tree commands; busy screens
 ask you to wait. Content has a separate viewport and cannot displace the footer.
 At the physical limit of a one-row terminal only, selected content/errors take
@@ -72,28 +67,44 @@ Results/errors become focused, scrollable rows even at one or three terminal
 rows; Enter opens the full result. Arrows scroll long transient descriptions;
 Tab moves directly between controls.
 
-## Save scopes
+## Apply scopes
 
-1. **`w` ephemeral** — memory only, above host policy, never appended to the
-   transcript or restored on resume; cleared on session switch/shutdown.
-2. **`P` project** — canonical host-owned project `config.toml`.
-3. **`G` global** — host-owned `default.toml` shared by projects.
+Each scalar choice/text edit and each entry operation is applied or canceled
+before returning to the settings tree. Structured secret/mount forms keep fields
+together and expose the same focusable, theme-accented action buttons:
 
-Only deliberately dirty fields and entry operations are saved, never a flattened
-effective configuration or runtime snapshot. Entry CRUD preserves the chosen scope's other
+1. **Apply for current running sandbox only** — current integration session memory
+   only, above host policy; no disk writes or transcript serialization. Cleared
+   on session switch/shutdown, not restored on resume. Unavailable with a clear
+   reason when no sandbox is running; it cannot silently boot a guest.
+2. **Apply for all sandboxes in this project** — persist sparse project defaults
+   in the canonical host-owned project `config.toml`.
+3. **Apply for all sandboxes globally on this host** — persist sparse host defaults
+   in `default.toml` shared by projects.
+4. **Cancel** — discard this proposal without writes or runtime changes.
+
+Apply automatically reconfigures/reloads **this sandbox**, after any meaningful
+restart/security confirmation. Other sandboxes pick up persisted defaults on next
+start/reload; there is no broadcast. Higher project/session overrides can shadow
+lower-scope changes and are never automatically cleared. No manual Reload is
+needed for normal edits.
+
+Only the one deliberate operation is persisted, never a flattened effective
+configuration or runtime snapshot. Entry CRUD preserves the chosen scope's other
 entries, including those hidden by higher layers. It never exports unrelated
-project/ephemeral credentials, mounts, hosts, environment or tool permissions.
+project/session credentials, mounts, hosts, environment or tool permissions.
 A deliberate higher-scope entry import is identified by origin and identity in
 confirmation: that particular permission/credential may become available to
 other projects. Metadata edits retain private values/references without reading
 credential bytes for display.
 
-**Clear list (explicit empty)** is a distinct whole-list replacement. `d` on the
-collection inherits instead. Project/ephemeral layers can shadow a lower-scope
-save or deletion; preview and results report shadowing and no-ops. Conflicting
-same-scope `remove_*` identities are reconciled; unrelated removals stay intact.
+Collections have no bulk-clear or parent inheritance control. `d` removes one
+entry; removing the last may leave an explicit empty list, still with entry
+removal intent. Scalar `d` previews inheritance at the chosen scope.
+Project/session layers can shadow a lower-scope change or deletion; preview and
+results report shadowing and no-ops. Conflicting same-scope `remove_*` identities are reconciled; unrelated removals stay intact.
 Unknown raw settings are retained; comments/layout are not preserved on changed
-saves. Unsafe paths and external edits are rejected; reopen a stale draft.
+saves. Unsafe paths and external edits are rejected; cancel and reopen a stale proposal.
 
 Confirmation shows scope, changed fields, entry intents/origins, higher-scope
 imports, runtime effect and shadowing. Resources, image, networking, secrets,
@@ -101,22 +112,30 @@ mounts, environment and boot/lifecycle changes may recreate the guest. Confirm
 before losing guest ephemeral state and nested containers. Host writes already
 happened and cannot be undone. Routing/footer/access policy and `auto_start`
 preferences adopt live; `auto_start = false` never stops a running guest or
-hands tools to the host. Automatic session naming is an ephemeral-only override;
-inherit removes persistent naming assignments.
+hands tools to the host. Pass-through tool edits and third-party blocking changes
+require explicit confirmation: permitted third-party tools execute on the host
+outside the sandbox without per-call host approval. Host-execution, host-fallback
+and constrained host skill-read policy changes also warn and require confirmation,
+including inheritance that may expose a more permissive lower policy.
+Automatic session naming is an ephemeral-only override; inherit removes persistent
+naming assignments.
 
 Saved settings and successful runtime adoption are separate outcomes. Failed
 activation keeps the panel editable and the previous snapshot last-known; it
 never silently enables host execution. Fix the cause, then use
-**Actions → Reload settings**. Reload/Enable refresh the draft
-while preserving deliberate unsaved edits.
+**Actions → Reload settings** for recovery or external-file refresh. Apply
+failures offer retry/cancel without exposing credential-bearing error text. A
+saved-but-runtime-failed result does not claim storage was unchanged.
 
 ## Actions and diagnostics
 
 **Actions** retains enable, **Turn off (HOST execution)**,
 reload, prune, redacted logs (validated non-negative tail count, default 100),
-effective redacted desired-config diagnostics, seal network in the draft,
-reset ephemeral settings and help. Dangerous actions require explicit
-confirmation and idle. Status remains observational.
+effective redacted desired-config diagnostics, seal network through scope actions,
+**Reset current sandbox overrides** and help. Reset discards only current
+memory-only overrides, leaves project/global defaults unchanged, and reconciles
+automatically after destructive/restart confirmation. Dangerous actions require
+explicit confirmation and idle. Status remains observational.
 
 Turn off deliberately hands tools to the unsandboxed host. This differs from
 `fallback_mode = "host"`, which permits automatic host execution after failure.

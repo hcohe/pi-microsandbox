@@ -6,8 +6,8 @@ Configure host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml`,
 created if missing as a fully commented reference on the first enabled session.
 Use host-owned per-project files for project-specific overrides, `PI_MSB_*`
 environment variables for launch settings, and the [`/msb` control panel](commands.md)
-for ephemeral (`w`), project (`P`) or global (`G`) save + reload. Collapsed settings
-trees sit directly below MICROSANDBOX and edit desired policy; Status shows
+to apply each change to the current running sandbox, project defaults or global
+defaults, or cancel. Collapsed settings trees sit directly below MICROSANDBOX and edit desired policy; Status shows
 read-only runtime metadata, not duplicate settings.
 
 Settings take precedence in this order: built-ins < environment
@@ -96,18 +96,23 @@ workspace/writable-mount guards. Writable mounts also cannot expose physical
 ancestor entries or intermediate alias hops that could replace the selected agent
 link; read-only parents and unrelated sibling directories remain allowed.
 Retargeting or replacing the agent directory while
-a draft is open invalidates that draft; reopen the panel before saving.
+a proposal is open invalidates it; cancel and reopen before applying.
 
 Both host-owned files are loaded regardless of Pi's project trust state. They
 are applied after launch settings, with the project-specific file after `default.toml`.
-**`w` (ephemeral)** places memory-only changes above both files, never in the
-transcript. They reset on session switch/end, including resuming the same session.
-**`d` (inherit)** on a scalar/collection removes the eventual save scope's assignment;
-Actions → Reset ephemeral settings clears memory overrides.
-**`P` / `G`** save only intentional project/global edits, preserving unedited
-references without copying inherited credentials. See [save scopes](commands.md#save-scopes).
-Origins remain labeled separately from unsaved draft intent. Status is read-only;
-its adoption timestamp changes only after successful adoption, not merely after a disk save.
+**Apply for current running sandbox only** places memory-only changes above both
+files, never in the transcript. They reset on session switch/end, including
+resuming the same session. This action is unavailable without a running sandbox.
+**`d` (inherit)** on a scalar proposes removal of the chosen scope's assignment;
+collections only support individual entry removal. Actions → **Reset current
+sandbox overrides** clears only committed memory overrides, leaves project/global
+defaults unchanged, and reconfigures automatically after confirmation.
+Project/global apply persists only the intended operation, preserving unedited
+references without copying inherited credentials. Apply reloads this sandbox
+automatically; others pick up defaults on next start/reload. Higher overrides can
+shadow persisted defaults. See [apply scopes](commands.md#apply-scopes).
+Origins label committed settings. Status is read-only; its adoption timestamp
+changes only after successful adoption, not merely after persistence.
 Only explicitly configured fields override lower layers; omitted fields inherit
 from the preceding layers, including the host-owned default. Nested tables
 override individual fields. **Lists in both host-owned layers replace the entire
@@ -163,7 +168,7 @@ chmodded. Newly created directories use mode `0700` and the file uses `0600`
 extension import, factory registration, or the model-list smoke command;
 `PI_MSB_DISABLE=1` also skips setup. Creation failures block sandbox startup
 rather than falling back to host execution. Per-project files are created by the
-project save key (`P`) or manually from the host;
+project apply action or manually from the host;
 without one, host defaults still apply.
 An unreadable or invalid host file fails closed rather than silently dropping
 that layer. Both host files must remain outside the workspace, including through
