@@ -682,7 +682,8 @@ test("Secret forms separate friendly hints from multiline Allowed hosts editor h
     assert.doesNotMatch(menu, /comma-separated|at least one|api\.typesafe|api\.example/);
   }
   colors.length = 0; f.panel.render(80);
-  assert.ok(colors.some(([role, text]) => role === "muted" && text === SECRET_HOST_HELP.hint));
+  assert.ok(colors.some(([role, text]) => role === "dim" && text === SECRET_HOST_HELP.hint));
+  assert.ok(!colors.some(([role, text]) => role === "text" && text === SECRET_HOST_HELP.hint));
   await f.key("\r");
   for (const [width, height] of [[32, 12], [80, 20]]) {
     f.terminal.columns = width!; f.terminal.rows = height!;
