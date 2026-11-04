@@ -1,7 +1,7 @@
 import { DEFAULT_CONFIG, normalizeConfigPath } from "./config.ts";
 import { SETTINGS_PATHS } from "./settings.ts";
 
-export const SECTIONS = ["Overview", "General", "Resources", "Network", "Secrets", "Mounts", "Tools", "Advanced", "Sources", "Actions"] as const;
+export const SECTIONS = ["Overview", "General", "Resources", "Network", "Secrets", "Variables", "Mounts", "Tools", "Image", "Advanced", "Sources", "Actions"] as const;
 export type Section = typeof SECTIONS[number];
 export interface FieldHelp { hint: string; editorHelp: string; choiceHelp?: Readonly<Record<string, string>> }
 export interface SettingsField extends FieldHelp { path: string; section: Section; description: string; choices?: readonly (string | boolean)[] }
@@ -83,7 +83,9 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = SETTINGS_PATHS.map((pat
   path, description: descriptions[path]!, ...help[path]!,
   section: path.startsWith("network.") ? "Network" : path === "secrets" ? "Secrets" : path === "mounts" ? "Mounts"
     : ["block_third_party", "route_tools", "pass_through_tools", "allow_host_execution"].includes(path) ? "Tools"
-    : ["cpus", "memory_mib", "idle_timeout_sec", "stop_timeout_ms", "replace_timeout_ms"].includes(path) ? "Resources"
-    : ["image", "pull_policy", "bootstrap_tools", "sandbox_name", "auto_start", "prune_on_start", "show_footer", "detached"].includes(path) ? "General" : "Advanced",
+    : ["cpus", "memory_mib"].includes(path) ? "Resources"
+    : ["image", "pull_policy"].includes(path) ? "Image"
+    : path === "host_env" ? "Variables"
+    : ["bootstrap_tools", "sandbox_name", "auto_start", "prune_on_start", "show_footer", "detached"].includes(path) ? "General" : "Advanced",
   choices: choices[path] ?? (typeof valueAt(DEFAULT_CONFIG, path) === "boolean" ? [true, false] : undefined),
 }));

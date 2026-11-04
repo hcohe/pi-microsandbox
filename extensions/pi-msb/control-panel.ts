@@ -9,6 +9,12 @@ import type { MsbControl, Config } from "./types.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
 type Row = { id: string; label: string; detail?: string; instructions?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
+// Root order is independent of field inventory order; existing node identities stay stable.
+const ROOT_ORDER = [
+  "configuration/Resources", "configuration/Network", "configuration/Secrets", "configuration/Variables",
+  "configuration/Mounts", "configuration/Tools", "configuration/Image", "configuration/sources",
+  "configuration/actions", "configuration/status", "configuration/General", "configuration/Advanced",
+];
 type FormField = FieldHelp & { name: string; value: string; secret?: boolean; choices?: string[] };
 const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "ephemeral", env: "environment", defaults: "default" }[source] ?? source);
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
@@ -38,7 +44,7 @@ export class ControlPanel implements Component, Focusable {
   #theme: Pick<Theme, "fg" | "bold" | "inverse">;
   #done: () => void;
   #tree = true;
-  #treeFocus = "configuration/General";
+  #treeFocus = "configuration/Resources";
   #expanded = new Set<string>();
   #rows: Row[] = [];
   #focus = 0;
@@ -181,13 +187,14 @@ export class ControlPanel implements Component, Focusable {
     const roots: Row[] = [
       ...(this.#baselineReady ? fields("configuration", this.#values, this.#provenance, false) : [{ id: "settings-unavailable", label: "Settings unavailable", detail: "Last apply result remains valid. Repair host configuration, then Reload or reopen before editing." }]),
       status,
-      { id: "configuration/sources", label: "Sources & warnings", children: [
+      { id: "configuration/sources", label: "Sources", children: [
         ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${originLabel(scope)} target`, value: path })),
         { id: "precedence", label: "Inheritance", value: "default → environment → global → project → ephemeral", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
     ];
+    roots.sort((a, b) => ROOT_ORDER.indexOf(a.id) - ROOT_ORDER.indexOf(b.id));
     const rows: Row[] = [];
     const flatten = (node: Row, parent?: string, depth = 0) => { node.parent = parent; node.depth = depth; rows.push(node); if (node.children && this.#expanded.has(node.id)) for (const child of node.children) flatten(child, node.id, depth + 1); };
     for (const root of roots) flatten(root);
@@ -418,7 +425,7 @@ export class ControlPanel implements Component, Focusable {
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
       { id: "seal", label: "Seal network", detail: "Set deny mode after choosing where it applies.", action: () => this.#set("network.mode", "deny") },
       dangerous("Reset current sandbox overrides", "Discard only current memory-only overrides; project/global defaults are unchanged. Reconfigure automatically. Restart may lose guest state.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "General, Resources, Network, Secrets, Mounts, Tools, Advanced, Status, Sources & warnings and Actions start collapsed directly below MICROSANDBOX. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers current running sandbox, project defaults, global defaults, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Resources, Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General and Advanced start collapsed directly below MICROSANDBOX, with Resources selected. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers current running sandbox, project defaults, global defaults, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins and warnings. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {

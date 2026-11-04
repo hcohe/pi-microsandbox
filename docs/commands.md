@@ -3,18 +3,24 @@
 [Back to README](../README.md)
 
 Run **`/msb`** in interactive Pi. It opens full-screen with collapsed trees
-directly below **MICROSANDBOX**, initially focused on General. Opening never writes
+directly below **MICROSANDBOX**, initially focused on Resources. Opening never writes
 settings or starts a sandbox.
 Headless/RPC/print invocations report an actionable error; configure host-owned
 files or `PI_MSB_*` before starting a session instead.
 
 ## Top-level trees
 
-- **General**, **Resources**, **Network**, **Secrets**, **Mounts**, **Tools**, **Advanced**,
-  **Status**, **Sources & warnings**, and **Actions** are the visible roots, with
+- **Resources**, **Network**, **Secrets**, **Variables**, **Mounts**, **Tools**,
+  **Image**, **Sources**, **Actions**, **Status**, **General**, and **Advanced**
+  are the visible roots, in that order, with
   no wrapper. The settings trees edit desired policy. Values show their
   committed origin: default, environment, global, project or ephemeral. Mixed
   collections show entry sources rather than claiming a single group owner.
+- **Resources** contains only `cpus` and `memory_mib`. The timeout settings
+  `idle_timeout_sec`, `stop_timeout_ms` and `replace_timeout_ms` are in **Advanced**.
+- **Image** contains only `image` and `pull_policy`. **Variables** contains only
+  `host_env`; `expose_session_environment` remains in **Advanced**.
+- **Sources** retains committed-origin targets, inheritance diagnostics and warnings.
 - **Tools** contains `block_third_party`, `route_tools`, `pass_through_tools`
   and `allow_host_execution`, in that order. Other advanced policy settings,
   including `allow_skill_reads` and `fallback_mode`, remain in **Advanced**.

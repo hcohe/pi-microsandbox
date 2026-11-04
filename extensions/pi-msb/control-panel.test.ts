@@ -13,7 +13,7 @@ import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createCommandHandler } from "./command.ts";
 import type { MsbControl } from "./types.ts";
 const APPLY = ["Apply for current running sandbox only", "Apply for all sandboxes in this project", "Apply for all sandboxes globally on this host"];
-const ROOT_GROUPS = ["General", "Resources", "Network", "Secrets", "Mounts", "Tools", "Advanced", "Status", "Sources & warnings", "Actions"];
+const ROOT_GROUPS = ["Resources", "Network", "Secrets", "Variables", "Mounts", "Tools", "Image", "Sources", "Actions", "Status", "General", "Advanced"];
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text } as any;
 async function fixture(t: any, theme = plainTheme, native = false) {
@@ -81,20 +81,20 @@ test("collapsed groups are direct roots under MICROSANDBOX with vim and arrow tr
   assert.deepEqual(initial.slice(1, 1 + ROOT_GROUPS.length).map((line) => line.slice(4).trimEnd()), ROOT_GROUPS);
   assert.ok(initial.slice(1, 1 + ROOT_GROUPS.length).every((line) => /^[> ] ▸ /.test(line)));
   assert.doesNotMatch(f.full(), /Configuration|Section:|Search all|Apply temporarily/);
-  assert.equal(f.selected(), "General");
+  assert.equal(f.selected(), "Resources");
   for (const group of ROOT_GROUPS) {
     await f.seek(group);
     for (const left of ["h", "\x1b[D"]) { await f.key(left); assert.equal(f.selected(), group); }
   }
   for (const [left, right, down, up] of [["h", "l", "j", "k"], ["\x1b[D", "\x1b[C", "\x1b[B", "\x1b[A"]]) {
-    await f.seek("General");
-    await f.key(right); assert.equal(f.selected(), "General"); assert.match(f.full(), /> ▾ General/);
-    await f.key(right); assert.match(f.selected(), /Guest image/); assert.match(f.full(), />     Guest image:/);
-    await f.key(left); assert.equal(f.selected(), "General");
-    await f.key(left); assert.match(f.full(), /> ▸ General/);
-    await f.key(left); assert.equal(f.selected(), "General");
-    await f.key(down); assert.equal(f.selected(), "Resources");
-    await f.key(up); assert.equal(f.selected(), "General");
+    await f.seek("Resources");
+    await f.key(right); assert.equal(f.selected(), "Resources"); assert.match(f.full(), /> ▾ Resources/);
+    await f.key(right); assert.match(f.selected(), /Virtual CPUs/); assert.match(f.full(), />     Virtual CPUs:/);
+    await f.key(left); assert.equal(f.selected(), "Resources");
+    await f.key(left); assert.match(f.full(), /> ▸ Resources/);
+    await f.key(left); assert.equal(f.selected(), "Resources");
+    await f.key(down); assert.equal(f.selected(), "Network");
+    await f.key(up); assert.equal(f.selected(), "Resources");
   }
   await f.node("Status"); await f.key("h"); assert.equal(f.selected(), "Status"); assert.match(f.full(), /▸ Status *$/m);
   assert.doesNotMatch(f.full(), /State:|Runtime|Actually adopted|Policy snapshot unavailable/);
@@ -109,7 +109,9 @@ test("Enter opens the same editor as e for scalars, list items and expandable en
     await f.key("\x1b"); await f.node(group, label); await f.key("\r");
     assert.equal(f.full(), editor, label); await f.key("\x1b");
   };
-  await sameEditor("General", "Guest image:");
+  await sameEditor("Image", "Guest image:");
+  await sameEditor("Image", "Pull Policy:");
+  for (const label of ["Idle Timeout Sec:", "Stop Timeout Ms:", "Replace Timeout Ms:"]) await sameEditor("Advanced", label);
   await sameEditor("Resources", "Virtual CPUs:");
   await sameEditor("Tools", "Block Third Party:");
   await f.list("Tools", "Route Tools:"); await sameEditor("Tools", "read");
@@ -124,8 +126,8 @@ test("Enter opens the same editor as e for scalars, list items and expandable en
 
 test("Enter still expands noneditable groups and leaves runtime metadata read-only", async (t) => {
   const f = await fixture(t);
-  await f.key("\r"); assert.equal(f.selected(), "General"); assert.match(f.full(), /> ▾ General/);
-  await f.key("\r"); assert.match(f.selected(), /^Guest image:/);
+  await f.key("\r"); assert.equal(f.selected(), "Resources"); assert.match(f.full(), /> ▾ Resources/);
+  await f.key("\r"); assert.match(f.selected(), /^Virtual CPUs:/);
   await f.node("Tools", "Route Tools:"); await f.key("\r"); assert.match(f.full(), /▾ Route Tools:/);
   await f.node("Status", "State:"); const before = f.full();
   await f.key("\r"); assert.equal(f.full(), before); assert.deepEqual(f.calls, []);
@@ -135,10 +137,6 @@ test("Tools owns exactly the four routing/host fields with folding, scalar edits
   const paths = ["block_third_party", "route_tools", "pass_through_tools", "allow_host_execution"];
   const labels = ["Block Third Party:", "Route Tools:", "Pass Through Tools:", "Allow Host Execution:"];
   assert.deepEqual(SETTINGS_FIELDS.filter((field) => field.section === "Tools").map((field) => field.path), paths);
-  assert.deepEqual(SETTINGS_FIELDS.filter((field) => field.section === "Advanced").map((field) => field.path), [
-    "replace", "docker.mode", "docker.startup_timeout_ms", "allow_skill_reads", "fallback_mode",
-    "expose_session_environment", "host_env", "lock_dir", "host_ro_allowlist",
-  ]);
   const f = await fixture(t);
   const visibleToolLabels = () => f.full().split("\n").filter((line) => labels.some((label) => line.includes(label))).map((line) => line.trim().replace(/^>\s*/, "").replace(/^[▾▸]\s*/, "").split(":")[0] + ":");
   assert.deepEqual(visibleToolLabels(), []);
@@ -172,6 +170,52 @@ test("Tools owns exactly the four routing/host fields with folding, scalar edits
   }
   await f.seek("Tools"); await f.key("h");
   assert.deepEqual(visibleToolLabels(), []);
+  assert.deepEqual(f.settings.temporary(), {}); assert.deepEqual(f.calls, []);
+});
+
+test("Resources, Image, Variables and Advanced have exact field membership and preserve field order", async (t) => {
+  const expected = {
+    Resources: ["cpus", "memory_mib"],
+    Image: ["image", "pull_policy"],
+    Variables: ["host_env"],
+    Advanced: ["idle_timeout_sec", "stop_timeout_ms", "replace", "replace_timeout_ms", "docker.mode", "docker.startup_timeout_ms",
+      "allow_skill_reads", "fallback_mode", "expose_session_environment", "lock_dir", "host_ro_allowlist"],
+  };
+  const friendlyLabels: Record<string, string> = { cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", "docker.mode": "Docker mode" };
+  const f = await fixture(t);
+  for (const [section, paths] of Object.entries(expected)) {
+    assert.deepEqual(SETTINGS_FIELDS.filter((field) => field.section === section).map((field) => field.path), paths, section);
+    await f.expand(section);
+    const children = f.full().split("\n").flatMap((line) => {
+      const match = line.match(/^[> ]   (?:[▾▸] |  )(.+?):/);
+      return match ? [match[1]] : [];
+    });
+    assert.deepEqual(children, paths.map((path) => friendlyLabels[path] ?? path.split(".").pop()!.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ")), section);
+    await f.key("h"); assert.match(f.full(), new RegExp(`> ▸ ${section}`));
+  }
+  assert.deepEqual(f.calls, []);
+});
+
+test("Sources retains targets, inheritance diagnostics and warnings; Variables entries support Enter/e and scoped CRUD", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.paths.global!), { recursive: true });
+  await writeFile(f.paths.global!, 'host_env = ["LANG"]\nunknown_panel_setting = true\n');
+  await f.action("Reload settings"); await f.choose("Confirm"); f.calls.length = 0;
+  await f.node("Sources");
+  assert.doesNotMatch(f.full(), /Sources & warnings/);
+  assert.ok(f.full().includes(f.paths.global!)); assert.ok(f.full().includes(f.paths.project!));
+  assert.match(f.full(), /Inheritance: default → environment → global → project → ephemeral/);
+  assert.match(f.full(), /Warning: unknown config key unknownPanelSetting/);
+  await f.key("h"); assert.doesNotMatch(f.full(), /unknown config key/);
+  await f.list("Variables", "Host Env:"); await f.seek("LANG"); assert.match(f.selected(), /\[global\]/);
+  await f.key("e"); const editor = f.full(); await f.key("\x1b");
+  await f.key("\r"); assert.equal(f.full(), editor); await f.key("\x1b");
+  await f.node("Variables", "Host Env:"); await f.key("a"); await f.key("LC_ALL"); await f.key("\r");
+  for (const scope of APPLY) assert.ok(f.full().includes(scope));
+  await f.choose("Cancel"); await f.seek("LANG"); await f.key("d");
+  for (const scope of APPLY) assert.ok(f.full().includes(scope));
+  await f.choose("Cancel"); assert.match(f.selected(), /LANG/);
+  assert.equal(await readFile(f.paths.global!, "utf8"), 'host_env = ["LANG"]\nunknown_panel_setting = true\n');
   assert.deepEqual(f.settings.temporary(), {}); assert.deepEqual(f.calls, []);
 });
 
@@ -478,7 +522,7 @@ test("removed save keys do nothing in normal/Kitty/modifyOtherKeys; letters stay
   for (const protocol of ["plain", "kitty", "paste"]) {
     const f = await fixture(t);
     for (const data of ["w", "P", "G", "p", "g", "\x1b[112:80;2u", "\x1b[71u", "\x1b[27;2;80~", "\x1b[80;2:3u"]) await f.key(data);
-    assert.equal(f.selected(), "General"); assert.deepEqual(f.calls, []);
+    assert.equal(f.selected(), "Resources"); assert.deepEqual(f.calls, []);
     const type = async () => { if (protocol === "paste") { await f.key(`\x1b[200~${commands.slice(0, 5)}`); await f.key(`${commands.slice(5)}\x1b[201~`); } else for (const char of commands) await f.key(protocol === "kitty" ? `\x1b[${char.codePointAt(0)}u` : char); };
     await f.list("Network", "Allowed hosts:"); await f.key("a"); await type(); await f.key("\r"); assert.match(f.full(), /Apply change/); assert.equal(f.closed(), false); await f.choose("Cancel");
     await addSecret(f, "TOKEN", "$ENV:PLACEHOLDER"); await f.choose("Replace value"); await type(); assert.doesNotMatch(f.text(), new RegExp(commands)); await f.key("\r"); await f.apply(); assert.equal(f.settings.temporary().secrets![0]!.value, commands);
@@ -649,7 +693,7 @@ test("theme roles, ANSI and Unicode remain bounded; scalar and entry origins are
   const roles = new Set<string>();
   const theme = { fg: (role: string, text: string) => { roles.add(role); return `\x1b[32m${text}\x1b[39m`; }, bold: (text: string) => `\x1b[1m${text}\x1b[22m`, inverse: (text: string) => `\x1b[7m${text}\x1b[27m` } as any;
   const f = await fixture(t, theme); f.paths.project = "/東京/🌱/e\u0301/\x1b[2Jhost-policy/config.toml";
-  await f.number("2"); await f.choose("Cancel"); await f.node("Sources & warnings");
+  await f.number("2"); await f.choose("Cancel"); await f.node("Sources");
   for (const width of [24, 32, 40, 80, 120]) for (const height of [1, 3, 6, 24]) {
     f.terminal.columns = width; f.terminal.rows = height;
     for (let n = 0; n < 15; n++) { const lines = f.panel.render(width); assert.equal(lines.length, height); assert.ok(lines.every((line) => visibleWidth(line) === width)); assert.doesNotMatch(lines.join(""), /\x1b\[2J/); await f.key("j"); }

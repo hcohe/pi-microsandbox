@@ -82,9 +82,9 @@ try {
         assert.match(initial, /▸ Status *$/m);
         assert.doesNotMatch(initial, /Runtime|State:|No running policy adopted/);
         const roots = initial.split("\n").filter((line) => /^[> ] [▾▸] /.test(line));
-        assert.deepEqual(roots.map((line) => line.slice(4).trimEnd()), ["General", "Resources", "Network", "Secrets", "Mounts", "Tools", "Advanced", "Status", "Sources & warnings", "Actions"]);
+        assert.deepEqual(roots.map((line) => line.slice(4).trimEnd()), ["Resources", "Network", "Secrets", "Variables", "Mounts", "Tools", "Image", "Sources", "Actions", "Status", "General", "Advanced"]);
         assert.ok(roots.every((line) => /^[> ] ▸ /.test(line)));
-        assert.match(initial, /^MICROSANDBOX *\n> ▸ General/m);
+        assert.match(initial, /^MICROSANDBOX *\n> ▸ Resources/m);
         assert.doesNotMatch(initial, /Configuration/);
         for (const [width, height] of [[80, 24], [24, 2], [24, 6], [32, 12], [40, 10], [120, 20], [1, 1]]) {
           terminal.columns = width; terminal.rows = height;
@@ -120,14 +120,26 @@ try {
           if (line.includes("▸")) await key("l");
         };
         assert.doesNotMatch(tui.stripTerminalSequences(panel.render(80).join("\n")), /Section:|Search all settings/);
-        await choose("General");
+        await choose("Resources");
         for (const [left, right] of [["h", "l"], ["\x1b[D", "\x1b[C"]]) {
-          await key(left); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▸ General/);
-          await key(right); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▾ General/);
-          await key(right); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), />     Guest image:/);
+          await key(left); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▸ Resources/);
+          await key(right); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▾ Resources/);
+          await key(right); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), />     Virtual CPUs:/);
           await key(left); await key(left);
-          assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▸ General/);
+          assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> ▸ Resources/);
         }
+        await expand("Image"); await choose("Guest image:"); await key("e");
+        const imageEditor = tui.stripTerminalSequences(panel.render(80).join("\n"));
+        assert.match(imageEditor, /Enter a nonempty guest image name/);
+        await key("\x1b"); await key("\r");
+        assert.equal(tui.stripTerminalSequences(panel.render(80).join("\n")), imageEditor);
+        await key("\x1b"); await choose("Image"); await key("h");
+        await expand("Variables"); await choose("Host Env:"); await key("a");
+        assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Enter one host environment variable name/);
+        await key("\x1b"); await choose("Variables"); await key("h");
+        await expand("Sources");
+        assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Inheritance:/);
+        await choose("Sources"); await key("h");
         await expand("Status");
         const status = tui.stripTerminalSequences(panel.render(80).join("\n"));
         assert.match(status, /State: off \[runtime\]/);

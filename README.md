@@ -36,9 +36,10 @@ cd /path/to/project
 pi
 ```
 
-Inside Pi, **`/msb`** opens full-screen with collapsed **General**, **Resources**,
-**Network**, **Secrets**, **Mounts**, **Tools**, **Advanced**, **Status**, **Sources & warnings**
-and **Actions** trees directly below **MICROSANDBOX**, initially focused on General.
+Inside Pi, **`/msb`** opens full-screen with collapsed **Resources**, **Network**,
+**Secrets**, **Variables**, **Mounts**, **Tools**, **Image**, **Sources**, **Actions**,
+**Status**, **General** and **Advanced** trees directly below **MICROSANDBOX**,
+initially focused on Resources.
 **Status** contains read-only **[runtime]** metadata, not duplicate settings.
 Expand with `l`/right, fold or go to parent with `h`/left, move with `j`/`k` or up/down. Enter/`e` edits, `a` adds, `d` deletes/inherits,
 and `q` closes. One contextual hint line stays pinned at the bottom, with accented
