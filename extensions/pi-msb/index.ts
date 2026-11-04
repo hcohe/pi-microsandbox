@@ -24,7 +24,7 @@ export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: 
     case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}`;
     case "off": return "MSB host";
     case "host-fallback": return "MSB host fallback";
-    case "unavailable": return "MSB blocked";
+    case "unavailable": return "Microsandbox Blocked";
     case "booting": return `msb-${sessionDisplayId ?? state.info?.displayId ?? "…"}`;
     case "stopping": return "MSB stopping";
     default: return "MSB disabled";
