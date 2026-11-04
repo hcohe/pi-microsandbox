@@ -418,7 +418,7 @@ export class ControlPanel implements Component, Focusable {
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
       { id: "seal", label: "Seal network", detail: "Set deny mode after choosing where it applies.", action: () => this.#set("network.mode", "deny") },
       dangerous("Reset current sandbox overrides", "Discard only current memory-only overrides; project/global defaults are unchanged. Reconfigure automatically. Restart may lose guest state.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "General, Resources, Network, Secrets, Mounts, Tools, Advanced, Status, Sources & warnings and Actions start collapsed directly below MICROSANDBOX. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. e edits; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers current running sandbox, project defaults, global defaults, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "General, Resources, Network, Secrets, Mounts, Tools, Advanced, Status, Sources & warnings and Actions start collapsed directly below MICROSANDBOX. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers current running sandbox, project defaults, global defaults, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
@@ -477,7 +477,7 @@ export class ControlPanel implements Component, Focusable {
     };
     if (key === "q") this.#exit();
     else if (matchesKey(data, "escape")) { if (this.#back) run(this.#back); else this.#exit(); }
-    else if (this.#tree && key === "e") run(row?.edit);
+    else if (this.#tree && (key === "e" || matchesKey(data, "enter") && row?.edit)) run(row?.edit);
     else if (this.#tree && key === "a") run(row?.add);
     else if (this.#tree && key === "d") run(row?.remove);
     else if (this.#tree && (matchesKey(data, "left") || key === "h")) {
@@ -506,7 +506,7 @@ export class ControlPanel implements Component, Focusable {
     const close: Hint = ["q", "close"];
     const navigation: Hint = ["j/k h/l", ""];
     const edits: Hint[] = [
-      ...(selected?.edit ? [["e", "edit"] as Hint] : []),
+      ...(selected?.edit ? [["Enter/e", "edit"] as Hint] : []),
       ...(selected?.add ? [["a", "add"] as Hint] : []),
       ...(selected?.remove ? [["d", selected.removeLabel ?? "delete"] as Hint] : []),
       ...(selected?.action ? [["Enter", "run"] as Hint] : []),

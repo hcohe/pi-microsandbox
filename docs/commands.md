@@ -46,7 +46,7 @@ These bindings apply in normal tree mode, **not while typing**:
 | `e` | Edit the selected supported settings item |
 | `a` | Add to the selected collection (or entry's collection) |
 | `d` | Propose entry deletion or scalar inheritance at the chosen scope; no action on a collection parent |
-| Enter | Expand a group or activate an action/form control |
+| Enter | Edit an editable item (same as `e`); otherwise expand a group or activate an action/form control |
 | `q` | Close the TUI from the tree or any non-input screen; confirm proposal discard |
 | Esc | Back/cancel; close from tree |
 | Tab / Shift-Tab | Next / previous row, also skipping long diagnostic text |
@@ -61,7 +61,7 @@ settings or runtime, and clears secret buffers.
 
 The contextual footer is exactly one line pinned to the terminal's last row,
 with bold, theme-accented keys and muted action words. It keeps full labels when
-space permits and compacts to grouped keys (`e/a/d`) and arrow navigation
+space permits and compacts to grouped keys (`Enter/e/a/d`) and arrow navigation
 at mobile widths. Menus show short, friendly field hints. Value and choice editors
 add format guidance and examples; on tiny screens, input takes priority over that
 guidance. Editors show keep/cancel hints, not tree commands; busy screens ask you

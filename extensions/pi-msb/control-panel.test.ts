@@ -102,6 +102,35 @@ test("collapsed groups are direct roots under MICROSANDBOX with vim and arrow tr
   assert.deepEqual(f.calls, []);
 });
 
+test("Enter opens the same editor as e for scalars, list items and expandable entries", async (t) => {
+  const f = await fixture(t);
+  const sameEditor = async (group: string, label: string) => {
+    await f.node(group, label); await f.key("e"); const editor = f.full();
+    await f.key("\x1b"); await f.node(group, label); await f.key("\r");
+    assert.equal(f.full(), editor, label); await f.key("\x1b");
+  };
+  await sameEditor("General", "Guest image:");
+  await sameEditor("Resources", "Virtual CPUs:");
+  await sameEditor("Tools", "Block Third Party:");
+  await f.list("Tools", "Route Tools:"); await sameEditor("Tools", "read");
+  await addSecret(f); await f.apply(0);
+  await f.list("Secrets", "Secrets:"); await sameEditor("Secrets", "TOKEN:");
+  await f.list("Secrets", "Secrets:"); await f.expand("TOKEN:");
+  await sameEditor("Secrets", "Environment name:");
+  await mount(f); await f.apply(0);
+  await f.list("Mounts", "Mounts:"); await sameEditor("Mounts", "/scratch:");
+  assert.equal(f.closed(), false);
+});
+
+test("Enter still expands noneditable groups and leaves runtime metadata read-only", async (t) => {
+  const f = await fixture(t);
+  await f.key("\r"); assert.equal(f.selected(), "General"); assert.match(f.full(), /> ▾ General/);
+  await f.key("\r"); assert.match(f.selected(), /^Guest image:/);
+  await f.node("Tools", "Route Tools:"); await f.key("\r"); assert.match(f.full(), /▾ Route Tools:/);
+  await f.node("Status", "State:"); const before = f.full();
+  await f.key("\r"); assert.equal(f.full(), before); assert.deepEqual(f.calls, []);
+});
+
 test("Tools owns exactly the four routing/host fields with folding, scalar edits and collection CRUD accessible", async (t) => {
   const paths = ["block_third_party", "route_tools", "pass_through_tools", "allow_host_execution"];
   const labels = ["Block Third Party:", "Route Tools:", "Pass Through Tools:", "Allow Host Execution:"];
