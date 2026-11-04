@@ -46,6 +46,12 @@ just dev --continue
 just dev "Run docker info and report the storage driver"
 ```
 
+To test only the extension without building or importing a Docker image, run
+`just dev-extension-only` (Pi arguments are forwarded as with `dev`). This still
+builds and smoke-tests the native addon, but uses your normal sandbox
+configuration instead of forcing the local image, Docker mode, or resource
+settings.
+
 Run `just dev-image` by itself when you only need to refresh the local image.
 
 ### Control-panel integration and testing
