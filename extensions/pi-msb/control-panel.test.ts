@@ -13,7 +13,7 @@ import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createCommandHandler } from "./command.ts";
 import type { MsbControl } from "./types.ts";
 const APPLY = ["Apply for current running sandbox only", "Apply for all sandboxes in this project", "Apply for all sandboxes globally on this host"];
-const ROOT_GROUPS = ["General", "Resources", "Network", "Secrets", "Mounts", "Advanced", "Status", "Sources & warnings", "Actions"];
+const ROOT_GROUPS = ["General", "Resources", "Network", "Secrets", "Mounts", "Tools", "Advanced", "Status", "Sources & warnings", "Actions"];
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text } as any;
 async function fixture(t: any, theme = plainTheme, native = false) {
@@ -102,6 +102,50 @@ test("collapsed groups are direct roots under MICROSANDBOX with vim and arrow tr
   assert.deepEqual(f.calls, []);
 });
 
+test("Tools owns exactly the four routing/host fields with folding, scalar edits and collection CRUD accessible", async (t) => {
+  const paths = ["block_third_party", "route_tools", "pass_through_tools", "allow_host_execution"];
+  const labels = ["Block Third Party:", "Route Tools:", "Pass Through Tools:", "Allow Host Execution:"];
+  assert.deepEqual(SETTINGS_FIELDS.filter((field) => field.section === "Tools").map((field) => field.path), paths);
+  assert.deepEqual(SETTINGS_FIELDS.filter((field) => field.section === "Advanced").map((field) => field.path), [
+    "replace", "docker.mode", "docker.startup_timeout_ms", "allow_skill_reads", "fallback_mode",
+    "expose_session_environment", "host_env", "lock_dir", "host_ro_allowlist",
+  ]);
+  const f = await fixture(t);
+  const visibleToolLabels = () => f.full().split("\n").filter((line) => labels.some((label) => line.includes(label))).map((line) => line.trim().replace(/^>\s*/, "").replace(/^[▾▸]\s*/, "").split(":")[0] + ":");
+  assert.deepEqual(visibleToolLabels(), []);
+  await f.expand("Advanced");
+  assert.deepEqual(visibleToolLabels(), []);
+  assert.match(f.full(), /Allow Skill Reads:/);
+  await f.seek("Advanced"); await f.key("h");
+  await f.expand("Tools");
+  assert.deepEqual(visibleToolLabels(), labels);
+  await f.key("l"); assert.match(f.selected(), /^Block Third Party:/);
+  await f.key("h"); assert.equal(f.selected(), "Tools");
+  await f.key("h"); assert.match(f.full(), /> ▸ Tools/); assert.deepEqual(visibleToolLabels(), []);
+  await f.key("\x1b[C"); assert.deepEqual(visibleToolLabels(), labels);
+
+  for (const label of ["Block Third Party:", "Allow Host Execution:"]) {
+    await f.edit("Tools", label); await f.choose("false");
+    for (const scope of APPLY) assert.ok(f.full().includes(scope));
+    await f.choose("Cancel"); assert.ok(f.selected().startsWith(label));
+  }
+  for (const [label, entry, path] of [["Route Tools:", "read", "route_tools"], ["Pass Through Tools:", "todo", "pass_through_tools"]]) {
+    await f.node("Tools", label!); await f.key("a");
+    assert.ok(f.full().replace(/\s+/g, " ").includes(SETTINGS_FIELDS.find((field) => field.path === path)!.editorHelp.replace(/\s+/g, " ")));
+    await f.key(entry!); await f.key("\r"); await f.choose("Cancel");
+    await f.list("Tools", label!); await f.seek(entry!); await f.key("e");
+    assert.ok(f.full().replace(/\s+/g, " ").includes(SETTINGS_FIELDS.find((field) => field.path === path)!.editorHelp.replace(/\s+/g, " ")));
+    await f.key("\x1b"); await f.seek(entry!); await f.key("d");
+    for (const scope of APPLY) assert.ok(f.full().includes(scope));
+    await f.choose("Cancel");
+    await f.seek(label!); await f.key("h");
+    assert.match(f.selected(), /entries/); assert.match(f.full(), new RegExp(`▸ ${label}`));
+  }
+  await f.seek("Tools"); await f.key("h");
+  assert.deepEqual(visibleToolLabels(), []);
+  assert.deepEqual(f.settings.temporary(), {}); assert.deepEqual(f.calls, []);
+});
+
 test("responsive render is opaque, bounded and focused at 24/32/40/80/120 and tiny heights", async (t) => {
   const f = await fixture(t);
   await f.node("Resources", "Virtual CPUs:");
@@ -185,7 +229,7 @@ test("long dangerous confirmations remain readable with arrows at short heights"
 
 test("Review change puts each point on its own line and keeps Cancel selected", async (t) => {
   const f = await fixture(t, plainTheme, true);
-  await f.edit("Advanced", "Block Third Party:"); await f.choose("false"); await f.save(0);
+  await f.edit("Tools", "Block Third Party:"); await f.choose("false"); await f.save(0);
   assert.equal(f.selected(), "Cancel");
   for (const width of [160, 80]) {
     f.terminal.columns = width; f.terminal.rows = 24;
@@ -499,7 +543,7 @@ test("mount/list cross-scope edits preserve hidden target entries, raw removal c
   await f.list("Network", "Allowed hosts:"); await f.seek("edit.example"); await f.key("e"); await f.key("\x15"); await f.key("chosen.example"); await f.key("\r"); await f.apply(2);
   const text = await readFile(f.paths.global!, "utf8"); const raw = parseTomlConfig(text, "global").value;
   assert.deepEqual(raw.mounts!.map((mount) => mount.guestPath), ["/mnt/global", "/mnt/edit"]); assert.equal(raw.mounts![1]!.readonly, false); assert.deepEqual(raw.network!.allowHosts, ["global.example", "chosen.example"]); assert.doesNotMatch(text, /private/);
-  await f.list("Advanced", "Route Tools:"); await f.key("a"); await f.key("bash"); await f.key("\r"); await f.apply(1);
+  await f.list("Tools", "Route Tools:"); await f.key("a"); await f.key("bash"); await f.key("\r"); await f.apply(1);
   assert.deepEqual((await resolveConfig(f.input)).config.routeTools, ["read", "bash"]); const saved = await readFile(f.paths.project!, "utf8"); assert.match(saved, /KEEP_REMOVED/); assert.match(saved, /"remove_route_tools" = \[\]/);
 });
 
@@ -509,7 +553,7 @@ for (const [scope, source, label] of [[0, "temporary", "ephemeral"], [1, "host-p
   await f.number("2"); assert.deepEqual(f.control.getRuntimePolicy!(), original); await f.apply(scope);
   const adopted = f.control.getRuntimePolicy!()!; assert.equal(adopted.provenance.cpus, source); assert.equal(parseTomlConfig(adopted.effectiveToml, "global").value.cpus, 2);
   await f.node("Resources", "Virtual CPUs:"); assert.match(f.selected(), new RegExp(`Virtual CPUs: 2 \\[${label}\\]`));
-  await f.node("Advanced", "Allow Host Execution:"); assert.match(f.selected(), /\[environment\]/);
+  await f.node("Tools", "Allow Host Execution:"); assert.match(f.selected(), /\[environment\]/);
   await f.node("Status"); assert.match(f.full(), /State: active \[runtime\]/); assert.ok(f.full().includes(new Date(adopted.adoptedAt).toISOString())); assert.doesNotMatch(f.full().split("Status")[1]!, /Virtual CPUs:|Guest image:/);
   await f.seek("State:"); const selected = f.selected(); for (const key of ["e", "a", "d", "w", "P", "G"]) { await f.key(key); assert.equal(f.selected(), selected); }
   await f.control.setEnabled(false); await f.tree(); await f.node("Status"); assert.match(f.full(), /Last known policy \(not running\)/); f.integration!.endSession(); assert.equal(f.control.getRuntimePolicy!(), undefined);
@@ -621,8 +665,8 @@ for (const scope of [0, 1, 2]) {
     const reload = f.control.reload.bind(f.control); f.control.reload = async (options) => { f.calls.push("reload"); await reload(options); };
     const before = await committedPanelSettings(f), runtime = f.control.getRuntimePolicy!();
     const propose = async () => {
-      if (intent === "pass_through_tools") { await f.list("Advanced", "Pass Through Tools:"); await f.key("a"); await f.key("third_party_test_tool"); await f.key("\r"); }
-      else { await f.edit("Advanced", "Block Third Party:"); await f.choose("false"); }
+      if (intent === "pass_through_tools") { await f.list("Tools", "Pass Through Tools:"); await f.key("a"); await f.key("third_party_test_tool"); await f.key("\r"); }
+      else { await f.edit("Tools", "Block Third Party:"); await f.choose("false"); }
       await f.save(scope);
       const review = f.full().replace(/\s+/g, " ");
       assert.match(review, /Review change/); assert.ok(review.includes(intent)); assert.match(review, /execute on the HOST outside the sandbox without per-call host approval/);
@@ -648,7 +692,7 @@ for (const scope of [0, 1, 2]) {
     await f.action("Reload settings"); await f.choose("Confirm"); f.calls.length = 0;
     const before = await committedPanelSettings(f);
     const propose = async () => {
-      await f.node("Advanced", label); await f.key("d"); await f.save(scope);
+      await f.node(path === "block_third_party" ? "Tools" : "Advanced", label); await f.key("d"); await f.save(scope);
       const review = f.full().replace(/\s+/g, " "); assert.match(review, /Review change/); assert.match(review, warning); assert.ok(review.includes(`${path}: inherit → ${lower}`));
       assert.deepEqual(await committedPanelSettings(f), before); assert.deepEqual(f.calls, []);
     };
@@ -682,10 +726,10 @@ test("successful apply defaults to Quit at tiny sizes while Back keeps the panel
 });
 
 test("pass-through entry rename/removal/no-op and shadowed intents retain explicit HOST warnings", async (t) => {
-  const f = await fixture(t); await f.list("Advanced", "Pass Through Tools:"); await f.key("a"); await f.key("third_party_test_tool"); await f.key("\r"); await f.apply(1); f.calls.length = 0;
+  const f = await fixture(t); await f.list("Tools", "Pass Through Tools:"); await f.key("a"); await f.key("third_party_test_tool"); await f.key("\r"); await f.apply(1); f.calls.length = 0;
   const before = await committedPanelSettings(f);
   for (const operation of ["rename", "remove", "no-op", "shadowed"] as const) {
-    await f.list("Advanced", "Pass Through Tools:"); await f.seek("third_party_test_tool");
+    await f.list("Tools", "Pass Through Tools:"); await f.seek("third_party_test_tool");
     if (operation === "remove") await f.key("d");
     else { await f.key("e"); if (operation === "rename") { await f.key("\x15"); await f.key("renamed_third_party_tool"); } await f.key("\r"); }
     await f.save(operation === "shadowed" ? 2 : 1);

@@ -82,7 +82,7 @@ try {
         assert.match(initial, /▸ Status *$/m);
         assert.doesNotMatch(initial, /Runtime|State:|No running policy adopted/);
         const roots = initial.split("\n").filter((line) => /^[> ] [▾▸] /.test(line));
-        assert.deepEqual(roots.map((line) => line.slice(4).trimEnd()), ["General", "Resources", "Network", "Secrets", "Mounts", "Advanced", "Status", "Sources & warnings", "Actions"]);
+        assert.deepEqual(roots.map((line) => line.slice(4).trimEnd()), ["General", "Resources", "Network", "Secrets", "Mounts", "Tools", "Advanced", "Status", "Sources & warnings", "Actions"]);
         assert.ok(roots.every((line) => /^[> ] ▸ /.test(line)));
         assert.match(initial, /^MICROSANDBOX *\n> ▸ General/m);
         assert.doesNotMatch(initial, /Configuration/);

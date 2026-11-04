@@ -61,7 +61,7 @@ The panel opens even when virtualization is disabled. Canonical workspace
 discovery is still required for correct project identity, but disabled startup
 creates no configuration and loads no SDK. PI_MSB_DISABLE remains authoritative:
 saving never enables the sandbox; remove the variable and restart Pi to enable.
-General, Resources, Network, Secrets, Mounts, Advanced, Status, Sources & warnings
+General, Resources, Network, Secrets, Mounts, Tools, Advanced, Status, Sources & warnings
 and Actions start collapsed directly below MICROSANDBOX, with General focused.
 Settings edit desired policy; Status contains read-only `[runtime]` metadata,
 not duplicated settings. A single-line contextual footer stays at the bottom. Use j/k and h/l (or arrows),

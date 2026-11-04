@@ -51,7 +51,7 @@ Run `just dev-image` by itself when you only need to refresh the local image.
 ### Control-panel integration and testing
 
 `/msb` is the only command surface. `control-panel.ts` owns collapsed General,
-Resources, Network, Secrets, Mounts, Advanced, Status, Sources & warnings and Actions
+Resources, Network, Secrets, Mounts, Tools, Advanced, Status, Sources & warnings and Actions
 trees directly below MICROSANDBOX, initially focused on General. Settings edit desired
 policy; only inner read-only Status metadata is labeled `[runtime]`. Node identities
 and expansion stay stable across compact transient forms. The

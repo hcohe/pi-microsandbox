@@ -37,7 +37,7 @@ pi
 ```
 
 Inside Pi, **`/msb`** opens full-screen with collapsed **General**, **Resources**,
-**Network**, **Secrets**, **Mounts**, **Advanced**, **Status**, **Sources & warnings**
+**Network**, **Secrets**, **Mounts**, **Tools**, **Advanced**, **Status**, **Sources & warnings**
 and **Actions** trees directly below **MICROSANDBOX**, initially focused on General.
 **Status** contains read-only **[runtime]** metadata, not duplicate settings.
 Expand with `l`/right, fold or go to parent with `h`/left, move with `j`/`k` or up/down. `e` edits, `a` adds, `d` deletes/inherits,

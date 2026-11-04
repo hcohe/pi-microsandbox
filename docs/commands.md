@@ -10,11 +10,14 @@ files or `PI_MSB_*` before starting a session instead.
 
 ## Top-level trees
 
-- **General**, **Resources**, **Network**, **Secrets**, **Mounts**, **Advanced**,
+- **General**, **Resources**, **Network**, **Secrets**, **Mounts**, **Tools**, **Advanced**,
   **Status**, **Sources & warnings**, and **Actions** are the visible roots, with
   no wrapper. The settings trees edit desired policy. Values show their
   committed origin: default, environment, global, project or ephemeral. Mixed
   collections show entry sources rather than claiming a single group owner.
+- **Tools** contains `block_third_party`, `route_tools`, `pass_through_tools`
+  and `allow_host_execution`, in that order. Other advanced policy settings,
+  including `allow_skill_reads` and `fallback_mode`, remain in **Advanced**.
 - **Status** starts collapsed with a plain heading. Its inner
   items are read-only and labeled **[runtime]**: state, adoption/last-known timestamp,
   pending changes, identity (name/displayId/PID/cwd/root/createdAt), and Docker
