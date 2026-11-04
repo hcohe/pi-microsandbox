@@ -89,7 +89,9 @@ Apply automatically reconfigures/reloads **this sandbox**, after any meaningful
 restart/security confirmation. Other sandboxes pick up persisted defaults on next
 start/reload; there is no broadcast. Higher project/session overrides can shadow
 lower-scope changes and are never automatically cleared. No manual Reload is
-needed for normal edits.
+needed for normal edits. After a successful apply, **Quit** is selected by default;
+Enter closes only the `/msb` panel, leaving the sandbox running. **Back** returns
+to the settings tree.
 
 Only the one deliberate operation is persisted, never a flattened effective
 configuration or runtime snapshot. Entry CRUD preserves the chosen scope's other

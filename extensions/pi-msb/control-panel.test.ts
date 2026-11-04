@@ -419,10 +419,10 @@ test("persistence conflict, apply retry, saved/runtime failure and refresh failu
   await f.choose("Confirm"); assert.match(f.full(), /Apply failed/); assert.deepEqual(f.calls, ["idle"]); assert.match(await readFile(f.paths.project!, "utf8"), /cpus = 3/);
   await f.choose("Retry"); await f.save(1); await f.choose("Confirm"); assert.equal((await storage(f, 1)).cpus, 2);
   await f.tree(); await f.number("4"); f.control.reload = async () => { throw new Error("SECRET_ERROR_SENTINEL"); }; await f.save(1); await f.choose("Confirm");
-  assert.match(f.full(), /Saved, but runtime failed/); assert.doesNotMatch(f.full(), /SECRET_ERROR_SENTINEL/); assert.equal((await storage(f, 1)).cpus, 4);
+  assert.match(f.full(), /Saved, but runtime failed/); assert.doesNotMatch(f.full(), /\[ Quit \]|SECRET_ERROR_SENTINEL/); assert.equal((await storage(f, 1)).cpus, 4);
   f.control.reload = async () => { f.calls.push("reload"); }; await f.action("Reload settings"); await f.choose("Confirm"); assert.match(f.full(), /Completed/);
   await f.number("5"); await f.save(1); const open = f.settings.open.bind(f.settings); f.settings.open = async () => { throw new Error("PRIVATE_REFRESH_ERROR"); };
-  await f.choose("Confirm"); assert.match(f.full(), /Applied.*Settings refresh failed/); assert.doesNotMatch(f.full(), /PRIVATE_REFRESH_ERROR/); f.settings.open = open;
+  await f.choose("Confirm"); assert.match(f.full(), /Applied.*Settings refresh failed/); assert.doesNotMatch(f.full(), /\[ Quit \]|PRIVATE_REFRESH_ERROR/); f.settings.open = open;
   await f.tree(); assert.match(f.full(), /Settings unavailable/); assert.doesNotMatch(f.full(), /Virtual CPUs:/);
   await f.action("Reload settings"); await f.choose("Confirm");
   await f.edit("General", "Show Footer:"); await f.choose("false"); await f.apply(2);
@@ -661,8 +661,25 @@ for (const scope of [0, 1, 2]) {
   test(`benign footer edit still applies immediately and reloads once: ${scope}`, async (t) => {
     const f = await fixture(t); await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(scope);
     assert.match(f.full(), /Result: Applied/); assert.match(f.full(), /Back/); assert.doesNotMatch(f.full(), /Review change|Enter for full result|arrows scroll wrapped text/); assert.equal((await storage(f, scope)).showFooter, false); assert.deepEqual(f.calls, ["idle", "reload"]);
+    assert.equal(f.selected(), "Quit"); assert.equal(f.closed(), false);
+    await f.key("\r"); assert.equal(f.closed(), true);
+    assert.equal((await storage(f, scope)).showFooter, false); assert.deepEqual(f.calls, ["idle", "reload"]);
   });
 }
+
+test("successful apply defaults to Quit at tiny sizes while Back keeps the panel open", async (t) => {
+  const f = await fixture(t);
+  await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(0);
+  for (const width of [24, 32, 80]) for (const height of [1, 2, 3, 12, 24]) {
+    f.terminal.columns = width; f.terminal.rows = height;
+    assert.equal(f.selected(), "Quit"); assert.match(f.text(), /\[ Quit \]/);
+  }
+  await f.choose("Back"); assert.equal(f.closed(), false);
+  assert.equal(f.settings.temporary().showFooter, false);
+  await f.edit("General", "Show Footer:"); await f.choose("true"); await f.save(0);
+  assert.equal(f.selected(), "Quit"); await f.key("\r"); assert.equal(f.closed(), true);
+  assert.equal(f.control.getState().status, "active");
+});
 
 test("pass-through entry rename/removal/no-op and shadowed intents retain explicit HOST warnings", async (t) => {
   const f = await fixture(t); await f.list("Advanced", "Pass Through Tools:"); await f.key("a"); await f.key("third_party_test_tool"); await f.key("\r"); await f.apply(1); f.calls.length = 0;

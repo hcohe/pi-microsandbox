@@ -338,7 +338,7 @@ export class ControlPanel implements Component, Focusable {
       ].map(safeText).join("\n");
       const pending = target; this.#pending = pending;
       const apply = async () => {
-        let saved = false; let applied = false; let message = "";
+        let saved = false; let applied = false; let appliedSuccessfully = false; let message = "";
         try {
           await this.#ctx.waitForIdle();
           if (this.#closed) return;
@@ -347,6 +347,7 @@ export class ControlPanel implements Component, Focusable {
           if (this.#closed) return;
           await this.#control.reload({ allowRestart: preview.effect === "restart" });
           if (this.#closed) return;
+          appliedSuccessfully = true;
           message = `${saved ? "Applied" : "No changes"}${result.shadowed.length ? `; shadowed: ${result.shadowed.join(", ")}` : ""}. Runtime: ${this.#control.getState().status}`;
         } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Status and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
         finally {
@@ -355,8 +356,8 @@ export class ControlPanel implements Component, Focusable {
             if (applied) {
               this.#proposal = false; this.#proposalTree = undefined; this.#scalarIntent.clear();
               try { await this.#reopenDraft(); }
-              catch { message += " Settings refresh failed; fix host configuration, then reopen the panel."; }
-              if (!this.#closed) this.#report(message);
+              catch { appliedSuccessfully = false; message += " Settings refresh failed; fix host configuration, then reopen the panel."; }
+              if (!this.#closed) this.#report(message, appliedSuccessfully);
             } else this.#proposalError(message);
           }
         }
@@ -379,10 +380,15 @@ export class ControlPanel implements Component, Focusable {
     this.#draft = fresh; this.#load();
   }
   #feedbackRow(): Row { return { id: "feedback", label: `Result: ${this.#feedback}`, action: () => this.#text("Operation result", this.#feedback!) }; }
-  #report(message: string): void {
+  #report(message: string, appliedSuccessfully = false): void {
     if (this.#closed) return;
     this.#formCleanup?.(); this.#feedback = message;
-    this.#page([this.#feedbackRow(), { id: "back", label: "Back", action: () => this.#home() }], () => this.#home());
+    this.#page([
+      this.#feedbackRow(),
+      ...(appliedSuccessfully ? [{ id: "quit", label: "Quit", button: true, action: () => this.close() }] : []),
+      { id: "back", label: "Back", action: () => this.#home() },
+    ], () => this.#home());
+    if (appliedSuccessfully) this.#focus = 1;
   }
   #actions(): Row[] {
     const dangerous = (label: string, detail: string, run: () => Promise<unknown>): Row => ({ id: label, label, detail, action: () => this.#confirm(label, detail, async () => {
