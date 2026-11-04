@@ -4,6 +4,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ToolDefinition,
+  Theme,
   UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -14,6 +15,7 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
+  highlightCode,
 } from "@earendil-works/pi-coding-agent";
 import type {
   Config,
@@ -80,15 +82,26 @@ export function hostApprovalMessage(
   tool: string,
   input: Record<string, unknown>,
   cwd: string,
+  theme?: Pick<Theme, "fg" | "bold">,
 ): string {
+  const label = (text: string) => theme ? theme.fg("muted", text) : text;
+  const value = (text: string) => theme ? theme.fg("text", text) : text;
+  const command = tool === "bash" && typeof input.command === "string" ? input.command : undefined;
+  // Commands are no longer JSON-escaped: keep terminal controls visible, not executable.
+  const content = command === undefined
+    ? JSON.stringify(sortForFingerprint(withoutExecutionTarget(input)), null, 2)
+    : command.replace(/[\p{Cc}\p{Cf}]/gu, (char) => char === "\n" ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`);
+  const warning = "Warning: this operation runs on the host and bypasses VM, process, and network isolation.";
   return [
-    `Tool: ${tool}`,
-    `Working directory: ${cwd}`,
+    `${label("Tool:")} ${theme ? theme.bold(theme.fg("accent", tool)) : tool}`,
+    `${label("Working directory:")} ${value(cwd)}`,
     "",
-    "Exact arguments:",
-    JSON.stringify(sortForFingerprint(withoutExecutionTarget(input)), null, 2),
+    theme ? theme.bold(theme.fg("warning", warning)) : warning,
     "",
-    "Warning: this operation runs on the host and bypasses VM, process, and network isolation.",
+    label(command === undefined ? "Exact arguments:" : "Command:"),
+    ...(command === undefined ? [] : [""]),
+    ...(theme && command === undefined ? highlightCode(content, "json") : content.split("\n"))
+      .map((line) => command === undefined ? `  ${line}` : theme ? theme.fg("syntaxString", line) : line),
   ].join("\n");
 }
 
@@ -324,11 +337,10 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
           reason: "Host execution requires user approval, but no interactive UI is available.",
         };
       }
-      const approved = await ctx.ui.confirm(
-        "Allow host execution?",
-        hostApprovalMessage(tool, input, deps.cwd),
-      );
-      if (!approved) {
+      // Keep RPC prompts plain, and make denial the default in the TUI selector.
+      const message = hostApprovalMessage(tool, input, deps.cwd, ctx.mode === "tui" ? ctx.ui.theme : undefined);
+      const choice = await ctx.ui.select(`Allow host execution?\n\n${message}`, ["No", "Yes"]);
+      if (choice !== "Yes") {
         clearApproval(event.toolCallId);
         return { block: true, reason: "Host execution was denied by the user." };
       }

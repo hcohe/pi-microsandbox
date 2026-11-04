@@ -12,7 +12,14 @@ The default is fail-closed:
 - `execution_target = "host"` is an opt-in escape for routed tool calls. While
   a sandbox is active it requires interactive approval for the exact tool,
   working directory, and recursively sorted arguments. It is unavailable in
-  headless operation and is never silently selected.
+  headless operation and is never silently selected. The approval prompt uses
+  theme-colored labels, a Bash command in the theme's string color (orange in
+  the dark theme), syntax-highlighted JSON arguments for other tools, and a
+  prominent isolation warning in the terminal. Bash
+  prompts omit execution options such as timeout; approval still binds all
+  arguments. Terminal control characters in commands are shown as escapes.
+  **No** is selected by default; Escape
+  also denies the request.
 - `/msb` → Actions → Turn off is an explicit host-mode handoff and asks for
   confirmation before stopping/removing the guest. This is
   different from `fallback_mode = "host"`, which automatically uses host tools
