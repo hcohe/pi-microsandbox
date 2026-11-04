@@ -82,7 +82,6 @@ export interface Config {
   pruneOnStart: boolean;
   showFooter: boolean;
   lockDir: string;
-  hostRoAllowlist: string[];
 }
 export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends Array<infer U>

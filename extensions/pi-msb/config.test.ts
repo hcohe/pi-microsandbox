@@ -236,13 +236,28 @@ test("mount defaults and canonical guest identity are stable", () => {
   assert.deepEqual(defaults, { type: "dir", hostPath: "/repo/data", guestPath: "/repo/data", readonly: true, options: [] });
 });
 
-test("route fields reject unknown tools and the legacy host path env alias is accepted", async () => {
+test("route fields reject unknown tools", () => {
   assert.throws(() => validateConfig({ routeTools: ["read", "not-a-tool"] as any }), /routeTools/);
-  const parsed = parseEnvConfig({ PI_MSB_HOST_RO_PATHS: "/repo/one,/repo/two" });
-  assert.deepEqual(parsed.value.hostRoAllowlist, ["/repo/one", "/repo/two"]);
-  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env: { PI_MSB_HOST_RO_PATHS: "/outside/one" }, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
-  assert.equal(resolved.config.mounts[0]?.readonly, true);
-  assert.equal(resolved.config.mounts[0]?.guestPath, "/outside/one");
+});
+
+for (const key of ["host_ro_allowlist", "hostRoAllowlist"]) test(`removed host read-only TOML option is unknown and cannot create mounts: ${key}`, async () => {
+  const text = `${key} = ["/outside/one"]\nremove_host_ro_allowlist = ["/outside/two"]\n`;
+  const parsed = parseTomlConfig(text, "global");
+  assert.match(parsed.warnings.join("\n"), /unknown config key hostRoAllowlist/);
+  assert.match(parsed.warnings.join("\n"), /unknown config key removeHostRoAllowlist/);
+  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env: {}, cliOverridesToml: text, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
+  assert.deepEqual(resolved.config.mounts, []);
+  assert.match(resolved.warnings.join("\n"), /unknown config key hostRoAllowlist/);
+});
+
+for (const name of ["PI_MSB_HOST_RO_PATHS", "PI_MSB_HOST_RO_ALLOWLIST"]) test(`removed host read-only environment option is unknown and cannot create mounts: ${name}`, async () => {
+  const env = { [name]: "/outside/one,/outside/two" };
+  const unknownKey = name === "PI_MSB_HOST_RO_PATHS" ? "hostRoPaths" : "hostRoAllowlist";
+  const parsed = parseEnvConfig(env);
+  assert.ok(parsed.warnings.some((warning) => warning.includes(`unknown config key ${unknownKey}`)));
+  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
+  assert.deepEqual(resolved.config.mounts, []);
+  assert.ok(resolved.warnings.some((warning) => warning.includes(`unknown config key ${unknownKey}`)));
 });
 
 test("host-side session mounts canonicalize sources and fail closed on missing sources", async () => {

@@ -58,7 +58,6 @@ function config(overrides: Partial<Config> = {}): Config {
     pruneOnStart: true,
     showFooter: false,
     lockDir: "/tmp/pi-msb-locks",
-    hostRoAllowlist: [],
     ...overrides,
   };
 }

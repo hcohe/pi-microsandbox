@@ -16,8 +16,8 @@ import type {
 
 const ROUTED_TOOLS = ["read", "write", "edit", "ls", "find", "grep", "bash"];
 const PASS_THROUGH_TOOLS = ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"];
-const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "hostRoAllowlist", "network.allowHosts"]);
-const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeHostRoAllowlist", "removeAllowHosts", "removePublishPorts"]);
+const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "network.allowHosts"]);
+const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeAllowHosts", "removePublishPorts"]);
 const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
@@ -92,7 +92,6 @@ export const DEFAULT_CONFIG = deepFreeze<Config>({
   pruneOnStart: true,
   showFooter: true,
   lockDir: "~/.pi-msb/locks",
-  hostRoAllowlist: [],
 });
 
 export interface ResolveConfigInput {
@@ -163,7 +162,6 @@ type LayerValue = DeepPartial<Config> & {
   removeRouteTools?: unknown;
   removePassThroughTools?: unknown;
   removeHostEnv?: unknown;
-  removeHostRoAllowlist?: unknown;
   removeAllowHosts?: unknown;
   removePublishPorts?: unknown;
 };
@@ -403,7 +401,7 @@ function knownPath(path: string): boolean {
   if (parts[0] === "docker") return parts.length === 1 || (parts.length === 2 && ["mode", "startupTimeoutMs"].includes(parts[1]));
   if (parts[0] === "secrets") return parts.length === 1 || (parts.length === 2 && SECRET_FIELDS.has(parts[1]));
   if (parts[0] === "mounts") return parts.length === 1 || (parts.length === 2 && MOUNT_FIELDS.has(parts[1]));
-  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
+  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir"].includes(parts[0]);
 }
 function collectUnknown(value: unknown, base: string[], warnings: string[]): void {
   if (!isPlainObject(value)) return;
@@ -476,8 +474,7 @@ export function parseEnvConfig(env: NodeJS.ProcessEnv): ParsedConfigLayer {
   const warnings: string[] = [];
   for (const [name, raw] of Object.entries(env)) {
     if (!name.startsWith("PI_MSB_") || raw === undefined || name === "PI_MSB_DISABLE" || name === "PI_MSB_CONFIG_FILE") continue;
-    const alias = name === "PI_MSB_HOST_RO_PATHS";
-    const parts = alias ? ["hostRoAllowlist"] : name.slice("PI_MSB_".length).split("__").filter(Boolean).map(camel);
+    const parts = name.slice("PI_MSB_".length).split("__").filter(Boolean).map(camel);
     if (!parts.length) continue;
     assign(root, parts, envScalar(raw as string, pathKey(parts)));
   }
@@ -519,7 +516,7 @@ function mergeObject(target: Record<string, any>, source: Record<string, any>, p
   }
   const removalKeys = prefix[0] === "network"
     ? ["removeAllowHosts", "removePublishPorts"]
-    : ["removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeHostRoAllowlist"];
+    : ["removeRouteTools", "removePassThroughTools", "removeHostEnv"];
   for (const key of removalKeys) {
     const remove = (source as Record<string, unknown>)[key];
     if (!Array.isArray(remove)) continue;
@@ -621,7 +618,6 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (stringArray("routeTools", config.routeTools)) for (const tool of config.routeTools) if (!ROUTED_TOOLS.includes(tool)) issues.push(issueForPath("routeTools", `unknown routed tool ${tool}`));
   stringArray("passThroughTools", config.passThroughTools);
   if (stringArray("hostEnv", config.hostEnv)) for (const name of config.hostEnv) if (PROTECTED_GUEST_ENV.has(name)) issues.push(issueForPath("hostEnv", `must not forward protected process environment variable ${name}`));
-  stringArray("hostRoAllowlist", config.hostRoAllowlist);
   const network = isPlainObject(config.network) ? config.network : null;
   if (!network || !["default", "open", "allowlist", "deny"].includes(network.mode as string)) issues.push(issueForPath("network.mode", "unknown network mode"));
   if (network && stringArray("network.allowHosts", network.allowHosts)) { /* checked above */ }
@@ -659,17 +655,6 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   }
   if (issues.length) throw new ConfigError(issues);
   return config;
-}
-
-function normalizeLegacy(config: Config, warnings: string[], canonical?: (p: string) => string): Config {
-  if (!config.hostRoAllowlist.length) return config;
-  warnings.push("hostRoAllowlist is deprecated; use read-only mounts instead");
-  const mounts = [...config.mounts];
-  for (const host of config.hostRoAllowlist) {
-    const path = canonical ? canonical(host) : resolve(host);
-    if (!mounts.some((mount) => mount.guestPath === path)) mounts.push({ type: "dir", hostPath: path, guestPath: path, readonly: true, options: [] });
-  }
-  return { ...config, mounts };
 }
 
 async function defaultRead(path: string): Promise<string | null> { try { return await fs.readFile(path, "utf8"); } catch { return null; } }
@@ -910,9 +895,6 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   const merged = mergeConfigLayers(layers);
   warnings.push(...merged.warnings);
   let config = validateConfig(merged.value);
-  config = normalizeLegacy(config, warnings);
-  // Legacy mounts participate in the same overlap/type checks as native mounts.
-  config = validateConfig(config);
   config = {
     ...config,
     mounts: await Promise.all(config.mounts.map(async (mount) => mount.type === "named" || mount.type === "tmpfs"
@@ -950,18 +932,6 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     if (unsafe) policyIssues.push(issueForPath(`mounts[${index}].hostPath`, "must not mount a host socket or Docker socket path"));
   }
   if (policyIssues.length) throw new ConfigError(policyIssues);
-  if (config.hostRoAllowlist.length) {
-    const legacyPaths = new Map(config.hostRoAllowlist.map((path) => [resolve(path), path]));
-    const canonicalMounts = await Promise.all(config.mounts.map(async (mount) => {
-      const original = mount.hostPath && legacyPaths.has(resolve(mount.hostPath)) ? resolve(mount.hostPath) : undefined;
-      if (original !== undefined && mount.guestPath === original && mount.readonly) {
-        const rp = await canonicalPath(original);
-        return { ...mount, hostPath: rp, guestPath: rp };
-      }
-      return mount;
-    }));
-    config = validateConfig({ ...config, mounts: canonicalMounts });
-  }
   return { config, provenance: merged.provenance, warnings: warnings.map(warning) };
 }
 

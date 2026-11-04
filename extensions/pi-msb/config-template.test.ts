@@ -26,11 +26,10 @@ test("config-template is fully commented and covers current default settings", (
   const parsed = parseTomlConfig(uncomment(defaults), "host-default");
   assert.deepEqual(parsed.warnings, []);
   assert.deepEqual(validateConfig(parsed.value), DEFAULT_CONFIG);
-  // Compatibility-only host-read keys stay in the runtime schema, not the user reference.
   // sandboxName has no TOML null default and is covered by its separate example.
-  const omittedDefaults = ["sandboxName", "hostRoAllowlist"];
+  const omittedDefaults = ["sandboxName"];
   assert.deepEqual(Object.keys(parsed.value).sort(), Object.keys(DEFAULT_CONFIG).filter((key) => !omittedDefaults.includes(key)).sort());
-  assert.doesNotMatch(template, /host_ro_allowlist|PI_MSB_HOST_RO_PATHS|^# remove_/m);
+  assert.doesNotMatch(template, /host_ro_allowlist|hostRoAllowlist|PI_MSB_HOST_RO_(?:PATHS|ALLOWLIST)|^# remove_/m);
   assert.deepEqual(Object.keys(parsed.value.network!).sort(), Object.keys(DEFAULT_CONFIG.network).sort());
   assert.deepEqual(Object.keys(parsed.value.docker!).sort(), Object.keys(DEFAULT_CONFIG.docker).sort());
   assert.match(defaults, /sandbox_name defaults to null/);

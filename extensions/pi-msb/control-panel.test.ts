@@ -179,7 +179,7 @@ test("Resources, Image, Variables and Advanced have exact field membership and p
     Image: ["image", "pull_policy"],
     Variables: ["host_env"],
     Advanced: ["idle_timeout_sec", "stop_timeout_ms", "replace", "replace_timeout_ms", "docker.mode", "docker.startup_timeout_ms",
-      "allow_skill_reads", "fallback_mode", "expose_session_environment", "lock_dir", "host_ro_allowlist"],
+      "allow_skill_reads", "fallback_mode", "expose_session_environment", "lock_dir"],
   };
   const friendlyLabels: Record<string, string> = { cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", "docker.mode": "Docker mode" };
   const f = await fixture(t);
@@ -926,7 +926,7 @@ test("every scalar/list editor and choice has specific guidance, with static exa
     const label = labels[field.path] ?? field.path.split(".").pop()!.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ") + ":";
     await f.seek(label);
     // Collections expose add, scalars expose edit.
-    const isList = ["route_tools", "pass_through_tools", "host_env", "host_ro_allowlist", "network.allow_hosts", "network.publish_ports"].includes(field.path);
+    const isList = ["route_tools", "pass_through_tools", "host_env", "network.allow_hosts", "network.publish_ports"].includes(field.path);
     await f.key(isList ? "a" : "e");
     assert.ok(f.full().replace(/\s+/g, " ").includes(field.editorHelp.replace(/\s+/g, " ")), field.path);
     if (field.choices) {

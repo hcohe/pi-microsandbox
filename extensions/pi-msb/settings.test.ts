@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
 import type { Config } from "./types.ts";
 
-import { classifySettingsEffect, SETTINGS_PATHS, SettingsEditor } from "./settings.ts";
+import { classifySettingsEffect, COLLECTION_REMOVALS, SETTINGS_PATHS, SettingsEditor } from "./settings.ts";
 
 async function fixture(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pi-msb-settings-")));
@@ -418,19 +418,43 @@ test("scope-safe intent replay retains masked-placeholder guards and does not bl
   assert.equal(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.cpus, 3);
 });
 
-test("host read-only list entry conversion never imports higher-scope filesystem paths", async (t) => {
+test("read-only mount entry conversion never imports higher-scope filesystem paths", async (t) => {
   const { editor, input, paths } = await fixture(t);
-  // Legacy entries become same-path guest mounts; /tmp is reserved in the guest.
   const globalPath = "/mnt/global-data", projectPath = "/mnt/project-data", privatePath = "/mnt/private-data", chosenPath = "/mnt/chosen-data";
   const mountPaths = new Set([globalPath, projectPath, privatePath, chosenPath]);
+  const mount = (path: string) => ({ type: "dir" as const, hostPath: path, guestPath: path, readonly: true, options: [] });
+  const toml = (paths: string[]) => `mounts = [${paths.map((path) => `{ host_path = ${JSON.stringify(path)}, guest_path = ${JSON.stringify(path)}, readonly = true }`).join(", ")}]\n`;
   input.realpath = async (path) => mountPaths.has(path) ? path : realpath(path);
   input.stat = async (path) => mountPaths.has(path) ? { isSocket: () => false } : stat(path);
-  await writeFile(paths.global, `host_ro_allowlist = ${JSON.stringify([globalPath])}\n`);
-  await writeFile(paths.project, `host_ro_allowlist = ${JSON.stringify([projectPath, privatePath])}\n`);
-  const draft = await editor.open("temporary"); draft.upsertListEntry("host_ro_allowlist", chosenPath, projectPath);
+  await writeFile(paths.global, toml([globalPath]));
+  await writeFile(paths.project, toml([projectPath, privatePath]));
+  const draft = await editor.open("temporary"); draft.upsertMount(mount(chosenPath), projectPath);
   const global = await draft.forScope("global"); await global.apply();
-  const saved = parseTomlConfig(await readFile(paths.global, "utf8"), "global").value;
-  assert.deepEqual(saved.hostRoAllowlist, [globalPath, chosenPath]);
+  const raw = await readFile(paths.global, "utf8");
+  assert.deepEqual(parseTomlConfig(raw, "global").value.mounts, [mount(globalPath), mount(chosenPath)]);
+  assert.ok(!raw.includes(privatePath));
+});
+
+test("removed host read-only option is not editable and unrelated saves preserve only inert raw data", async (t) => {
+  const { editor, input, paths } = await fixture(t);
+  assert.equal(Object.hasOwn(DEFAULT_CONFIG, "hostRoAllowlist"), false);
+  assert.equal(SETTINGS_PATHS.includes("host_ro_allowlist"), false);
+  assert.equal(Object.hasOwn(COLLECTION_REMOVALS, "host_ro_allowlist"), false);
+  await writeFile(paths.global, 'host_ro_allowlist = ["/private/old-host-data"]\nremove_host_ro_allowlist = ["/private/ignored"]\nunknown_setting = "keep"\n');
+  const draft = await editor.open("global");
+  for (const path of ["host_ro_allowlist", "hostRoAllowlist"]) {
+    assert.throws(() => draft.set(path, []), /unknown editable setting/);
+    assert.throws(() => draft.inherit(path), /unknown editable setting/);
+    assert.throws(() => draft.upsertListEntry(path, "/private/new"), /not an editable scalar list/);
+    assert.throws(() => draft.removeListEntry(path, "/private/old-host-data"), /not an editable scalar list/);
+  }
+  draft.set("show_footer", false); await draft.apply();
+  const saved = await readFile(paths.global, "utf8");
+  assert.ok(saved.includes("/private/old-host-data"));
+  assert.ok(saved.includes("unknown_setting"));
+  const resolved = await resolveConfig(input);
+  assert.deepEqual(resolved.config.mounts, []);
+  assert.match(resolved.warnings.join("\n"), /unknown config key hostRoAllowlist/);
 });
 
 test("allowed at-or-below-scope materialization anchors inherited environment FILE references to their actual origin", async (t) => {

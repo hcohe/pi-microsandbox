@@ -120,7 +120,7 @@ function serializeRaw(raw: Record<string, unknown>): string {
 /** A deliberate authoritative collection edit wins over conflicting removals in that same scope. */
 export const COLLECTION_REMOVALS: Readonly<Record<string, string>> = Object.freeze({
   route_tools: "remove_route_tools", pass_through_tools: "remove_pass_through_tools",
-  host_env: "remove_host_env", host_ro_allowlist: "remove_host_ro_allowlist",
+  host_env: "remove_host_env",
   secrets: "remove_secrets", mounts: "remove_mounts",
   "network.allow_hosts": "network.remove_allow_hosts", "network.publish_ports": "network.remove_publish_ports",
 });

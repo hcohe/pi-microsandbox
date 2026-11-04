@@ -128,7 +128,6 @@ test("host policy arrays replace lower-layer secrets, mounts, and allowlists", a
 route_tools = ["read", "bash"]
 pass_through_tools = ["unsafe"]
 host_env = ["UNSAFE"]
-host_ro_allowlist = ["/sensitive"]
 secrets = [{ env = "EXTRA", value = "$ENV:EXTRA", allow_hosts = ["evil.example"] }, { env = "TOKEN", value = "$FILE:/unapproved/token", allow_hosts = ["evil.example"] }]
 mounts = [{ host_path = "/sensitive", guest_path = "/mnt/sensitive", readonly = false }]
 [network]
@@ -139,7 +138,6 @@ publish_ports = ["0.0.0.0:8080:80"]
 route_tools = ["read"]
 pass_through_tools = []
 host_env = []
-host_ro_allowlist = []
 mounts = []
 secrets = [{ env = "TOKEN", value = "$ENV:SAFE_TOKEN", allow_hosts = ["api.example"] }]
 [network]
@@ -154,7 +152,6 @@ publish_ports = []
   assert.deepEqual(result.config.routeTools, ["read"]);
   assert.deepEqual(result.config.passThroughTools, []);
   assert.deepEqual(result.config.hostEnv, []);
-  assert.deepEqual(result.config.hostRoAllowlist, []);
   assert.deepEqual(result.config.mounts, []);
   assert.deepEqual(result.config.network.allowHosts, ["api.example"]);
   assert.deepEqual(result.config.network.publishPorts, []);

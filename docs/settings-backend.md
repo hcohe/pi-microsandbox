@@ -23,8 +23,8 @@ occurs when constructing the editor.
   `upsertMount(mount, previousGuest?)`/`removeMount(guest)` likewise record only
   deliberate entry operations, including renames.
 - `upsertListEntry(path, value, previousValue?)`/`removeListEntry(path, value)` do
-  the same for network hosts/ports, host environment, routing/pass-through and
-  read-only host-path lists. Frontends must use these for list CRUD, not pass a
+  the same for network hosts/ports, host environment and routing/pass-through
+  lists. Frontends must use these for list CRUD, not pass a
   displayed effective array to `set`. Clear/replacement is separately deliberate.
 - `draft.snapshot()` returns a **masked raw target layer with deliberate entry
   operations**, not the materialized candidate and never an effective config
