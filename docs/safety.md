@@ -65,10 +65,10 @@ with KVM; Windows, Intel macOS, and musl Linux are not supported.
 ## Approved configuration tools
 
 `msb_config_get` is read-only, including headless use. `msb_config_set` can edit
-one explicit ephemeral/project/global setting only after a fresh sanitized
+one explicit Session/Project/Global setting only after a fresh sanitized
 Cancel-first review; host-execution permission never substitutes for approval.
 No UI means no mutation. Secrets/references and arbitrary unknown raw values
-are not exposed. Changed files/session/ephemeral state invalidate approval;
+are not exposed. Changed files/session identity/Session settings invalidate approval;
 conflicts never silently retry. Only these two exact tool names bypass the
 third-party tool gate, not other host tools or `msb_*` prefixes. See
 [schemas, review navigation and truthful save/reload outcomes](tools.md).
@@ -81,9 +81,9 @@ outside the mounted worktree and all writable mounts.
 The first enabled session creates a missing `default.toml` as a fully commented
 reference, not an active policy; existing files (even empty ones) are preserved.
 New files use mode `0600`, new directories `0700`, and setup errors block startup.
-`pi-microsandbox/default.toml` applies to all projects; a host-owned per-project
-file overrides it. Both take precedence over launch environment/CLI settings;
-deliberate ephemeral panel changes sit above both files, last only for the current
+`pi-microsandbox/default.toml` supplies Global defaults; a host-owned per-project
+file supplies Project overrides. Both take precedence over launch environment/CLI settings;
+deliberate Session changes sit above both files, last only for the current
 session and are not written to its transcript. Host lists replace rather than
 extend lower-layer lists. `PI_MSB_*`
 environment variables and session `/msb` controls are also supported.

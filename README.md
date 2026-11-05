@@ -48,7 +48,8 @@ value editors explain the format with examples. [All keys →](docs/commands.md)
 
 The agent can also inspect all settings with `msb_config_get` or propose a
 scoped change with `msb_config_set`. Every change needs your explicit approval;
-a HOST-style No/Yes question shows only the focused color-coded diff and relevant
+a HOST-style No/Yes question shows `Scope: Session`, `Scope: Project`, or
+`Scope: Global`, the focused color-coded diff and relevant
 warnings, with secrets/references masked. Headless inspection is read-only.
 [Configuration tools →](docs/tools.md)
 
@@ -63,11 +64,11 @@ The first enabled session creates
 examples, and safety guidance. Uncomment what you need; existing files are left
 alone.
 
-Each edit offers **current running sandbox only**, **all sandboxes in this
-project**, **all sandboxes globally on this host**, or **Cancel**. Apply reloads
+Each edit offers **Session**, **Project**, **Global**, or **Cancel**. Apply reloads
 this sandbox automatically; others pick up persisted defaults on next start/reload.
-Restarting settings ask before losing guest ephemeral state. Current-only changes
-are memory-only and reset on session switch/end. Project settings for `~/Code/app`
+Restarting settings ask before losing guest ephemeral state. Session changes
+are memory-only and reset on session/workspace switch or shutdown. The panel
+requires a running sandbox for Session. Project settings for `~/Code/app`
 live outside the worktree:
 
 ```text
@@ -75,7 +76,7 @@ live outside the worktree:
 ```
 
 `PI_MSB_*` environment variables work too. Settings take precedence in this order:
-built-ins < environment < host defaults < project overrides < ephemeral changes.
+built-ins < environment < Global < Project < Session.
 Lists in host-owned files replace lower-layer lists.
 
 Keep configuration and credentials outside the workspace and all writable mounts.

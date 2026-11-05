@@ -16,7 +16,8 @@ const ROOT_ORDER = [
   "configuration/actions", "configuration/status", "configuration/General", "configuration/Advanced",
 ];
 type FormField = FieldHelp & { name: string; value: string; secret?: boolean; choices?: string[] };
-const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "ephemeral", env: "environment", defaults: "default" }[source] ?? source);
+/** Display-only aliases keep historical reviews and resolver IDs on the same three scope labels. */
+export const settingsSourceLabel = (source: unknown): string => ({ global: "Global", "host-default": "Global", project: "Project", "host-project": "Project", session: "Session", ephemeral: "Session", temporary: "Session", env: "environment", defaults: "default" }[String(source)] ?? String(source));
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
 /** Strip terminal controls from every external label, log, path and value. */
 export const safeText = (value: unknown): string => String(value ?? "").replace(/\x1b\][^\x07]*(?:\x07|$)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, " ");
@@ -110,9 +111,9 @@ export class ControlPanel implements Component, Focusable {
   #scopeRows(apply: (scope: SettingsScope) => void | Promise<void>): Row[] {
     const active = this.#control.getState().status === "active";
     return [
-      { id: "apply-temporary", label: "Apply for current running sandbox only", button: true, disabled: !active, detail: active ? "Current integration session memory only; no disk writes." : "Unavailable: no running sandbox. Enable a sandbox first, or choose project/global defaults.", action: active ? () => apply("temporary") : undefined },
-      { id: "apply-project", label: "Apply for all sandboxes in this project", button: true, detail: "Persist project defaults and reload this sandbox.", action: () => apply("project") },
-      { id: "apply-global", label: "Apply for all sandboxes globally on this host", button: true, detail: "Persist host defaults and reload this sandbox.", action: () => apply("global") },
+      { id: "apply-temporary", label: "Session", button: true, disabled: !active, detail: active ? "Memory only; no disk writes." : "Unavailable: no running sandbox. Enable a sandbox first, or choose Project or Global.", action: active ? () => apply("temporary") : undefined },
+      { id: "apply-project", label: "Project", button: true, detail: "Persist Project defaults and reload this sandbox.", action: () => apply("project") },
+      { id: "apply-global", label: "Global", button: true, detail: "Persist Global defaults and reload this sandbox.", action: () => apply("global") },
     ];
   }
   #scopeActions(): void {
@@ -145,7 +146,7 @@ export class ControlPanel implements Component, Focusable {
         const known = !readonly || policy?.knownFields.includes(normalizeConfigPath(path)[0] as keyof Config);
         const baseline = valueAt(values, path);
         const fallbackSource = collection && Array.isArray(baseline) && baseline.length === 0 ? "defaults" : collection ? "mixed / entry sources" : "unknown";
-        const origin = !known ? "unverified" : originLabel(provenance[normalizeConfigPath(path).join(".")] ?? fallbackSource);
+        const origin = !known ? "unverified" : settingsSourceLabel(provenance[normalizeConfigPath(path).join(".")] ?? fallbackSource);
         const edit = readonly ? undefined : () => this.#field(field);
         const add = readonly || !collection ? undefined : () => this.#addEntry(field);
         const row: Row = { id, label: fieldLabel(path), value: !known ? "unknown — not verified" : Array.isArray(value) ? `${value.length} entries` : display(value), origin, detail: field.hint, readonly, edit: collection ? undefined : edit, add, removeLabel: "inherit", remove: readonly || collection ? undefined : () => this.#inherit(path) };
@@ -153,7 +154,7 @@ export class ControlPanel implements Component, Focusable {
           row.children = (Array.isArray(value) ? value : []).map((entry: any) => {
             const identity = path === "secrets" ? entry.env : path === "mounts" ? entry.guestPath : String(entry);
             const entryId = `${id}/${identity}`;
-            const entryOrigin = originLabel(provenance[`${path}[${identity}]`] ?? provenance[normalizeConfigPath(path).join(".")] ?? "inherited / unknown");
+            const entryOrigin = settingsSourceLabel(provenance[`${path}[${identity}]`] ?? provenance[normalizeConfigPath(path).join(".")] ?? "inherited / unknown");
             const editEntry = readonly ? undefined : () => this.#editEntry(field, entry);
             const remove = readonly ? undefined : () => this.#removeEntry(field, entry);
             const result: Row = { id: entryId, label: String(identity), value: path === "secrets" ? "********" : path === "mounts" ? entry.readonly ? "ro" : "rw" : undefined, origin: entryOrigin, readonly, edit: editEntry, add, remove, removeLabel: "delete" };
@@ -188,8 +189,8 @@ export class ControlPanel implements Component, Focusable {
       ...(this.#baselineReady ? fields("configuration", this.#values, this.#provenance, false) : [{ id: "settings-unavailable", label: "Settings unavailable", detail: "Last apply result remains valid. Repair host configuration, then Reload or reopen before editing." }]),
       status,
       { id: "configuration/sources", label: "Sources", children: [
-        ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${originLabel(scope)} target`, value: path })),
-        { id: "precedence", label: "Inheritance", value: "default → environment → global → project → ephemeral", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
+        ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${settingsSourceLabel(scope)} target`, value: path })),
+        { id: "precedence", label: "Inheritance", value: "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
@@ -204,7 +205,7 @@ export class ControlPanel implements Component, Focusable {
     this.#focus = Math.max(0, index); this.#treeFocus = rows[this.#focus]!.id;
     if (refresh) this.#refresh();
   }
-  #owner(path: string): string { return originLabel(this.#provenance[normalizeConfigPath(path).join(".")] ?? "mixed / entry sources"); }
+  #owner(path: string): string { return settingsSourceLabel(this.#provenance[normalizeConfigPath(path).join(".")] ?? "mixed / entry sources"); }
   #field(field: SettingsField): void {
     const value = this.#rowValue(field.path) ?? valueAt(DEFAULT_CONFIG, field.path);
     const set = (next: unknown) => this.#set(field.path, next);
@@ -212,7 +213,7 @@ export class ControlPanel implements Component, Focusable {
     if (field.choices || field.path === "sandbox_name") this.#page([
       { id: "description", label: fieldLabel(field.path), detail: `${field.hint}. Source: ${this.#owner(field.path)}`, instructions: field.editorHelp },
       ...(field.choices ? field.choices.map((choice) => ({ id: String(choice), label: String(choice), instructions: field.choiceHelp![String(choice)]!, action: () => set(choice) })) : [
-        { id: "automatic-name", label: "Automatic session name (ephemeral only)", instructions: "Keep a session-generated name without persisting it to project or global defaults.", action: () => set(null) },
+        { id: "automatic-name", label: "Automatic session name (Session only)", instructions: "Keep a session-generated name without persisting it to Project or Global.", action: () => set(null) },
         { id: "edit", label: "Edit value", instructions: "Enter a custom name, such as my-project, instead of a session-generated name.", action: input },
       ]),
       { id: "back", label: "Back", action: () => this.#home() },
@@ -314,10 +315,10 @@ export class ControlPanel implements Component, Focusable {
     this.#focus = 1;
   }
   async #applyScope(scope: SettingsScope): Promise<void> {
-    if (scope === "temporary" && this.#control.getState().status !== "active") { this.#proposalError("Current-only unavailable: no running sandbox. Choose project/global defaults or cancel."); return; }
+    if (scope === "temporary" && this.#control.getState().status !== "active") { this.#proposalError("Session unavailable: no running sandbox. Choose Project or Global, or cancel."); return; }
     let target: SettingsDraft | undefined;
     if (scope !== "temporary" && this.#scalarIntent.has("sandbox_name") && this.#scalarIntent.get("sandbox_name") === null) {
-      this.#proposalError("Automatic session naming is a current-session-only override. Choose current running sandbox, or cancel and inherit Sandbox name.");
+      this.#proposalError("Automatic session naming requires Session. Choose Session, or cancel and inherit Sandbox name.");
       return;
     }
     try {
@@ -325,13 +326,14 @@ export class ControlPanel implements Component, Focusable {
       if (this.#closed) { target.discard(); return; }
       const preview = await (this.#control.previewSettings?.(target) ?? target.preview());
       if (this.#closed) { target.discard(); return; }
-      const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${originLabel(intent.source)}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`);
+      const entries = preview.collections.map((intent) => `${intent.operation.toUpperCase()} ${intent.path}[${intent.identities.join(", ") || "whole list"}]${intent.previousIdentity && intent.previousIdentity !== intent.identities[0] ? ` (was ${intent.previousIdentity})` : ""} from ${settingsSourceLabel(intent.source)}${intent.sourcePath ? ` (${intent.sourcePath})` : ""}${intent.promoted ? ": DELIBERATE higher-scope import" : ""}${intent.shadowed ? ": shadowed; not effective here" : ""}`);
       const effective = displayConfig(preview.effectiveToml);
       const intentPaths = new Set([...this.#scalarIntent.keys(), ...preview.changes.map((change) => change.path), ...preview.collections.map((entry) => entry.path)]);
       const hostBoundaryWarnings = [...intentPaths].map((path) => HOST_BOUNDARY_WARNINGS[path]).filter((warning): warning is string => warning !== undefined);
       const summary = [
+        `Scope: ${settingsSourceLabel(scope)}`,
         ...hostBoundaryWarnings,
-        ...(scope === "temporary" ? ["Current running sandbox only."] : [
+        ...(scope === "temporary" ? ["Memory only; no disk writes."] : [
           `Settings file: ${target.path}`,
           "Persist defaults; reload this sandbox only.",
           "Others pick up on next start/reload.",
@@ -364,7 +366,7 @@ export class ControlPanel implements Component, Focusable {
               this.#proposal = false; this.#proposalTree = undefined; this.#scalarIntent.clear();
               try { await this.#reopenDraft(); }
               catch { appliedSuccessfully = false; message += " Settings refresh failed; fix host configuration, then reopen the panel."; }
-              if (!this.#closed) this.#report(message, appliedSuccessfully);
+              if (!this.#closed) this.#report(`${message} · Scope: ${settingsSourceLabel(scope)}`, appliedSuccessfully);
             } else this.#proposalError(message);
           }
         }
@@ -424,8 +426,8 @@ export class ControlPanel implements Component, Focusable {
       }) },
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
       { id: "seal", label: "Seal network", detail: "Set deny mode after choosing where it applies.", action: () => this.#set("network.mode", "deny") },
-      dangerous("Reset current sandbox overrides", "Discard only current memory-only overrides; project/global defaults are unchanged. Reconfigure automatically. Restart may lose guest state.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Resources, Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General and Advanced start collapsed directly below MICROSANDBOX, with Resources selected. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers current running sandbox, project defaults, global defaults, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins and warnings. Host worktree is read/write. Restart loses guest state. Project/global policy stays outside the workspace.") },
+      dangerous("Reset Session overrides", "Discard only Session overrides; Project/Global defaults are unchanged. Reconfigure automatically. Restart may lose guest state.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Resources, Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General and Advanced start collapsed directly below MICROSANDBOX, with Resources selected. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers Session, Project, Global, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins and warnings. Host worktree is read/write. Restart loses guest state. Project/Global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
@@ -597,12 +599,12 @@ export class ControlPanel implements Component, Focusable {
   }
 }
 
-export type PanelLaunchStage = "settings access" | "ephemeral settings" | "project settings" | "global settings" | "interactive overlay" | "panel construction";
+export type PanelLaunchStage = "settings access" | "Session settings" | "Project settings" | "Global settings" | "interactive overlay" | "panel construction";
 const launchHelp: Record<PanelLaunchStage, string> = {
   "settings access": "Check working directory/Git discovery and restart Pi.",
-  "ephemeral settings": "Check host-owned settings and policy boundaries.",
-  "project settings": "Check the host-owned project settings target and its directory permissions/symlinks.",
-  "global settings": "Check the host-owned global settings target and its directory permissions/symlinks.",
+  "Session settings": "Check host-owned settings and policy boundaries.",
+  "Project settings": "Check the host-owned Project settings target and its directory permissions/symlinks.",
+  "Global settings": "Check the host-owned Global settings target and its directory permissions/symlinks.",
   "interactive overlay": "Check Pi interactive UI support and report a compatibility bug if this persists.",
   "panel construction": "Report a control-panel bug with the Pi version and this diagnostic.",
 };
@@ -636,10 +638,10 @@ export async function openControlPanel(ctx: Context, control: MsbControl): Promi
     const interaction = settings.acquireInteraction();
     if (!interaction) throw new Error("A Microsandbox settings review is already open");
     releaseInteraction = interaction.release;
-    stage = "ephemeral settings";
+    stage = "Session settings";
     draft = await settings.open("temporary");
-    const paths: Record<string, string> = { temporary: "Current session memory (no disk writes)" };
-    for (const scope of ["project", "global"] as const) { stage = `${scope} settings`; const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
+    const paths: Record<string, string> = { temporary: "Memory only (no disk writes)" };
+    for (const scope of ["project", "global"] as const) { stage = scope === "project" ? "Project settings" : "Global settings"; const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
     const selected = draft;
     if (generation !== currentGeneration) return;
     stage = "interactive overlay";

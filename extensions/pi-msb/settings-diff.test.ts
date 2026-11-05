@@ -15,7 +15,7 @@ function review(overrides: Partial<SettingsReviewFocus> = {}) {
 test("settings diff: focused semantic lines share plain RPC and themed output without guessing prefixes", () => {
   const lines = settingsDiff(review());
   assert.deepEqual(lines, [
-    { kind: "context", text: "This project · Secret TOKEN" },
+    { kind: "context", text: "Scope: Project" }, { kind: "context", text: "Secret TOKEN" },
     { kind: "removed", label: "Hosts", text: "old.example" }, { kind: "added", label: "Hosts", text: "new.example" },
   ]);
   assert.doesNotMatch(formatSettingsDiff(lines).join("\n"), /NOT_FOR_DISPLAY|keep.example|\x1b/);
@@ -54,6 +54,19 @@ test("settings diff: inherited comparisons get one short caption, not new entrie
 test("settings diff: routine same-scope edits omit repeated identity, source, operation and target jargon", () => {
   const data = { ...review(), collections: [{ path: "secrets", operation: "upsert", identities: ["TOKEN"], source: "host-project", promoted: false, shadowed: false }] };
   const text = formatSettingsDiff(settingsDiff(data)).join("\n");
-  assert.equal(text, "This project · Secret TOKEN\n- Hosts: old.example\n+ Hosts: new.example");
+  assert.equal(text, "Scope: Project\nSecret TOKEN\n- Hosts: old.example\n+ Hosts: new.example");
   assert.doesNotMatch(text, /upsert|Target:|Entry source|explicit/);
+});
+
+for (const [scope, label] of [["session", "Session"], ["project", "Project"], ["global", "Global"], ["ephemeral", "Session"], ["temporary", "Session"]]) {
+  test(`settings diff: canonical scope line for ${scope}, including historical display aliases`, () => {
+    const text = formatSettingsDiff(settingsDiff({ ...review(), scope })).join("\n");
+    assert.equal(text, `Scope: ${label}\nSecret TOKEN\n- Hosts: old.example\n+ Hosts: new.example`);
+    const promoted = { ...review(), scope: "global", collections: [{ path: "secrets", promoted: true, source: scope }] };
+    assert.match(formatSettingsDiff(settingsDiff(promoted)).join("\n"), new RegExp(`Copies this entry from ${label} into Global;`));
+  });
+}
+
+test("settings diff: historical reviews without focused safe data do not fall back to raw JSON", () => {
+  assert.deepEqual(settingsDiff({ scope: "ephemeral", desired: { value: "PRIVATE_SENTINEL" } }), []);
 });

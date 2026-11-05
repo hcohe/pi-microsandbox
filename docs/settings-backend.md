@@ -9,7 +9,8 @@ occurs when constructing the editor.
 
 - Native `MsbControl.settings` exposes a `SettingsEditor` (optional only to keep
   injected/third-party control adapters compatible). Construct one per integration,
-  never one per screen. `MsbIntegration.endSession()` clears its temporary layer.
+  never one per screen. The internal `temporary` layer is the public **Session**
+  scope, not a fourth scope. `MsbIntegration.endSession()` clears it.
 - `SETTINGS_PATHS` enumerates every public schema leaf in TOML spelling. `network`
   and `docker` are individual leaf fields; arrays are complete collections.
 - `await editor.open("temporary" | "project" | "global")` captures raw target
@@ -36,8 +37,8 @@ occurs when constructing the editor.
   are redacted there. Never feed masked values back into `set`.
 - `await draft.forScope(scope)` transfers dirty scalar fields and **entry intent**,
   not an effective collection snapshot. On preview/apply, entry operations replay
-  over the chosen scope's at-or-below-scope baseline: global excludes project/temp;
-  project excludes temp; temporary includes the current effective session.
+  over the chosen scope's at-or-below-scope baseline: Global excludes Project/Session;
+  Project excludes Session; Session includes the current effective settings.
   Existing target-only entries survive. Unrelated higher-scope entries never get
   imported, even when hidden target entries are absent from the displayed list.
   Use this for the three scope buttons and confirm `preview()` before applying.
@@ -75,14 +76,14 @@ Unedited target-owned references retain their raw spelling. References inherited
 from lower policies or deliberately imported from another scope are anchored to
 their actual origin before persistence; `$ENV:NAME` remains a reference. New
 relative FILE input originates beside the draft's policy file, or at session cwd
-for temporary input. FILE paths are canonicalized when necessary, but credential
+for Session input. FILE paths are canonicalized when necessary, but credential
 bytes are **never read/resolved for persistence**. Explicit whole-array `set`
 means exactly the supplied replacement, does not preserve omitted target entries,
 and is always distinguished from entry CRUD in confirmation. `[]` clears only the
 chosen scope; higher layers can still shadow that clear.
 
 TOML has no null: persistent `sandbox_name = null` is rejected; choose inherit or
-an explicit string. Temporary null is supported. The existing limited TOML
+an explicit string. Session null is supported. The existing limited TOML
 reader is still authoritative: comments/layout are not preserved on a real save,
 but unrelated parsed raw keys/values are. Deliberately edited authoritative
 collections reconcile only conflicting same-scope merge-removal identities; the
@@ -126,7 +127,7 @@ Targets come only from shared `hostConfigPaths`: host `default.toml` globally,
 canonical project `projects/.../config.toml` or `projects-absolute/.../config.toml`.
 Writes reject symlink targets/ancestors, dangling links, nonregular files, mounted
 workspace locations, and policy exposure through writable mounts. Every candidate
-is validated before any write or temporary mutation. Changed saves use exclusive
+is validated before any write or Session mutation. Changed saves use exclusive
 0600 same-directory temporary files, 0700 new directories, file sync, atomic rename
 and directory sync; failed temporary files are removed. Unrelated existing
 ancestor-directory permissions are not changed.
@@ -147,7 +148,7 @@ before retrying. Runtime is not mutated by the settings editor in that case.
 ## Agent-safe inspection and approval-bound commits
 
 `editor.inspect(runtime?, privateSources?)` reads each contributing policy once,
-returns all supported effective settings, sparse global/project/ephemeral layers,
+returns all supported effective settings, sparse Global/Project/Session layers (`layers.global`, `.project`, `.session`),
 origins and warnings as JSON, and does not bootstrap/write/reload. `settings-json.ts`
 whitelists schema fields and omits arbitrary unknown raw values. The dependency-free
 `settings-redaction.ts` masks literal credentials plus ENV/FILE references (including
@@ -172,7 +173,7 @@ while its exact expected content and all other source metadata remain guarded.
 `editor.acquireInteraction()` is the shared integration-local panel/tool modal
 lease. Competing callers fail busy; release it in finally. Session lifecycle
 invalidates its AbortSignal. `settings-approval.ts` uses only public custom-overlay
-APIs for a scrollable TUI review; RPC uses the documented Cancel-first selector.
+APIs for a scrollable TUI review; RPC uses the documented No-first selector.
 No ordinary panel conditional-confirmation path authorizes tool mutations.
 
 Secret upsert with omitted value prefers the selected effective identity as
@@ -182,7 +183,7 @@ Earlier removal/clear/replacement/inheritance prevents fallback resurrection.
 This fallback never selects unrelated scope credentials or promotes siblings.
 
 Privacy context is captured from all original contributing raw files, parsed
-`PI_MSB_*` settings, raw CLI settings and temporary/resolved layers, including
+`PI_MSB_*` settings, raw CLI settings and internal temporary/resolved layers, including
 credentials shadowed by higher scopes. The optional internal second argument of
 `resolveConfig` receives only a bound sanitizer after successful resolution; it
 adds no reads or credential resolution and returns no raw layers. Read views bind

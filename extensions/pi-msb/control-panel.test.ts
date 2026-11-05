@@ -12,7 +12,7 @@ import { createMsbIntegration } from "./control.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createCommandHandler } from "./command.ts";
 import type { MsbControl } from "./types.ts";
-const APPLY = ["Apply for current running sandbox only", "Apply for all sandboxes in this project", "Apply for all sandboxes globally on this host"];
+const APPLY = ["Session", "Project", "Global"];
 const ROOT_GROUPS = ["Resources", "Network", "Secrets", "Variables", "Mounts", "Tools", "Image", "Sources", "Actions", "Status", "General", "Advanced"];
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text } as any;
@@ -34,7 +34,7 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   };
   const ctx = { waitForIdle: async () => { calls.push("idle"); }, ui: { notify() {} } } as any;
   const terminal = { rows: 24, columns: 80 }; let closed = false;
-  const draft = await settings.open("temporary"); const paths: Record<string, string> = {};
+  const draft = await settings.open("temporary"); const paths: Record<string, string> = { temporary: "Memory only (no disk writes)" };
   for (const scope of ["global", "project"] as const) { const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
   const panel = new ControlPanel({ draft, control, ctx, tui: { terminal, requestRender() {} } as any, theme, paths, done: () => { closed = true; } });
   const key = async (data: string) => { panel.handleInput(data); await tick(); await panel.waitForIdle(); };
@@ -204,10 +204,11 @@ test("Sources retains targets, inheritance diagnostics and warnings; Variables e
   await f.node("Sources");
   assert.doesNotMatch(f.full(), /Sources & warnings/);
   assert.ok(f.full().includes(f.paths.global!)); assert.ok(f.full().includes(f.paths.project!));
-  assert.match(f.full(), /Inheritance: default → environment → global → project → ephemeral/);
+  for (const label of APPLY) assert.ok(f.full().includes(`${label} target:`));
+  assert.match(f.full(), /Inheritance: default → environment → Global → Project → Session/);
   assert.match(f.full(), /Warning: unknown config key unknownPanelSetting/);
   await f.key("h"); assert.doesNotMatch(f.full(), /unknown config key/);
-  await f.list("Variables", "Host Env:"); await f.seek("LANG"); assert.match(f.selected(), /\[global\]/);
+  await f.list("Variables", "Host Env:"); await f.seek("LANG"); assert.match(f.selected(), /\[Global\]/);
   await f.key("e"); const editor = f.full(); await f.key("\x1b");
   await f.key("\r"); assert.equal(f.full(), editor); await f.key("\x1b");
   await f.node("Variables", "Host Env:"); await f.key("a"); await f.key("LC_ALL"); await f.key("\r");
@@ -307,7 +308,7 @@ test("Review change puts each point on its own line and keeps Cancel selected", 
   for (const width of [160, 80]) {
     f.terminal.columns = width; f.terminal.rows = 24;
     const frame = f.text(), lines = frame.split("\n");
-    for (const point of ["HOST execution / sandbox bypass:", "Current running sandbox only.", "block_third_party: false", "Live routing/presentation update;", "Conflicting same-scope removal controls", "Host bypass/network/mount/environment settings"]) {
+    for (const point of ["HOST execution / sandbox bypass:", "Scope: Session", "Memory only; no disk writes.", "block_third_party: false", "Live routing/presentation update;", "Conflicting same-scope removal controls", "Host bypass/network/mount/environment settings"]) {
       assert.ok(lines.some((line) => line.startsWith(point)), `${width}: ${point}`);
     }
     assert.doesNotMatch(frame, /\. \.|Collection intent: \./);
@@ -429,9 +430,9 @@ async function storage(f: Awaited<ReturnType<typeof fixture>>, scope: number) {
 for (const scope of [0, 1, 2]) {
   test(`isolated scalar edit, chosen-scope inheritance and automatic reload once: ${scope}`, async (t) => {
     const f = await fixture(t); await f.number("2");
-    assert.match(f.full(), /Apply for current running sandbox only/); assert.doesNotMatch(f.full(), /unsaved|draft|\* draft/i);
-    assert.deepEqual(f.calls, []); await f.save(scope); assert.match(f.full(), /RESTART/); assert.equal(f.selected(), "Cancel");
-    await f.choose("Confirm"); assert.equal((await storage(f, scope)).cpus, 2); assert.deepEqual(f.calls, ["idle", "reload"]);
+    assert.match(f.full(), /Session/); assert.doesNotMatch(f.full(), /unsaved|draft|\* draft/i);
+    assert.deepEqual(f.calls, []); await f.save(scope); assert.ok(f.full().split("\n").some((line) => line.trim() === `Scope: ${APPLY[scope]}`)); assert.match(f.full(), /RESTART/); assert.equal(f.selected(), "Cancel");
+    await f.choose("Confirm"); assert.equal((await storage(f, scope)).cpus, 2); assert.match(f.full(), new RegExp(`Scope: ${APPLY[scope]}`)); assert.deepEqual(f.calls, ["idle", "reload"]);
     await f.node("Resources", "Virtual CPUs:"); await f.key("d"); await f.save(scope);
     assert.match(f.full(), /inherit\s+→/); await f.choose("Confirm"); assert.equal((await storage(f, scope)).cpus, undefined);
     assert.deepEqual(f.calls, ["idle", "reload", "idle", "reload"]);
@@ -508,7 +509,7 @@ test("validation retry/cancel is redacted, isolated and readable at one/three ro
   }
 });
 
-test("current-only unavailable while inactive/off, including state loss before confirmation", async (t) => {
+test("Session unavailable while inactive/off, including state loss before confirmation", async (t) => {
   for (const status of ["off", "unavailable", "host-fallback"] as const) {
     const f = await fixture(t); f.control.getState = () => ({ status, info: null }); await f.number("2");
     await f.seek(APPLY[0]!); assert.match(f.full(), /Unavailable: no running sandbox/); await f.key("\r"); assert.deepEqual(f.calls, []); assert.deepEqual(f.settings.temporary(), {});
@@ -559,15 +560,15 @@ test("async busy rejects double apply/navigation/close and teardown drains witho
 });
 
 test("network sealing has explicit scope actions; lifecycle retains independent destructive confirmation", async (t) => {
-  const f = await fixture(t); await f.action("Seal network"); assert.match(f.full(), /Apply for all sandboxes/); assert.doesNotMatch(f.full(), /in draft/); await f.choose("Cancel"); assert.deepEqual(f.calls, []);
+  const f = await fixture(t); await f.action("Seal network"); for (const label of APPLY) assert.ok(f.full().includes(`[ ${label} ]`)); assert.doesNotMatch(f.full(), /in draft/); await f.choose("Cancel"); assert.deepEqual(f.calls, []);
   await f.action("Seal network"); await f.apply(1); assert.equal((await storage(f, 1)).network!.mode, "deny");
   await f.action("Turn off"); assert.match(f.full(), /HOST.*ephemeral state is lost/); assert.equal(f.selected(), "Cancel"); await f.key("\r"); assert.deepEqual(f.calls, ["idle", "reload"]);
   await f.action("Turn off"); await f.choose("Confirm"); assert.deepEqual(f.calls, ["idle", "reload", "idle", "enabled:false"]);
 });
 
-test("automatic session name remains current-only; scalar inheritance previews lower chosen-scope value", async (t) => {
+test("automatic session name remains Session-only; scalar inheritance previews lower chosen-scope value", async (t) => {
   const f = await fixture(t); await mkdir(dirname(f.paths.global!), { recursive: true }); await writeFile(f.paths.global!, 'sandbox_name = "lower-name"\ncpus = 3\n');
-  await f.action("Reload settings"); await f.choose("Confirm"); await f.edit("General", "Sandbox name:"); await f.choose("Automatic session"); await f.save(1); assert.match(f.full(), /current-session-only/);
+  await f.action("Reload settings"); await f.choose("Confirm"); await f.edit("General", "Sandbox name:"); await f.choose("Automatic session"); await f.save(1); assert.match(f.full(), /Automatic session naming requires Session/);
   await f.choose("Retry"); await f.apply(); assert.equal(f.settings.temporary().sandboxName, null);
   await f.node("Resources", "Virtual CPUs:"); await f.key("d"); await f.save(2); assert.match(f.full(), /inherit\s+→/); await f.choose("Confirm"); assert.doesNotMatch(await readFile(f.paths.global!, "utf8"), /cpus/);
 });
@@ -584,15 +585,15 @@ async function openSecret(f: Awaited<ReturnType<typeof fixture>>, name = "EDIT")
 
 for (const file of [false, true]) test(`global secret metadata/value edits retain raw credential/origin, never project siblings: FILE=${file}`, async (t) => {
   const f = await fixture(t); await seedScopedPanelSecrets(f, file); await openSecret(f); await panelSecretHostEdit(f, "edited.example"); await f.save(2);
-  const preview = f.full().replace(/\s+/g, " "); assert.match(preview, /UPSERT secrets\[EDIT\]/); assert.match(preview, /from project/); assert.match(preview, /DELIBERATE higher-scope import/); assert.doesNotMatch(preview, /PRIVATE_LITERAL_BYTES|PRIVATE_FILE_BYTES|EDIT_FILE_BYTES|EDIT_REF/);
+  const preview = f.full().replace(/\s+/g, " "); assert.match(preview, /UPSERT secrets\[EDIT\]/); assert.match(preview, /from Project/); assert.match(preview, /DELIBERATE higher-scope import/); assert.doesNotMatch(preview, /PRIVATE_LITERAL_BYTES|PRIVATE_FILE_BYTES|EDIT_FILE_BYTES|EDIT_REF/);
   await f.choose("Confirm"); const text = await readFile(f.paths.global!, "utf8"); const secrets = parseTomlConfig(text, "global").value.secrets!;
   assert.deepEqual(secrets.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_FILE", "EDIT"]); assert.equal(secrets[1]!.value, "$FILE:global-token"); assert.equal(secrets[2]!.value, file ? `$FILE:${join(dirname(f.paths.project!), "edit-token")}` : "$ENV:EDIT_REF"); assert.deepEqual(secrets[2]!.allowHosts, ["edited.example"]); assert.doesNotMatch(text, /PRIVATE_|private-token|GLOBAL_FILE_BYTES/);
   await openSecret(f); await f.choose("Replace value"); await f.key("$ENV:NEW_REF"); await f.key("\r"); await f.apply(2); assert.equal((await storage(f, 2)).secrets![2]!.value, "$ENV:NEW_REF");
 });
 
-test("add/delete global secret intents exclude siblings, report shadowing and no-op; ephemeral never exported", async (t) => {
+test("add/delete global secret intents exclude siblings, report shadowing and no-op; Session never exported", async (t) => {
   for (const scope of [1, 2]) {
-    const f = await fixture(t); await seedScopedPanelSecrets(f); const ephemeral = await f.settings.open("temporary"); ephemeral.upsertSecret({ env: "TEMP_PRIVATE", value: "TEMP_PRIVATE_BYTES", allowHosts: ["temp.example"] }); await ephemeral.apply(); ephemeral.discard();
+    const f = await fixture(t); await seedScopedPanelSecrets(f); const session = await f.settings.open("temporary"); session.upsertSecret({ env: "TEMP_PRIVATE", value: "TEMP_PRIVATE_BYTES", allowHosts: ["temp.example"] }); await session.apply(); session.discard();
     await f.action("Reload settings"); await f.choose("Confirm"); await addSecret(f, "NEW", "$ENV:NEW"); await f.apply(scope);
     const text = await readFile(scope === 1 ? f.paths.project! : f.paths.global!, "utf8"); assert.doesNotMatch(text, /TEMP_PRIVATE/); assert.match(text, /NEW/); if (scope === 2) assert.doesNotMatch(text, /PRIVATE_LITERAL|PRIVATE_FILE/);
   }
@@ -620,7 +621,7 @@ test("mount/list cross-scope edits preserve hidden target entries, raw removal c
   assert.deepEqual((await resolveConfig(f.input)).config.routeTools, ["read", "bash"]); const saved = await readFile(f.paths.project!, "utf8"); assert.match(saved, /KEEP_REMOVED/); assert.match(saved, /"remove_route_tools" = \[\]/);
 });
 
-for (const [scope, source, label] of [[0, "temporary", "ephemeral"], [1, "host-project", "project"], [2, "host-default", "global"]] as const) test(`native adoption freezes accurate scope origins, runtime readonly and automatic restart: ${scope}`, async (t) => {
+for (const [scope, source, label] of [[0, "temporary", "Session"], [1, "host-project", "Project"], [2, "host-default", "Global"]] as const) test(`native adoption freezes accurate scope origins, runtime readonly and automatic restart: ${scope}`, async (t) => {
   const f = await fixture(t, plainTheme, true); const before = f.control.getRuntimePolicy!()!;
   before.provenance.cpus = "temporary"; assert.notEqual(f.control.getRuntimePolicy!()!.provenance.cpus, "temporary"); const original = f.control.getRuntimePolicy!();
   await f.number("2"); assert.deepEqual(f.control.getRuntimePolicy!(), original); await f.apply(scope);
@@ -649,7 +650,7 @@ test("native runtime failure leaves immutable last-known policy; reset failures 
   await f.number("2"); await f.save(1); await f.choose("Confirm"); assert.match(f.full(), /Saved.*runtime failed/); assert.equal(f.control.getState().status, "unavailable"); assert.deepEqual(f.control.getRuntimePolicy!(), original);
   await f.node("Status"); assert.match(f.full(), /Last known policy \(not running\)/); assert.doesNotMatch(f.full(), /PRIVATE_REJECTED_CANDIDATE/);
   fail = false; await f.action("Reload settings"); await f.choose("Confirm"); await f.number("3"); await f.apply(); fail = true;
-  await f.action("Reset current sandbox overrides"); await f.choose("Confirm"); assert.match(f.full(), /Action failed/); assert.deepEqual(f.settings.temporary(), {}); fail = false;
+  await f.action("Reset Session overrides"); await f.choose("Confirm"); assert.match(f.full(), /Action failed/); assert.deepEqual(f.settings.temporary(), {}); fail = false;
   await f.number("4"); await f.apply(1); assert.equal(f.control.getState().status, "active"); assert.equal(f.integration!.configRef.value.cpus, 4);
 });
 
@@ -661,8 +662,8 @@ test("one compact themed footer and distinct focusable actions remain accessible
     const lines = f.panel.render(width).map(stripTerminalSequences); assert.match(lines.at(-1)!, /q close/); assert.doesNotMatch(lines.at(-1)!, /w\/P\/G|w ephemeral/); assert.equal(lines.filter((line) => line.includes("q close")).length, 1); assert.equal(lines.length, height); assert.ok(lines.every((line) => visibleWidth(line) === width));
   }
   f.terminal.columns = 80; f.terminal.rows = 20; await f.number("2");
-  assert.match(f.full(), /Persist project defaults and reload this sandbox\./);
-  assert.match(f.full(), /Persist host defaults and reload this sandbox\./);
+  assert.match(f.full(), /Persist Project defaults and reload this sandbox\./);
+  assert.match(f.full(), /Persist Global defaults and reload this sandbox\./);
   assert.doesNotMatch(f.full(), /Others pick up on next|(?:Project\/session|Higher) overrides may shadow/);
   for (const label of [...APPLY, "Cancel"]) { await f.seek(label); assert.equal(f.selected(), label); }
   const frame = f.panel.render(160).join("\n"); assert.ok(frame.includes(theme.fg("accent", theme.bold(`[ ${APPLY[0]} ]`)))); assert.ok(frame.includes(theme.fg("muted", theme.bold("[ Cancel ]")))); assert.match(frame, /\x1b\[7m/);
@@ -706,13 +707,13 @@ test("empty collection origins retain explicit scope after last-entry removal; p
   const f = await fixture(t);
   for (const [group, label] of [["Secrets", "Secrets:"], ["Mounts", "Mounts:"], ["Network", "Allowed hosts:"], ["Network", "Publish Ports:"]]) { await f.node(group!, label!); assert.match(f.selected(), /0 entries \[default\]/); }
   await f.list("Network", "Allowed hosts:"); await f.key("a"); await f.key("api.example"); await f.key("\r"); await f.apply(1);
-  await f.list("Network", "Allowed hosts:"); await f.seek("api.example"); await f.key("d"); await f.apply(1); await f.node("Network", "Allowed hosts:"); assert.match(f.selected(), /0 entries \[project\]/);
+  await f.list("Network", "Allowed hosts:"); await f.seek("api.example"); await f.key("d"); await f.apply(1); await f.node("Network", "Allowed hosts:"); assert.match(f.selected(), /0 entries \[Project\]/);
   const before = await readFile(f.paths.project!, "utf8"), calls = [...f.calls]; await f.key("d"); assert.equal(await readFile(f.paths.project!, "utf8"), before); assert.deepEqual(f.calls, calls);
   assert.doesNotMatch(f.full(), /Clear list/);
   await f.node("Status"); assert.match(f.full(), /Policy snapshot unavailable: No current policy \[runtime\]/);
 });
 
-test("native disabled environment remains authoritative: defaults apply without starting and current-only is unavailable", async (t) => {
+test("native disabled environment remains authoritative: defaults apply without starting and Session is unavailable", async (t) => {
   const f = await fixture(t); const integration = createMsbIntegration({ sessionId: "disabled-panel", cwd: f.input.cwd, agentDir: f.input.agentDir, configDirName: ".pi", env: { PI_MSB_DISABLE: "1" }, sdkLoader: async () => { assert.fail("Disabled panel must not load SDK"); } });
   t.after(() => integration.manager.shutdown()); await integration.configureSession({ sessionId: "disabled-panel", cwd: f.input.cwd, projectTrusted: true });
   f.panel.dispose(); const draft = await integration.control.settings!.open("temporary"); let closed = false;
@@ -812,14 +813,14 @@ test("pass-through entry rename/removal/no-op and shadowed intents retain explic
   }
 });
 
-test("Reset current sandbox overrides is confirmed memory-only maintenance and reconciles automatically", async (t) => {
+test("Reset Session overrides is confirmed memory-only maintenance and reconciles automatically", async (t) => {
   const f = await fixture(t, plainTheme, true); await f.number("2"); await f.apply(1); await f.number("3"); await f.apply();
   const before = await committedPanelSettings(f); f.calls.length = 0;
   const reload = f.control.reload.bind(f.control); f.control.reload = async (options) => { f.calls.push("reload"); await reload(options); };
-  await f.action("Reset current sandbox overrides");
-  const confirmation = f.full().replace(/\s+/g, " "); assert.match(confirmation, /only current memory-only overrides; project\/global defaults are unchanged/); assert.match(confirmation, /Restart may lose guest state/); assert.doesNotMatch(confirmation, /Apply for all sandboxes|unsaved|draft/i); assert.equal(f.selected(), "Cancel");
+  await f.action("Reset Session overrides");
+  const confirmation = f.full().replace(/\s+/g, " "); assert.match(confirmation, /only Session overrides; Project\/Global defaults are unchanged/); assert.match(confirmation, /Restart may lose guest state/); assert.doesNotMatch(confirmation, /Apply for all sandboxes|unsaved|draft/i); assert.equal(f.selected(), "Cancel");
   await f.choose("Cancel"); assert.deepEqual(await committedPanelSettings(f), before); assert.deepEqual(f.calls, []);
-  await f.action("Reset current sandbox overrides"); await f.choose("Confirm");
+  await f.action("Reset Session overrides"); await f.choose("Confirm");
   assert.deepEqual(f.settings.temporary(), {}); assert.deepEqual((await committedPanelSettings(f)).files, before.files); assert.equal(f.integration!.configRef.value.cpus, 2); assert.equal(f.control.getState().status, "active");
   assert.equal(f.calls.filter((call) => call === "idle").length, 1); assert.equal(f.calls.filter((call) => call === "reload").length, 1);
 });

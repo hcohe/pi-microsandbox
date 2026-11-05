@@ -17,14 +17,14 @@ Arguments: `{}`. Returns the same machine-readable JSON in text and structured
 - `supportedPaths`: every supported snake_case setting leaf.
 - `desired`: all resolved settings, including defaults and automatic
   `sandbox_name: null`. This is **not proof of adopted VM state**.
-- `layers.global`, `.project`, `.ephemeral`: complete supported sparse raw
+- `layers.global`, `.project`, `.session`: complete supported sparse raw
   assignments and removal controls; absent means inherit. Unknown raw values
   are omitted, malformed shadowed shapes are marked `<invalid>`, and unknown
   key names can appear in warnings/provenance. This is scope intent, not an
   effective configuration to copy back into storage.
 - `origins` and `provenance`: resolver origins, including `defaults`, `env`,
-  legacy `global`/`cli`, `host-default` (public global), `host-project` (public
-  project), and `temporary` (public ephemeral). Secret/mount identities have
+  legacy `global`/`cli`, `host-default` (Global), `host-project` (Project), and
+  `temporary` (Session). Secret/mount identities have
   entry origins; scalar-list provenance is field-level, not item history.
 - `warnings` and `runtime`: status and known adopted settings/provenance,
   verification and timestamp. Reconnected VMs have only partially verified
@@ -47,7 +47,7 @@ argument or arbitrary TOML write is supported.
 
 | Argument | Values |
 | --- | --- |
-| `scope` | `ephemeral`, `project`, `global` (always explicit) |
+| `scope` | `session`, `project`, `global` (always explicit) |
 | `path` | One leaf from `msb_config_get.supportedPaths`, e.g. `cpus`, `network.mode`, `secrets` |
 | `operation` | `set`, `inherit`, `upsert`, `remove` |
 | `value` | Required only for `set`/`upsert`; native Config values, with **camelCase entry keys** |
@@ -66,7 +66,7 @@ Examples:
 
 ```json
 {"scope":"project","path":"cpus","operation":"set","value":4}
-{"scope":"ephemeral","path":"network.allow_hosts","operation":"upsert","value":"api.example.com"}
+{"scope":"session","path":"network.allow_hosts","operation":"upsert","value":"api.example.com"}
 {"scope":"project","path":"secrets","operation":"upsert","value":{"env":"SERVICE_TOKEN","allowHosts":["api.example.com"]}}
 {"scope":"global","path":"mounts","operation":"remove","identity":"/mnt/cache"}
 {"scope":"project","path":"cpus","operation":"inherit"}
@@ -81,12 +81,11 @@ cannot be saved as credentials. Mount entries use `type`, `hostPath`, `guestPath
 `readonly`, `options` and the same native workspace/canonical/symlink/socket
 protections. Persistent automatic sandbox naming uses `inherit`, not null.
 
-Global/project scopes save sparse host-owned defaults at the existing
+Global/Project scopes save sparse host-owned defaults at the existing
 [configuration locations](configuration.md#host-owned-project-overrides).
-Ephemeral is the existing temporary/session layer: memory-only, above host
-policy, never restored from transcripts, cleared on session/workspace identity
-change or shutdown. Unlike the panel's current-running-only action, this tool
-can edit ephemeral memory while inactive. An approved reload may start an inactive
+Session is memory-only, above Project/Global, never restored from transcripts, cleared on session/workspace identity
+change or shutdown. Unlike the panel's Session action, this tool
+can edit Session settings while inactive. An approved reload may start an inactive
 sandbox when desired `auto_start` is true; it never enables host execution as
 error recovery. Other sessions adopt saved defaults on their next start/reload.
 
@@ -98,7 +97,8 @@ competing panel/review rejects without mutation. Interactive RPC requires a clie
 that supports Pi's UI selector; there is no timeout/automatic approval.
 
 Approval looks like the HOST-command question: **Allow configuration change?**,
-one friendly scope/item line, a focused color-coded diff, and vertical **No / Yes**
+a standalone `Scope: Session`, `Scope: Project`, or `Scope: Global` line
+and the affected item, a focused color-coded diff, and vertical **No / Yes**
 choices. There is no dashboard header, duplicate identity or routine source dump.
 Native entry edits omit siblings and unchanged fields. Credentials/references stay `<redacted>`; a real rotation
 shows `(changed)` even when both safe values look identical. Retained credentials
@@ -120,8 +120,8 @@ keeps the whole question and choices visible even with custom widgets or footers
 Resize as needed: review areas below 32×10, or unable to fit the controls, cannot
 approve. RPC sends the same plain-text question/diff with No/Yes and no ANSI.
 Oversized diffs reject instead of hiding changed values.
-Abort, cancellation, session replacement or changed source/ephemeral/runtime
-state invalidates approval; nothing is automatically rebased/retried.
+Abort, cancellation, session replacement or changed sources, Session settings or
+runtime state invalidate approval; nothing is automatically rebased/retried.
 
 Outcomes include `inspected`, `rejected`, `cancelled`, `conflict`, `no_op`,
 `applied` (`saved: true`, `reloaded: true`, with runtime status), and
@@ -135,4 +135,4 @@ The setter's transcript row does not echo raw arguments. Results show a brief,
 truthful save/reload outcome; expanding shows the same focused diff, never the
 full review JSON. Model-facing text is compact too, while structured `details`
 retain the complete sanitized review and machine-readable outcome. The read-only
-`msb_config_get` JSON inventory is unchanged.
+`msb_config_get` JSON inventory uses the same three scope names (lower-case keys).

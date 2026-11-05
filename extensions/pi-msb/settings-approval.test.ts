@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { approveSettings, SettingsApproval } from "./settings-approval.ts";
-import type { SettingsDiffLine } from "./settings-diff.ts";
+import { settingsDiff, type SettingsDiffLine } from "./settings-diff.ts";
 
 const reviewLines = (review: string): SettingsDiffLine[] => review.split("\n").map((text) => ({ kind: "context", text }));
 const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
@@ -17,14 +17,15 @@ function view(review: SettingsDiffLine[] = reviewLines("short review")) {
 
 test("settings approval: native-style compact question, padded vertical No/Yes, no dashboard or short-review status", () => {
   const f = view([
-    { kind: "context", text: "project · secrets · upsert · TOKEN" },
+    { kind: "context", text: "Scope: Project" },
+    { kind: "context", text: "Secret TOKEN" },
     { kind: "removed", label: "allow_hosts", text: "old.example" },
     { kind: "added", label: "allow_hosts", text: "new.example" },
   ]);
   const rows = f.component.render(80);
   assert.ok(rows.length < f.terminal.rows);
   assert.equal(rows[0], "─".repeat(80)); assert.equal(rows.at(-1), rows[0]);
-  assert.match(rows.join("\n"), /\n Allow configuration change\? *\n\n project/);
+  assert.match(rows.join("\n"), /\n Allow configuration change\? *\n\n Scope: Project *\n Secret TOKEN/);
   assert.match(rows.join("\n"), /\n → No\n   Yes\n/);
   assert.doesNotMatch(rows.join("\n"), /MICROSANDBOX|End seen|Read to end|PgUp|Cancel|Approve|\[ No \]/);
 });
@@ -123,3 +124,18 @@ test("settings approval: shrinking below the usable size rejects even before the
   f.terminal.rows = 2; f.terminal.columns = 24;
   f.component.handleInput("\r"); assert.deepEqual(f.results, [false]);
 });
+
+for (const [scope, label] of [["session", "Session"], ["project", "Project"], ["global", "Global"]]) {
+  test(`settings approval: exact Scope: ${label} line in compact TUI and RPC`, async () => {
+    const review = settingsDiff({ scope, focus: [{ path: "cpus", deltas: [{ field: "cpus", before: 2, after: 4 }], inheritedDeltas: [], reconciledDeltas: [], hostBypass: [], changed: true, effectiveChanged: true }], collections: [], shadowed: [] });
+    const f = view(review);
+    const rows = f.component.render(80).map((line) => line.trim());
+    assert.ok(rows.includes(`Scope: ${label}`));
+    assert.ok(rows.includes("CPUs"));
+    f.component.handleInput("\r"); assert.deepEqual(f.results, [false]);
+    const ctx = { hasUI: true, mode: "rpc", ui: { select: async (title: string, choices: string[]) => {
+      assert.ok(title.split("\n").includes(`Scope: ${label}`)); assert.deepEqual(choices, ["No", "Yes"]); return "No";
+    } } } as unknown as ExtensionContext;
+    assert.equal(await approveSettings(ctx, review, new AbortController().signal), false);
+  });
+}

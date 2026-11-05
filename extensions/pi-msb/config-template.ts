@@ -12,11 +12,11 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ## The workspace is mounted read/write, including the entire enclosing Git worktree.
 ## Sandbox failures block by default; never enable host fallback for untrusted code.
 ## PI_MSB_* environment settings and the /msb control panel are also supported.
-## Precedence: built-ins < environment < this default.toml
-## < host-owned per-project override < temporary panel settings.
+## Precedence: built-ins < environment < Global (this default.toml)
+## < Project (host-owned override) < Session (memory only).
 ## Host lists REPLACE lower lists (including secrets/mounts); [] clears them.
 ##
-## Per-project configuration (panel project save button or manual host creation):
+## Project configuration (panel Project button or manual host creation):
 ## Use the canonical Git worktree root, or canonical cwd for a non-Git project.
 ## For ~/Code/app, create <agentDir>/pi-microsandbox/projects/Code/app/config.toml.
 ## For /srv/app outside home, use
@@ -30,7 +30,7 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ##   (umask 077; set -C; printf 'cpus = 2\\n' > "$agent_dir/pi-microsandbox/projects/Code/app/config.toml")
 ## Review mounts, secrets, and host permissions before enabling settings.
 ## Open /msb; choose Actions > Reload settings after external edits.
-## The panel saves dirty fields only to temporary, project or global scope.
+## The panel applies each change to Session, Project or Global scope.
 
 ## Defaults: resource identity and lifecycle
 ## Digest-pinned image; custom images must supply the required runtime tools.

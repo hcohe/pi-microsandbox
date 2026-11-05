@@ -10,7 +10,7 @@ files or `PI_MSB_*` before starting a session instead.
 
 Model-facing [`msb_config_get` / `msb_config_set`](tools.md) are separate tools,
 not `/msb` subcommands. Inspection works headlessly; tool mutations always need
-fresh Cancel-first approval in an interactive TUI/RPC client. The panel and tool
+fresh No-first approval in an interactive TUI/RPC client. The panel and tool
 review cannot overlap. Existing panel navigation and scope actions are unchanged.
 
 ## Top-level trees
@@ -19,7 +19,7 @@ review cannot overlap. Existing panel navigation and scope actions are unchanged
   **Image**, **Sources**, **Actions**, **Status**, **General**, and **Advanced**
   are the visible roots, in that order, with
   no wrapper. The settings trees edit desired policy. Values show their
-  committed origin: default, environment, global, project or ephemeral. Mixed
+  committed origin: default, environment, Global, Project or Session. Mixed
   collections show entry sources rather than claiming a single group owner.
 - **Resources** contains only `cpus` and `memory_mib`. The timeout settings
   `idle_timeout_sec`, `stop_timeout_ms` and `replace_timeout_ms` are in **Advanced**.
@@ -89,19 +89,19 @@ Each scalar choice/text edit and each entry operation is applied or canceled
 before returning to the settings tree. Structured secret/mount forms keep fields
 together and expose the same focusable, theme-accented action buttons:
 
-1. **Apply for current running sandbox only** — current integration session memory
+1. **Session** — integration session memory
    only, above host policy; no disk writes or transcript serialization. Cleared
-   on session switch/shutdown, not restored on resume. Unavailable with a clear
+   on session/workspace switch or shutdown, not restored on resume. Unavailable with a clear
    reason when no sandbox is running; it cannot silently boot a guest.
-2. **Apply for all sandboxes in this project** — persist sparse project defaults
+2. **Project** — persist sparse Project defaults
    in the canonical host-owned project `config.toml`.
-3. **Apply for all sandboxes globally on this host** — persist sparse host defaults
+3. **Global** — persist sparse Global defaults
    in `default.toml` shared by projects.
 4. **Cancel** — discard this proposal without writes or runtime changes.
 
 Apply automatically reconfigures/reloads **this sandbox**, after any meaningful
 restart/security confirmation. Other sandboxes pick up persisted defaults on next
-start/reload; there is no broadcast. Higher project/session overrides can shadow
+start/reload; there is no broadcast. Higher Project/Session overrides can shadow
 lower-scope changes and are never automatically cleared. No manual Reload is
 needed for normal edits. After a successful apply, **Quit** is selected by default;
 Enter closes only the `/msb` panel, leaving the sandbox running. **Back** returns
@@ -110,7 +110,7 @@ to the settings tree.
 Only the one deliberate operation is persisted, never a flattened effective
 configuration or runtime snapshot. Entry CRUD preserves the chosen scope's other
 entries, including those hidden by higher layers. It never exports unrelated
-project/session credentials, mounts, hosts, environment or tool permissions.
+Project/Session credentials, mounts, hosts, environment or tool permissions.
 A deliberate higher-scope entry import is identified by origin and identity in
 confirmation: that particular permission/credential may become available to
 other projects. Metadata edits retain private values/references without reading
@@ -119,7 +119,7 @@ credential bytes for display.
 Collections have no bulk-clear or parent inheritance control. `d` removes one
 entry; removing the last may leave an explicit empty list, still with entry
 removal intent. Scalar `d` previews inheritance at the chosen scope.
-Project/session layers can shadow a lower-scope change or deletion; preview and
+Project/Session layers can shadow a lower-scope change or deletion; preview and
 results report shadowing and no-ops. Conflicting same-scope `remove_*` identities are reconciled; unrelated removals stay intact.
 Unknown raw settings are retained; comments/layout are not preserved on changed
 saves. Unsafe paths and external edits are rejected; cancel and reopen a stale proposal.
@@ -135,7 +135,7 @@ require explicit confirmation: permitted third-party tools execute on the host
 outside the sandbox without per-call host approval. Host-execution, host-fallback
 and constrained host skill-read policy changes also warn and require confirmation,
 including inheritance that may expose a more permissive lower policy.
-Automatic session naming is an ephemeral-only override; inherit removes persistent
+Automatic session naming is a Session-only override; inherit removes persistent
 naming assignments.
 
 Saved settings and successful runtime adoption are separate outcomes. Failed
@@ -150,8 +150,8 @@ saved-but-runtime-failed result does not claim storage was unchanged.
 **Actions** retains enable, **Turn off (HOST execution)**,
 reload, prune, redacted logs (validated non-negative tail count, default 100),
 effective redacted desired-config diagnostics, seal network through scope actions,
-**Reset current sandbox overrides** and help. Reset discards only current
-memory-only overrides, leaves project/global defaults unchanged, and reconciles
+**Reset Session overrides** and help. Reset discards only current
+memory-only overrides, leaves Project/Global defaults unchanged, and reconciles
 automatically after destructive/restart confirmation. Dangerous actions require
 explicit confirmation and idle. Status remains observational.
 

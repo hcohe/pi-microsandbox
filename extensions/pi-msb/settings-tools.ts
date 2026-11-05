@@ -6,9 +6,9 @@ import { formatSettingsDiff, settingsDiff, settingsOutcome } from "./settings-di
 import { COLLECTION_REMOVALS, SETTINGS_PATHS, SettingsConflictError, type SettingsDraft } from "./settings.ts";
 import type { Config, MsbControl } from "./types.ts";
 
-type Request = { scope: "ephemeral" | "project" | "global"; path: string; operation: "set" | "inherit" | "upsert" | "remove"; value?: unknown; identity?: string; previousIdentity?: string };
+type Request = { scope: "session" | "project" | "global"; path: string; operation: "set" | "inherit" | "upsert" | "remove"; value?: unknown; identity?: string; previousIdentity?: string };
 const parameters = Type.Object({
-  scope: Type.Union([Type.Literal("ephemeral"), Type.Literal("project"), Type.Literal("global")]),
+  scope: Type.Union([Type.Literal("session"), Type.Literal("project"), Type.Literal("global")]),
   path: Type.String({ enum: [...SETTINGS_PATHS], description: "One supported snake_case setting leaf. No indexed paths or file paths." }),
   operation: Type.Union([Type.Literal("set"), Type.Literal("inherit"), Type.Literal("upsert"), Type.Literal("remove")]),
   value: Type.Optional(Type.Unknown({ description: "set: complete value (arrays replace/clear). upsert: one native Config entry (camelCase keys), or one list string. Omit secret.value to retain its credential." })),
@@ -34,7 +34,7 @@ function entry(value: unknown, path: string, retainSecret: boolean): void {
 /** Validate inside execute: later tool_call hooks may have changed schema-validated inputs. */
 function request(input: unknown): Request {
   if (!object(input) || Object.keys(input).some((key) => !["scope", "path", "operation", "value", "identity", "previousIdentity"].includes(key))) throw new Error();
-  if (!["ephemeral", "project", "global"].includes(String(input.scope)) || typeof input.path !== "string" || !SETTINGS_PATHS.includes(input.path)) throw new Error();
+  if (!["session", "project", "global"].includes(String(input.scope)) || typeof input.path !== "string" || !SETTINGS_PATHS.includes(input.path)) throw new Error();
   const op = input.operation;
   if (!["set", "inherit", "upsert", "remove"].includes(String(op))) throw new Error();
   if ((op === "set" || op === "upsert") !== ("value" in input) || input.value === undefined && "value" in input) throw new Error();
@@ -52,7 +52,7 @@ function request(input: unknown): Request {
       // The backend validates ranges/enums and sparse target values, including shadowed ones.
       if (object(input.value) || Array.isArray(input.value)) throw new Error();
     }
-    if (input.path === "sandbox_name" && input.value === null && input.scope !== "ephemeral") throw new Error();
+    if (input.path === "sandbox_name" && input.value === null && input.scope !== "session") throw new Error();
   }
   return structuredClone(input) as Request;
 }
@@ -88,7 +88,7 @@ function session(ctx: ExtensionContext): string { return JSON.stringify([ctx.ses
 export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void {
   pi.registerTool({
     name: "msb_config_get", label: "Inspect Microsandbox settings",
-    description: "Read all desired settings, sparse global/project/ephemeral layers, provenance, warnings and known adopted runtime state as JSON. Secrets and credential references are masked. No writes, bootstrap, sandbox start or reload; works headlessly.",
+    description: "Read all desired settings, sparse Global/Project/Session layers, provenance, warnings and known adopted runtime state as JSON. Secrets and credential references are masked. No writes, bootstrap, sandbox start or reload; works headlessly.",
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_id, params) {
       try {
@@ -99,7 +99,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
   });
   pi.registerTool({
     name: "msb_config_set", label: "Propose Microsandbox setting",
-    description: "Propose ONE setting operation in ONE explicit scope. Every invocation requires fresh, No-first user approval. No headless mutation. Arrays set replaces/clears the whole list; prefer native upsert/remove to preserve siblings and credentials. Ephemeral lasts only this session. No lifecycle/reset/file-path overrides.",
+    description: "Propose ONE setting operation in ONE explicit scope. Every invocation requires fresh, No-first user approval. No headless mutation. Arrays set replaces/clears the whole list; prefer native upsert/remove to preserve siblings and credentials. Session is memory-only until session/workspace change or shutdown. No lifecycle/reset/file-path overrides.",
     parameters, executionMode: "sequential",
     // Arguments may contain credentials or repeat them in arbitrary identity fields.
     // Until execute has produced a bound sanitized review, display no argument data.
@@ -114,7 +114,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
       const lines = details.review ? settingsDiff(details.review as Record<string, unknown>) : [];
       return new Text([
         theme.fg(failed ? "error" : "muted", settingsOutcome(details)),
-        ...formatSettingsDiff(expanded ? lines : lines.slice(0, 1), theme),
+        ...formatSettingsDiff(expanded ? lines : lines.slice(0, 2), theme),
       ].join("\n"), 0, 0);
     },
     async execute(_id, params, signal, _onUpdate, ctx) {
@@ -137,7 +137,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
           if (abort.aborted || identity !== session(ctx)) throw new SettingsConflictError();
           if (runtimeBefore !== JSON.stringify(runtime(control))) throw new SettingsConflictError();
         };
-        draft = await editor.open(input.scope === "ephemeral" ? "temporary" : input.scope);
+        draft = await editor.open(input.scope === "session" ? "temporary" : input.scope);
         mutate(draft, input);
         const preview = await (control.previewSettings?.(draft) ?? draft.preview());
         const review = await draft.reviewForApproval(preview.effect, runtime(control));
@@ -159,7 +159,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
       } catch (error) {
         if (phase === "reload") return setterResult({ outcome: "saved_but_reload_failed", saved, reloaded: false, reason: "Settings were saved but not fully activated. Inspect settings/runtime and request a new approved change or use /msb to reload." });
         if (signal?.aborted) return setterResult({ outcome: "cancelled" });
-        if (error instanceof SettingsConflictError) return setterResult({ outcome: "conflict", saved: false, reloaded: false, reason: "Sources, ephemeral settings, session or runtime changed. Request a fresh review; nothing was retried." });
+        if (error instanceof SettingsConflictError) return setterResult({ outcome: "conflict", saved: false, reloaded: false, reason: "Sources, Session settings, session identity or runtime changed. Request a fresh review; nothing was retried." });
         return setterResult({ outcome: phase === "commit" ? "apply_failed" : "rejected", saved: phase === "commit" ? "unknown" : false, reloaded: false,
           reason: phase === "commit" ? "Persistence failed; storage may have changed after an I/O error. Inspect before retrying. Runtime was not reloaded." : "Invalid or unavailable settings proposal. Check setting, scope, value shape, credential references and mount safety. Nothing applied." });
       } finally { draft?.discard(); release?.(); }

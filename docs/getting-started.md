@@ -67,7 +67,7 @@ Resources focused.
 Settings edit desired policy; Status contains read-only `[runtime]` metadata,
 not duplicated settings. A single-line contextual footer stays at the bottom. Use j/k and h/l (or arrows),
 e/a/d to edit/add/delete-an-entry-or-inherit-a-scalar, and q to close. Each change
-offers current running sandbox, project defaults, global defaults, or Cancel.
+offers Session, Project, Global, or Cancel.
 Apply reloads this sandbox automatically; others pick up defaults on next
 start/reload. Review any restart/promotion/shadowing warning before confirming.
 Actions contains enable/off/reload/logs/prune. This panel requires

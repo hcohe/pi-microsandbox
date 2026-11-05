@@ -37,7 +37,7 @@ test("config-template is fully commented and covers current default settings", (
 
 test("config-template describes host-owned configuration without compatibility guidance", () => {
   const template = defaultConfigTemplate(DEFAULT_CONFIG);
-  assert.match(template, /Precedence: built-ins < environment < this default\.toml\n## < host-owned per-project override < temporary panel settings/);
+  assert.match(template, /Precedence: built-ins < environment < Global \(this default\.toml\)\n## < Project \(host-owned override\) < Session \(memory only\)/);
   assert.match(template, /projects\/Code\/app\/config\.toml/);
   assert.match(template, /PI_MSB_\* environment settings and the \/msb control panel/);
   assert.doesNotMatch(template, /legacy|deprecated|migrat|PI_MSB_CONFIG_FILE|CONFIG_DIR_NAME/i);
@@ -193,4 +193,20 @@ test("config-template is not bootstrapped by read-only config resolution", async
   const input = { cwd: workspace, agentDir, projectTrusted: true, configDirName: ".pi", env: {} };
   assert.equal((await resolveConfig(input)).config.cpus, DEFAULT_CONFIG.cpus);
   await assert.rejects(stat(file), { code: "ENOENT" });
+});
+
+test("config-template and documentation use the same three human scope names and session tool contract", async () => {
+  const template = defaultConfigTemplate(DEFAULT_CONFIG);
+  assert.match(template, /applies each change to Session, Project or Global scope/);
+  assert.match(template, /tmpfs is ephemeral/); // Guest storage is not a configuration scope.
+  for (const file of ["README.md", "docs/commands.md", "docs/configuration.md", "docs/development.md", "docs/getting-started.md", "docs/safety.md", "docs/settings-backend.md", "docs/tools.md"]) {
+    const text = await readFile(new URL(`../../${file}`, import.meta.url), "utf8");
+    for (const label of ["Global", "Project", "Session"]) assert.ok(text.includes(label), `${file}: ${label}`);
+    assert.doesNotMatch(text, /(?:ephemeral|temporary) (?:settings|changes|panel)|ephemeral\/project|current-running-only|Current-only|Apply for current running|Apply for all sandboxes|layers\.ephemeral|\.ephemeral`|"scope":"ephemeral"/, file);
+  }
+  const tools = await readFile(new URL("../../docs/tools.md", import.meta.url), "utf8");
+  assert.match(tools, /`session`, `project`, `global`/);
+  assert.match(tools, /"scope":"session"/);
+  assert.match(tools, /`temporary` \(Session\)/);
+  for (const label of ["Global", "Project", "Session"]) assert.ok(tools.includes(`Scope: ${label}`));
 });

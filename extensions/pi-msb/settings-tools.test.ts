@@ -46,7 +46,7 @@ async function fixture(t: TestContext, missing = false) {
   return { root, cwd, input, paths, editor, control, tools, ctx, reviews, call, get, reloads: () => reloads, failReload: () => { failReload = true; },
     choose: (callback: typeof select) => { select = callback; }, switchContext: () => { id = "two"; }, adopt: (policy: RuntimePolicySnapshot) => { adopted = policy; } };
 }
-const set = (scope = "ephemeral", path = "show_footer", value: unknown = false) => ({ scope, path, operation: "set", value });
+const set = (scope = "session", path = "show_footer", value: unknown = false) => ({ scope, path, operation: "set", value });
 const noPrivate = (value: unknown) => assert.doesNotMatch(JSON.stringify(value), /PRIVATE_SENTINEL|\$ENV:|\$FILE:|\/private\/reference|UNRECOGNIZED_RAW_VALUE/);
 
 test("msb_config_get: complete JSON inventory, raw layers, origins and headless read without bootstrap", async (t) => {
@@ -59,7 +59,7 @@ test("msb_config_get: complete JSON inventory, raw layers, origins and headless 
     assert.notEqual(leaf, undefined, path);
     assert.ok(got.details.origins[path]);
   }
-  assert.deepEqual(got.details.layers, { global: {}, project: {}, ephemeral: {} });
+  assert.deepEqual(got.details.layers, { global: {}, project: {}, session: {} });
   assert.equal(got.details.desired.sandbox_name, null);
   assert.equal(got.details.runtime.adopted, null);
   assert.equal(f.reloads(), 0); assert.equal(f.reviews.length, 0); assert.deepEqual(f.editor.temporary(), {});
@@ -77,7 +77,7 @@ test("msb_config_get: all layers and default/environment/legacy provenance remai
   const { details } = await f.get();
   assert.equal(details.desired.cpus, 4); assert.equal(details.origins.cpus, "host-project");
   assert.equal(details.origins.memory_mib, "env"); assert.equal(details.origins.image, "defaults");
-  assert.equal(details.layers.project.cpus, 4); assert.equal(details.layers.ephemeral.show_footer, false);
+  assert.equal(details.layers.project.cpus, 4); assert.equal(details.layers.session.show_footer, false);
   assert.deepEqual(details.runtime.adopted.settings, { cpus: 1 });
 });
 
@@ -94,7 +94,7 @@ secrets = [{ env = "A", value = "LITERAL_PRIVATE_SENTINEL", allow_hosts = ["a.ex
   assert.equal("unknown_field" in got.details.layers.global, false);
   const changed = await f.call({ scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["new.example"] } });
   assert.equal(changed.details.outcome, "applied"); noPrivate(changed); noPrivate(f.reviews);
-  f.failReload(); const failed = await f.call(set("ephemeral", "allow_host_execution", true));
+  f.failReload(); const failed = await f.call(set("session", "allow_host_execution", true));
   assert.equal(failed.details.outcome, "saved_but_reload_failed"); noPrivate(failed);
   await writeFile(f.paths.project, 'cpus = "INVALID_PRIVATE_SENTINEL"\n');
   noPrivate(await f.get()); assert.equal((await f.get()).details.outcome, "rejected");
@@ -102,9 +102,10 @@ secrets = [{ env = "A", value = "LITERAL_PRIVATE_SENTINEL", allow_hosts = ["a.ex
 
 test("msb_config_set: exact one scope/operation schema; invalid, removed and unsafe proposals cannot review or mutate", async (t) => {
   const f = await fixture(t);
-  const invalid = [set("temporary"), set("ephemeral", "host_ro_allowlist", []), set("ephemeral", "cpus.foo", 1), set("ephemeral", "network", {}), set("project", "sandbox_name", null), set("ephemeral", "cpus", 0), set("ephemeral", "cpus", {}),
+  assert.deepEqual((f.tools.get("msb_config_set")!.parameters as any).properties.scope.anyOf.map((item: any) => item.const), ["session", "project", "global"]);
+  const invalid = [set("ephemeral"), set("temporary"), set("Session"), set("workspace"), set("session", "host_ro_allowlist", []), set("session", "cpus.foo", 1), set("session", "network", {}), set("project", "sandbox_name", null), set("session", "cpus", 0), set("session", "cpus", {}),
     { ...set(), auto_approve: true }, { ...set(), file: "/tmp/forbidden" }, { ...set(), identity: "unexpected" }, { ...set(), previousIdentity: "unexpected" }, { ...set(), operations: [] },
-    { scope: "ephemeral", path: "cpus", operation: "remove", identity: "a" },
+    { scope: "session", path: "cpus", operation: "remove", identity: "a" },
     { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], value: "<redacted>" } },
     { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], value: "$ENV:[REDACTED]" } },
     set("global", "secrets", [{ env: "A", allowHosts: ["a.example"], value: "LITERAL_PRIVATE_SENTINEL", unknown: true }]),
@@ -136,14 +137,14 @@ test("msb_config_set: no UI and abort before/during/after review never mutate", 
   assert.deepEqual(f.editor.temporary(), {}); assert.equal(f.reloads(), 0);
 });
 
-for (const race of ["target", "other-file", "same-content-file", "ephemeral", "session", "context", "environment"] as const) {
+for (const race of ["target", "other-file", "same-content-file", "Session settings", "session", "context", "environment"] as const) {
   test(`msb_config_set: approval-bound ${race} race conflicts/cancels without retry`, async (t) => {
     const f = await fixture(t);
     f.choose(async (_title, _options, signal) => {
       if (race === "target") await writeFile(f.paths.project, "memory_mib = 4096\n");
       if (race === "other-file") await writeFile(f.paths.global, "auto_start = false\nblock_third_party = false\n");
       if (race === "same-content-file") await writeFile(f.paths.global, await readFile(f.paths.global, "utf8"));
-      if (race === "ephemeral") { const d = await f.editor.open("temporary"); d.set("cpus", 2); await d.apply(); }
+      if (race === "Session settings") { const d = await f.editor.open("temporary"); d.set("cpus", 2); await d.apply(); }
       if (race === "session") { f.editor.endSession(); assert.equal(signal?.aborted, true); }
       if (race === "context") f.switchContext();
       if (race === "environment") f.input.env!.PI_MSB_CPUS = "2";
@@ -169,7 +170,7 @@ test("msb_config_set: shared modal lease rejects concurrent tools/panel without 
   assert.equal((await f.call(set("global"))).details.outcome, "rejected"); lease.release();
 });
 
-for (const scope of ["global", "project", "ephemeral"]) {
+for (const scope of ["global", "project", "session"]) {
   test(`msb_config_set: ${scope} sparse scalar/entry/inherit isolation and credential retention`, async (t) => {
     const f = await fixture(t);
     await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nunknown = "UNRECOGNIZED_RAW_VALUE"\nsecrets = [{env="GLOBAL",value="$ENV:G",allow_hosts=["g.example"]}]\n');
@@ -179,9 +180,13 @@ for (const scope of ["global", "project", "ephemeral"]) {
     const own = scope === "global" ? "GLOBAL" : scope === "project" ? "PROJECT" : "TEMP";
     const got = await f.call({ scope, path: "secrets", operation: "upsert", value: { env: own, allowHosts: ["new.example"] } });
     assert.equal(got.details.outcome, "applied", JSON.stringify(got.details)); noPrivate(got);
-    const layer = scope === "ephemeral" ? f.editor.temporary() : parseTomlConfig(await readFile(f.paths[scope as "global" | "project"], "utf8"), "global").value;
+    assert.equal(got.details.review.scope, scope);
+    const label = scope[0]!.toUpperCase() + scope.slice(1);
+    assert.ok(f.reviews.at(-1)!.split("\n").includes(`Scope: ${label}`));
+    assert.ok(got.content[0].text.split("\n").includes(`Scope: ${label}`));
+    const layer = scope === "session" ? f.editor.temporary() : parseTomlConfig(await readFile(f.paths[scope as "global" | "project"], "utf8"), "global").value;
     const names = layer.secrets!.map((secret) => secret.env);
-    assert.equal(names.includes("TEMP"), scope === "ephemeral");
+    assert.equal(names.includes("TEMP"), scope === "session");
     if (scope === "global") { assert.deepEqual(names, ["GLOBAL"]); assert.match(await readFile(f.paths.global, "utf8"), /UNRECOGNIZED_RAW_VALUE/); }
     if (scope === "project") assert.deepEqual(names, ["PROJECT"]);
     assert.equal(layer.secrets!.find((secret) => secret.env === own)!.value, `$ENV:${own[0]}`);
@@ -199,7 +204,7 @@ test("msb_config_set: native scalar lists, rename, whole-list replacement/clear 
     { scope: "project", path: "pass_through_tools", operation: "upsert", value: "trusted" },
     { scope: "project", path: "pass_through_tools", operation: "upsert", value: "renamed", previousIdentity: "trusted" },
     { scope: "project", path: "pass_through_tools", operation: "remove", identity: "renamed" },
-    set("project", "pass_through_tools", ["replace"]), set("project", "pass_through_tools", []), set("ephemeral", "block_third_party", false),
+    set("project", "pass_through_tools", ["replace"]), set("project", "pass_through_tools", []), set("session", "block_third_party", false),
   ]) assert.equal((await f.call(proposal)).details.outcome, "applied");
   for (const title of f.reviews) {
     assert.match(title, /HOST/); assert.match(title, /without per-call host approval/);
@@ -425,7 +430,7 @@ test("compact review: secret host edit includes only selected entry and changed 
   const edit = { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["keep.example", "new.example"] } };
   const changed = await f.call(edit);
   const text = f.reviews.at(-1)!;
-  assert.match(text, /All projects · Secret TOKEN/);
+  assert.match(text, /Scope: Global\nSecret TOKEN/);
   assert.equal(text.split("\n").filter((line) => line.includes("TOKEN")).length, 1);
   assert.doesNotMatch(text, /Target:|upsert|Entry source|explicit/);
   assert.match(text, /- Hosts: old.example\n\+ Hosts: new.example/);
@@ -453,7 +458,7 @@ test("compact review: shadowed target baseline and retained higher-scope credent
   const text = f.reviews.at(-1)!; noPrivate(text);
   assert.match(text, /- Hosts: target.example/); assert.match(text, /\+ Hosts: changed.example/);
   assert.match(text, /Credential: <redacted> \(changed\)/);
-  assert.match(text, /Copies this entry from project into global/); assert.match(text, /Higher-priority/); assert.match(text, /Higher-priority settings still apply/);
+  assert.match(text, /Copies this entry from Project into Global/); assert.match(text, /Higher-priority/); assert.match(text, /Higher-priority settings still apply/);
   assert.doesNotMatch(text, /higher.example/);
 });
 
@@ -512,7 +517,7 @@ test("compact review: collection reorder, inherited assignment and removal recon
   assert.match(f.reviews.at(-1)!, /Entry order: \["A","B"\]/); assert.match(f.reviews.at(-1)!, /Entry order: \["B","A"\]/);
   assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Hosts/);
   await f.call({ scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["changed.example"] } });
-  assert.match(f.reviews.at(-1)!, /This project/);
+  assert.match(f.reviews.at(-1)!, /Scope: Project/);
   assert.match(f.reviews.at(-1)!, /Overrides inherited values/);
   assert.match(f.reviews.at(-1)!, /- Hosts: a.example\n\+ Hosts: changed.example/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|b.example/);
   await writeFile(f.paths.project, 'remove_secrets = ["A"]\n');
@@ -528,8 +533,15 @@ test("compact setter renderers: never echo raw arguments or full review JSON, pr
   const got = await f.call(set());
   for (const expanded of [false, true]) {
     const frame = tool.renderResult!(got, { expanded, isPartial: false } as any, theme, {} as any).render(100).join("\n");
-    assert.match(frame, /Saved · reloaded · runtime off/); assert.doesNotMatch(frame, /adoptedRuntime|provenance|effectiveToml|supportedPaths/);
+    assert.match(frame, /Saved · reloaded · runtime off/); assert.match(frame, /Scope: Session/); assert.match(frame, /Show footer/); assert.doesNotMatch(frame, /adoptedRuntime|provenance|effectiveToml|supportedPaths/);
     if (expanded) assert.match(frame, /\+ Show footer: false/);
+  }
+  for (const scope of ["ephemeral", "temporary"]) {
+    const historical = { ...got, details: { ...got.details, review: { ...got.details.review, scope } } };
+    for (const expanded of [false, true]) {
+      const frame = tool.renderResult!(historical, { expanded, isPartial: false } as any, theme, {} as any).render(100).join("\n");
+      assert.match(frame, /Scope: Session/); assert.doesNotMatch(frame, /ephemeral|temporary|RAW_PRIVATE_SENTINEL/);
+    }
   }
   f.failReload(); const failed = await f.call(set("global"));
   const frame = tool.renderResult!(failed, { expanded: false } as any, theme, {} as any).render(100).join("\n");
@@ -540,11 +552,11 @@ test("compact setter renderers: never echo raw arguments or full review JSON, pr
 
 test("compact review: actual restart/start and explicit host intents retain relevant consequences", async (t) => {
   const f = await fixture(t);
-  await f.call(set("ephemeral", "memory_mib", 4096));
+  await f.call(set("session", "memory_mib", 4096));
   assert.match(f.reviews.at(-1)!, /Restart: temporary guest data and nested containers may be lost/);
   assert.doesNotMatch(f.reviews.at(-1)!, /HOST/);
   await writeFile(f.paths.global, "auto_start = true\n");
-  await f.call(set("ephemeral", "show_footer", false));
+  await f.call(set("session", "show_footer", false));
   assert.match(f.reviews.at(-1)!, /May start the sandbox/);
   for (const [path, value, pattern] of [["allow_host_execution", true, /individual tool-call approval/], ["fallback_mode", "host", /Sandbox failure/], ["allow_skill_reads", true, /read from the HOST/]] as const) {
     await f.call(set("global", path, value)); assert.match(f.reviews.at(-1)!, pattern);
@@ -565,7 +577,7 @@ test("compact review: whole-list clear without an own assignment shows affected 
   const f = await fixture(t);
   await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="LOWER",value="LOWER_PRIVATE_SENTINEL",allow_hosts=["lower.example"]}]\n');
   await f.call(set("project", "secrets", []));
-  assert.match(f.reviews.at(-1)!, /This project/);
+  assert.match(f.reviews.at(-1)!, /Scope: Project/);
   assert.match(f.reviews.at(-1)!, /- Name: LOWER/); assert.match(f.reviews.at(-1)!, /- Hosts: \["lower.example"\]/);
   assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/); noPrivate(f.reviews);
 });
@@ -595,7 +607,7 @@ test("compact setter renderer: historical full-review results cannot fall back t
   const historical = { content: [{ type: "text" as const, text: "HISTORICAL_JSON_WALL" }], details: { outcome: "applied", saved: true, reloaded: true, runtimeStatus: "off", review: { desired: { old: "HISTORICAL_JSON_WALL" }, provenance: {} } } };
   for (const expanded of [false, true]) {
     const frame = f.tools.get("msb_config_set")!.renderResult!(historical, { expanded } as any, theme, {} as any).render(100).join("\n");
-    assert.match(frame, /Saved · reloaded · runtime off/); assert.doesNotMatch(frame, /HISTORICAL_JSON_WALL|provenance/);
+    assert.match(frame, /Saved · reloaded · runtime off/); assert.doesNotMatch(frame, /Scope:|HISTORICAL_JSON_WALL|provenance/);
   }
 });
 

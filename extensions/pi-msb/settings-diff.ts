@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { safeText } from "./control-panel.ts";
+import { safeText, settingsSourceLabel } from "./control-panel.ts";
 import type { SettingsCollectionIntent, SettingsReviewDelta, SettingsReviewFocus } from "./settings.ts";
 
 export interface SettingsDiffLine {
@@ -16,8 +16,6 @@ const fieldLabel = (field: string): string => ({
   host_path: "Host path", guest_path: "Guest path", host_env: "Host variables", cpus: "CPUs", memory_mib: "Memory (MiB)",
   remove_secrets: "Secret exclusions", "entry order": "Entry order", block_third_party: "Block third-party tools",
 }[field] ?? field.replace(/[_.]/g, " ").replace(/^./, (letter) => letter.toUpperCase()));
-const scopeLabel = (scope: unknown): string => ({ ephemeral: "This session", project: "This project", global: "All projects" }[String(scope)] ?? String(scope));
-const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "session", env: "environment" }[source] ?? source);
 const HOST_CONSEQUENCES: Readonly<Record<string, string>> = {
   pass_through_tools: "When listed: These tools run on the HOST without per-call host approval.",
   block_third_party: "When disabled: Unrecognized tools can run on the HOST without per-call host approval.",
@@ -51,9 +49,10 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
       }
     }
   };
+  context(`Scope: ${settingsSourceLabel(review.scope)}`);
   for (const focus of review.focus as SettingsReviewFocus[]) {
     const identity = focus.identity ? `${focus.previousIdentity && focus.previousIdentity !== focus.identity ? `${focus.previousIdentity} → ` : ""}${focus.identity}` : "";
-    context(`${scopeLabel(review.scope)} · ${focus.path === "secrets" && identity ? `Secret ${identity}` : focus.path === "mounts" && identity ? `Mount ${identity}` : `${fieldLabel(focus.path)}${identity ? ` · ${identity}` : ""}`}`);
+    context(`${focus.path === "secrets" && identity ? `Secret ${identity}` : focus.path === "mounts" && identity ? `Mount ${identity}` : `${fieldLabel(focus.path)}${identity ? ` · ${identity}` : ""}`}`);
     if (focus.changed && focus.baseline === "inherited" && focus.deltas.some((delta) => delta.before !== undefined)) context("Overrides inherited values.");
     deltas(focus.deltas, focus.identity);
     if (!focus.changed) context("No change.");
@@ -65,7 +64,7 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
     const collection = (review.collections as SettingsCollectionIntent[]).filter((item) => item.path === focus.path);
     for (const intent of collection) {
       if (["replace", "clear"].includes(intent.operation) && focus.changed) warning(intent.operation === "clear" ? "Clears this scope’s entire list." : "Replaces this scope’s entire list.");
-      if (intent.promoted) warning(`Copies this entry from ${originLabel(intent.source)} into ${String(review.scope)}; the higher scope still wins.`);
+      if (intent.promoted) warning(`Copies this entry from ${settingsSourceLabel(intent.source)} into ${settingsSourceLabel(review.scope)}; the higher scope still wins.`);
     }
     const shadowed = (review.shadowed as string[]).filter((path) => path === focus.path || path.startsWith(`${focus.path}[`));
     if (focus.shadowed || collection.some((item) => item.shadowed) || shadowed.length) warning("Higher-priority settings still apply.");

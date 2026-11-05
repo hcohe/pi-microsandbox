@@ -553,7 +553,7 @@ export class SettingsDraft {
     await this.#assertReviewState(this.#reviewState);
     return this.#sanitize({
       focus, mayStart: candidate.next.config.autoStart && !!adoptedRuntime && typeof adoptedRuntime === "object" && "status" in adoptedRuntime && adoptedRuntime.status !== "active",
-      adoptedRuntime, ...preview, effect, scope: this.scope === "temporary" ? "ephemeral" : this.scope,
+      adoptedRuntime, ...preview, effect, scope: this.scope === "temporary" ? "session" : this.scope,
       storage: { before: projectSettingsJson(this.#source.raw), changes: preview.changes },
       desired: { before: projectSettingsJson(this.#base.config), after: projectSettingsJson(candidate.next.config) },
     }, [this.#source.raw, this.#base.config, candidate.raw, candidate.temporary, candidate.next.config]);
@@ -761,7 +761,7 @@ export class SettingsEditor {
     const layers = {
       global: projectSettingsJson(raw[targets.paths.global] ?? {}),
       project: projectSettingsJson(raw[targets.paths.project] ?? {}),
-      ephemeral: projectSettingsJson(this.#temporary),
+      session: projectSettingsJson(this.#temporary),
     };
     const origins = Object.fromEntries(SETTINGS_PATHS.map((path) => [path, view.resolved.provenance[normalizeConfigPath(path).join(".")] ?? "defaults"]));
     this.assertRevision(revision);

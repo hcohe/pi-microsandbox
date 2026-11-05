@@ -6,19 +6,20 @@ Configure host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml`,
 created if missing as a fully commented reference on the first enabled session.
 Use host-owned per-project files for project-specific overrides, `PI_MSB_*`
 environment variables for launch settings, and the [`/msb` control panel](commands.md)
-to apply each change to the current running sandbox, project defaults or global
-defaults, or cancel. Collapsed settings trees sit directly below MICROSANDBOX and edit desired policy; Status shows
+to apply each change to Session, Project or Global, or cancel. Collapsed settings
+trees sit directly below MICROSANDBOX and edit desired policy; Status shows
 read-only runtime metadata, not duplicate settings.
 
 The model can inspect settings headlessly with `msb_config_get` or propose one
-ephemeral/project/global change with `msb_config_set`. Changes always require
+Session/Project/Global change with `msb_config_set`. Changes always require
 fresh explicit user approval; secrets and credential references are masked.
 See the [tool schemas and scope lifetimes](tools.md).
 
 Settings take precedence in this order: built-ins < environment
-< **host-owned defaults** < **host-owned project overrides** < **ephemeral settings**.
-Ephemeral settings are memory-only and authoritative, including empty lists;
-they are cleared when switching sessions or shutting down.
+< **Global** (host-owned defaults) < **Project** (host-owned overrides)
+< **Session**.
+Session settings are memory-only and authoritative, including empty lists;
+they are cleared when switching sessions/workspaces or shutting down.
 Keep configuration and credential files outside the mounted workspace and all
 writable mounts.
 
@@ -61,9 +62,9 @@ worktree. Configuration tools can change them only after explicit user approval:
 <agent-dir>/pi-microsandbox/projects/<home-relative-project-path>/config.toml
 ```
 
-`default.toml` supplies a host-owned baseline for **all projects**. A host-owned
-per-project `config.toml` overrides that baseline. Both layers take precedence
-over environment variables, but not deliberate ephemeral changes.
+`default.toml` supplies the **Global** baseline. The host-owned
+per-project `config.toml` supplies **Project** overrides. Both layers take precedence
+over environment variables, but not deliberate Session changes.
 For example, pin `fallback_mode = "block"` in `default.toml` and set a project's
 `memory_mib` in its host-owned override.
 
@@ -106,14 +107,14 @@ a proposal is open invalidates it; cancel and reopen before applying.
 
 Both host-owned files are loaded regardless of Pi's project trust state. They
 are applied after launch settings, with the project-specific file after `default.toml`.
-**Apply for current running sandbox only** places memory-only changes above both
+**Session** places memory-only changes above both
 files, never in the transcript. They reset on session switch/end, including
 resuming the same session. This action is unavailable without a running sandbox.
 **`d` (inherit)** on a scalar proposes removal of the chosen scope's assignment;
-collections only support individual entry removal. Actions → **Reset current
-sandbox overrides** clears only committed memory overrides, leaves project/global
+collections only support individual entry removal. Actions → **Reset Session
+overrides** clears only committed memory overrides, leaves Project/Global
 defaults unchanged, and reconfigures automatically after confirmation.
-Project/global apply persists only the intended operation, preserving unedited
+Project/Global apply persists only the intended operation, preserving unedited
 references without copying inherited credentials. Apply reloads this sandbox
 automatically; others pick up defaults on next start/reload. Higher overrides can
 shadow persisted defaults. See [apply scopes](commands.md#apply-scopes).

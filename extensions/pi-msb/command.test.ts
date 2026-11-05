@@ -95,7 +95,7 @@ test("launch diagnostics identify settings stage without echoing messages, cause
   } } });
   await createCommandHandler(f.control)("", f.ctx);
   const notice = f.notices.at(-1)?.message ?? "";
-  assert.match(notice, /project settings \(ConfigError\)/);
+  assert.match(notice, /Project settings \(ConfigError\)/);
   assert.match(notice, /directory permissions\/symlinks/);
   assert.doesNotMatch(notice, /PRIVATE_/);
   assert.deepEqual(f.calls, []);
@@ -107,12 +107,12 @@ test("launch I/O diagnostics allow only known safe codes; programmer errors prop
   const error = Object.assign(new Error("PRIVATE_IO_SENTINEL"), { code: "EACCES" });
   Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async () => { throw error; } } });
   await createCommandHandler(f.control)("", f.ctx);
-  assert.match(f.notices.at(-1)!.message, /ephemeral settings \(Error \/ EACCES\)/);
+  assert.match(f.notices.at(-1)!.message, /Session settings \(Error \/ EACCES\)/);
   assert.doesNotMatch(f.notices.at(-1)!.message, /PRIVATE_/);
   Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async () => { throw new TypeError("PRIVATE_PROGRAMMER_SENTINEL", { cause: error }); } } });
   await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
     assert.ok(error instanceof PanelLaunchError);
-    assert.match(error.message, /ephemeral settings \(TypeError\)/);
+    assert.match(error.message, /Session settings \(TypeError\)/);
     assert.doesNotMatch(error.stack ?? "", /PRIVATE_/);
     assert.equal(error.cause, undefined);
     return true;

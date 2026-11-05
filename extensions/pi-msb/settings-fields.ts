@@ -30,7 +30,7 @@ const descriptions: Record<string, string> = {
 const help: Record<string, FieldHelp> = {
   image: { hint: "The image your sandbox runs", editorHelp: "Enter a nonempty guest image name; prefer a verified digest.\nExample format: registry.example.com/team/image@sha256:<verified-digest>\nCustom images must include the required runtime tools." },
   pull_policy: { hint: "When to download the image", editorHelp: "Choose when the guest image may be downloaded.\nFor example, if-missing reuses a locally available image.", choiceHelp: { always: "Download on every start.", "if-missing": "Download only when the image is not available locally.", never: "Use only a local image; fail if it is missing." } },
-  sandbox_name: { hint: "A name for your sandbox", editorHelp: "Enter a sandbox name, or go back to choose the automatic session name.\nExample: my-project\nAutomatic names can only be applied to the current session." },
+  sandbox_name: { hint: "A name for your sandbox", editorHelp: "Enter a sandbox name, or go back to choose the automatic session name.\nExample: my-project\nAutomatic names require Session scope." },
   bootstrap_tools: { hint: "How guest tools get installed", editorHelp: "Choose whether to install missing tools inside the guest.\nFor example, auto checks which tools the image needs.", choiceHelp: { auto: "Install missing guest tools when needed.", true: "Install missing guest tools when needed.", false: "Never bootstrap; the image must already provide the tools." } },
   cpus: { hint: "Processing power for the sandbox", editorHelp: "Enter a number from 1 to 64 for virtual CPUs.\nExample: 2" },
   memory_mib: { hint: "Memory for the sandbox", editorHelp: "Enter guest memory in MiB, at least 128.\nExample: 2048 (2 GiB)" },

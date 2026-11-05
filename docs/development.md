@@ -106,8 +106,8 @@ q close; input dispatch precedes all command bindings. Each operation creates
 an isolated private SettingsDraft and exposes themed scope action rows. Apply
 transfers only that intent, persists and automatically reloads; Cancel discards
 it before returning to committed settings. Forms expose scope actions directly.
-Current-only uses authoritative session memory and is unavailable without an
-active sandbox. Project/global defaults never broadcast to unrelated instances.
+Session uses authoritative session memory and is unavailable without an
+active sandbox. Project/Global defaults never broadcast to unrelated instances.
 `settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
 retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
 never renders plaintext or uses an Input undo/kill ring. The settings backend
