@@ -3,7 +3,7 @@ import { safeText, settingsSourceLabel } from "./control-panel.ts";
 import type { SettingsCollectionIntent, SettingsReviewDelta, SettingsReviewFocus } from "./settings.ts";
 
 export interface SettingsDiffLine {
-  kind: "context" | "added" | "removed" | "warning";
+  kind: "scope" | "context" | "added" | "removed" | "warning";
   label?: string;
   text: string;
 }
@@ -49,7 +49,7 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
       }
     }
   };
-  context(`Scope: ${settingsSourceLabel(review.scope)}`);
+  lines.push({ kind: "scope", label: "Scope", text: settingsSourceLabel(review.scope) });
   for (const focus of review.focus as SettingsReviewFocus[]) {
     const identity = focus.identity ? `${focus.previousIdentity && focus.previousIdentity !== focus.identity ? `${focus.previousIdentity} → ` : ""}${focus.identity}` : "";
     context(`${focus.path === "secrets" && identity ? `Secret ${identity}` : focus.path === "mounts" && identity ? `Mount ${identity}` : `${fieldLabel(focus.path)}${identity ? ` · ${identity}` : ""}`}`);
@@ -82,6 +82,7 @@ export function formatSettingsDiff(lines: SettingsDiffLine[], theme?: Pick<Theme
   return lines.map((line) => {
     const text = safeText(line.text);
     if (!theme) return `${line.kind === "added" ? "+ " : line.kind === "removed" ? "- " : line.kind === "warning" ? "! " : ""}${line.label ? `${safeText(line.label)}: ` : ""}${text}`;
+    if (line.kind === "scope") return (line.label ? theme.fg("muted", `${safeText(line.label)}: `) : "") + theme.fg("warning", text);
     if (line.kind === "context") return theme.fg("muted", text);
     if (line.kind === "warning") return theme.fg("warning", `! ${text}`);
     const role = line.kind === "added" ? "toolDiffAdded" : "toolDiffRemoved";

@@ -100,6 +100,7 @@ Approval looks like the HOST-command question: **Allow configuration change?**,
 a standalone `Scope: Session`, `Scope: Project`, or `Scope: Global` line
 and the affected item, a focused color-coded diff, and vertical **No / Yes**
 choices. There is no dashboard header, duplicate identity or routine source dump.
+Scope names use the theme’s warning color; the `Scope:` label stays muted.
 Native entry edits omit siblings and unchanged fields. Credentials/references stay `<redacted>`; a real rotation
 shows `(changed)` even when both safe values look identical. Retained credentials
 are not marked changed.

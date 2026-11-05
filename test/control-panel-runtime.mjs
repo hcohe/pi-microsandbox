@@ -243,6 +243,7 @@ try {
         assert.doesNotMatch(frame, /MICROSANDBOX|End seen/);
         const scopeLabel = proposal.scope[0].toUpperCase() + proposal.scope.slice(1);
         assert.ok(tui.stripTerminalSequences(frame).split("\n").some((line) => line.trim() === `Scope: ${scopeLabel}`));
+        assert.ok(frame.includes(theme.fg("muted", "Scope: ") + theme.fg("warning", scopeLabel)));
         const painted = () => {
           output = ""; ui.renderNow(true);
           if (ui instanceof tui.TuiMainScreen) return tui.stripTerminalSequences(ui.captureRenderState().previousLines.slice(-terminal.rows).join("\n"));
@@ -260,7 +261,7 @@ try {
           assert.ok(frame.includes(theme.fg("toolDiffRemoved", "- ")));
           assert.ok(frame.includes(theme.fg("toolDiffAdded", "+ ")));
           assert.notEqual(theme.fg("toolDiffRemoved", "test"), theme.fg("toolDiffAdded", "test"));
-          assert.ok(frame.includes(theme.fg("muted", "Scope: Global")));
+          assert.ok(frame.includes(theme.fg("muted", "Scope: ") + theme.fg("warning", "Global")));
           assert.ok(frame.includes(theme.fg("muted", "Secret TOKEN")));
           assert.doesNotMatch(frame, /HOST|adoptedRuntime|provenance|"before"|"after"/);
           if (action === "secret-rotation") {

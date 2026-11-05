@@ -15,7 +15,7 @@ function review(overrides: Partial<SettingsReviewFocus> = {}) {
 test("settings diff: focused semantic lines share plain RPC and themed output without guessing prefixes", () => {
   const lines = settingsDiff(review());
   assert.deepEqual(lines, [
-    { kind: "context", text: "Scope: Project" }, { kind: "context", text: "Secret TOKEN" },
+    { kind: "scope", label: "Scope", text: "Project" }, { kind: "context", text: "Secret TOKEN" },
     { kind: "removed", label: "Hosts", text: "old.example" }, { kind: "added", label: "Hosts", text: "new.example" },
   ]);
   assert.doesNotMatch(formatSettingsDiff(lines).join("\n"), /NOT_FOR_DISPLAY|keep.example|\x1b/);
@@ -62,6 +62,10 @@ for (const [scope, label] of [["session", "Session"], ["project", "Project"], ["
   test(`settings diff: canonical scope line for ${scope}, including historical display aliases`, () => {
     const text = formatSettingsDiff(settingsDiff({ ...review(), scope })).join("\n");
     assert.equal(text, `Scope: ${label}\nSecret TOKEN\n- Hosts: old.example\n+ Hosts: new.example`);
+    const theme = { fg: (role: string, text: string) => `<${role}>${text}</${role}>`, bold: (text: string) => text };
+    const styled = formatSettingsDiff(settingsDiff({ ...review(), scope }), theme);
+    assert.equal(styled[0], `<muted>Scope: </muted><warning>${label}</warning>`);
+    assert.equal(formatSettingsDiff([{ kind: "context", text: `Scope: ${label}` }], theme)[0], `<muted>Scope: ${label}</muted>`);
     const promoted = { ...review(), scope: "global", collections: [{ path: "secrets", promoted: true, source: scope }] };
     assert.match(formatSettingsDiff(settingsDiff(promoted)).join("\n"), new RegExp(`Copies this entry from ${label} into Global;`));
   });
