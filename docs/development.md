@@ -59,8 +59,10 @@ Run `just dev-image` by itself when you only need to refresh the local image.
 `settings-tools.ts` registers `msb_config_get` and `msb_config_set`; the latter
 revalidates runtime arguments inside execute and always requests explicit
 approval. `settings-json.ts` is the strict JSON/redaction boundary, and
-`settings-approval.ts` provides a bounded scrollable Cancel-first public custom
-overlay in TUI (documented native selector in interactive RPC). `settings-diff.ts`
+`settings-approval.ts` uses public DynamicBorder/Text/SelectList components for a
+compact HOST-question-style No-first prompt (native No/Yes selector in RPC).
+A bottom overlay with explicit bounds prevents custom docks from clipping consent;
+short reviews use natural height and long ones scroll without hiding controls. `settings-diff.ts`
 shares semantic added/removed/context/warning lines across TUI, plain-text RPC,
 and setter results. Build display data only from the sanitized approval-bound
 review: private comparisons in SettingsDraft emit changed-field metadata before
@@ -81,7 +83,7 @@ Real-loader tests include a symlinked package entry and duplicate-winning foreig
 registrations under both selected runtimes. `control-panel-runtime.test.ts` also executes both actual
 loaded config tools using the native context and both terminal renderers,
 including actual theme diff colors, compact masked secret edits/rotations,
-quiet setter call/result rendering, scrollable review, Cancel default, Escape,
+quiet setter call/result rendering, scrollable review, No default, Escape,
 abort, deliberate approval, wrapped/narrow/tall/resize composition, live/restart fake-SDK reconciliation and
 focus restoration. SDK/terminals are
 doubled; none of these tests executes a live VM. Set `PI_PACKAGE_DIR` to this

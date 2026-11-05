@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { HOST_BOUNDARY_WARNINGS, safeText } from "./control-panel.ts";
+import { safeText } from "./control-panel.ts";
 import type { SettingsCollectionIntent, SettingsReviewDelta, SettingsReviewFocus } from "./settings.ts";
 
 export interface SettingsDiffLine {
@@ -7,9 +7,24 @@ export interface SettingsDiffLine {
   label?: string;
   text: string;
 }
-export const SETTINGS_APPROVAL_HEADING = "MICROSANDBOX · Review change";
+export const SETTINGS_APPROVAL_HEADING = "Allow configuration change?";
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const display = (value: unknown): string => value === undefined ? "inherit" : typeof value === "string" ? value : JSON.stringify(value);
+
+const fieldLabel = (field: string): string => ({
+  allow_hosts: "Hosts", "network.allow_hosts": "Hosts", credential: "Credential", env: "Name", readonly: "Read only",
+  host_path: "Host path", guest_path: "Guest path", host_env: "Host variables", cpus: "CPUs", memory_mib: "Memory (MiB)",
+  remove_secrets: "Secret exclusions", "entry order": "Entry order", block_third_party: "Block third-party tools",
+}[field] ?? field.replace(/[_.]/g, " ").replace(/^./, (letter) => letter.toUpperCase()));
+const scopeLabel = (scope: unknown): string => ({ ephemeral: "This session", project: "This project", global: "All projects" }[String(scope)] ?? String(scope));
+const originLabel = (source: string): string => ({ "host-default": "global", "host-project": "project", temporary: "session", env: "environment" }[source] ?? source);
+const HOST_CONSEQUENCES: Readonly<Record<string, string>> = {
+  pass_through_tools: "When listed: These tools run on the HOST without per-call host approval.",
+  block_third_party: "When disabled: Unrecognized tools can run on the HOST without per-call host approval.",
+  allow_skill_reads: "When enabled: Skills and generated prompts may be read from the HOST.",
+  allow_host_execution: "When enabled: Allows HOST execution after individual tool-call approval.",
+  fallback_mode: "With host fallback: Sandbox failure may run tools on the HOST.",
+};
 
 /** Accept only the sanitized, bound review, never tool arguments or a private preview. */
 export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[] {
@@ -18,12 +33,12 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
   if (!Array.isArray(review.focus)) return lines;
   const context = (text: string) => lines.push({ kind: "context", text });
   const warning = (text: string) => lines.push({ kind: "warning", text });
-  const deltas = (items: SettingsReviewDelta[]) => {
+  const deltas = (items: SettingsReviewDelta[], selectedEntry?: string) => {
     let entry: string | undefined;
     for (const delta of items) {
-      if (delta.entry !== entry) { entry = delta.entry; if (entry !== undefined) context(entry); }
+      if (delta.entry !== entry) { entry = delta.entry; if (entry !== undefined && entry !== selectedEntry) context(entry); }
       const { before, after, field } = delta;
-      const emit = (kind: "removed" | "added", value: unknown, changed = false) => lines.push({ kind, label: field, text: display(value) + (changed ? " (changed)" : "") });
+      const emit = (kind: "removed" | "added", value: unknown, changed = false) => lines.push({ kind, label: fieldLabel(field), text: display(value) + (changed ? " (changed)" : "") });
       if (Array.isArray(before) && Array.isArray(after)) {
         const removed = before.filter((item) => !after.some((other) => equal(item, other)));
         const added = after.filter((item) => !before.some((other) => equal(item, other)));
@@ -37,29 +52,29 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
     }
   };
   for (const focus of review.focus as SettingsReviewFocus[]) {
-    context(`${review.scope} · ${focus.path} · ${focus.operation}${focus.identity ? ` · ${focus.previousIdentity && focus.previousIdentity !== focus.identity ? `${focus.previousIdentity} → ` : ""}${focus.identity}` : ""}`);
-    context(`Target: ${focus.targetBefore}${focus.targetBefore !== focus.targetAfter ? ` → ${focus.targetAfter}` : ""}${focus.baseline === "inherited" && focus.changed ? " · compared with inherited baseline" : ""}`);
-    deltas(focus.deltas);
-    if (!focus.changed) context("No stored change (no-op).");
-    else if (!focus.effectiveChanged) context("Desired value unchanged; scope intent only.");
-    if (focus.reconciledDeltas.length) { context("Reconciles target-scope removal controls"); deltas(focus.reconciledDeltas); }
-    if (focus.inheritedDeltas.length) { context("Desired after inherit"); deltas(focus.inheritedDeltas); }
-    if (focus.operation === "inherit" && focus.changed) warning("Removes this scope's assignment; lower layers may take effect.");
-    if (focus.operation === "remove" && focus.changed) warning("Removes the selected entry from this scope's list.");
+    const identity = focus.identity ? `${focus.previousIdentity && focus.previousIdentity !== focus.identity ? `${focus.previousIdentity} → ` : ""}${focus.identity}` : "";
+    context(`${scopeLabel(review.scope)} · ${focus.path === "secrets" && identity ? `Secret ${identity}` : focus.path === "mounts" && identity ? `Mount ${identity}` : `${fieldLabel(focus.path)}${identity ? ` · ${identity}` : ""}`}`);
+    if (focus.changed && focus.baseline === "inherited" && focus.deltas.some((delta) => delta.before !== undefined)) context("Overrides inherited values.");
+    deltas(focus.deltas, focus.identity);
+    if (!focus.changed) context("No change.");
+    else if (!focus.effectiveChanged && !focus.shadowed) context("Saved settings change; current value stays the same.");
+    if (focus.reconciledDeltas.length) { context("Updates exclusions"); deltas(focus.reconciledDeltas); }
+    if (focus.inheritedDeltas.length) { context("Inherited changes"); deltas(focus.inheritedDeltas, focus.identity); }
+    if (focus.operation === "inherit" && focus.changed) warning("Removes this override; inherited settings may take effect.");
+    if (focus.operation === "remove" && focus.changed) warning("Removes this entry.");
     const collection = (review.collections as SettingsCollectionIntent[]).filter((item) => item.path === focus.path);
     for (const intent of collection) {
-      if (["replace", "clear"].includes(intent.operation) && focus.changed) warning(intent.operation === "clear" ? "Clears the whole target-scope list." : "Replaces the whole target-scope list.");
-      if (intent.promoted) warning(`Promotion: selected entry copied from ${intent.source} into ${review.scope}; higher scope still wins.`);
-      else if (focus.identity && intent.source !== "new entry") context(`Entry source: ${intent.source}`);
+      if (["replace", "clear"].includes(intent.operation) && focus.changed) warning(intent.operation === "clear" ? "Clears this scope’s entire list." : "Replaces this scope’s entire list.");
+      if (intent.promoted) warning(`Copies this entry from ${originLabel(intent.source)} into ${String(review.scope)}; the higher scope still wins.`);
     }
     const shadowed = (review.shadowed as string[]).filter((path) => path === focus.path || path.startsWith(`${focus.path}[`));
-    if (focus.shadowed || collection.some((item) => item.shadowed) || shadowed.length) warning("Shadowed: higher-precedence settings still win after saving.");
-    if (focus.replacesEntry && focus.changed) warning("Rename replaces an existing entry at the destination identity.");
-    if (focus.writableMount) warning("Writable mount: the guest can change actual HOST files.");
-    for (const path of focus.hostBypass) if (HOST_BOUNDARY_WARNINGS[path]) warning(HOST_BOUNDARY_WARNINGS[path]);
+    if (focus.shadowed || collection.some((item) => item.shadowed) || shadowed.length) warning("Higher-priority settings still apply.");
+    if (focus.replacesEntry && focus.changed) warning("Replaces the entry with this name.");
+    if (focus.writableMount) warning("This mount allows changes to HOST files.");
+    for (const path of focus.hostBypass) if (HOST_CONSEQUENCES[path]) warning(HOST_CONSEQUENCES[path]);
   }
-  if (review.effect === "restart" && (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed)) warning("Restart: guest ephemeral state and nested containers may be lost.");
-  if (review.mayStart && (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed)) warning("Reload may start the inactive sandbox (auto_start=true).");
+  if (review.effect === "restart" && (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed)) warning("Restart: temporary guest data and nested containers may be lost.");
+  if (review.mayStart && (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed)) warning("May start the sandbox because auto-start is enabled.");
   return lines;
 }
 

@@ -37,9 +37,9 @@ async function fixture(t: TestContext, missing = false) {
   registerConfigTools({ registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool) } as unknown as ExtensionAPI, control);
   let id = "one";
   const reviews: string[] = [];
-  let select: (title: string, options: string[], signal?: AbortSignal) => Promise<string | undefined> = async () => "Approve";
+  let select: (title: string, options: string[], signal?: AbortSignal) => Promise<string | undefined> = async () => "Yes";
   const ctx = { hasUI: true, mode: "rpc", cwd, sessionManager: { getSessionId: () => id }, ui: { select: async (title: string, options: string[], opts: { signal?: AbortSignal }) => {
-    reviews.push(title); assert.deepEqual(options, ["Cancel", "Approve"]); return select(title, options, opts.signal);
+    reviews.push(title); assert.deepEqual(options, ["No", "Yes"]); return select(title, options, opts.signal);
   } } } as unknown as ExtensionContext;
   const call = async (params: unknown, signal?: AbortSignal) => tools.get("msb_config_set")!.execute("id", params as any, signal, undefined, ctx) as Promise<{ details: any; content: any[] }>;
   const get = async () => tools.get("msb_config_get")!.execute("get", {}, undefined, undefined, ctx) as Promise<{ details: any; content: any[] }>;
@@ -114,12 +114,12 @@ test("msb_config_set: exact one scope/operation schema; invalid, removed and uns
   assert.equal(await readFile(f.paths.global, "utf8"), "auto_start = false\n");
 });
 
-test("msb_config_set: distinct cancel-first approval for every invocation, including no-op and inherit", async (t) => {
+test("msb_config_set: distinct No-first approval for every invocation, including no-op and inherit", async (t) => {
   const f = await fixture(t);
   f.choose(async () => undefined); assert.equal((await f.call(set())).details.outcome, "cancelled");
-  f.choose(async () => "Cancel"); assert.equal((await f.call(set())).details.outcome, "cancelled");
+  f.choose(async () => "No"); assert.equal((await f.call(set())).details.outcome, "cancelled");
   assert.deepEqual(f.editor.temporary(), {}); assert.equal(f.reloads(), 0);
-  f.choose(async () => "Approve"); assert.equal((await f.call(set())).details.outcome, "applied");
+  f.choose(async () => "Yes"); assert.equal((await f.call(set())).details.outcome, "applied");
   assert.equal((await f.call(set())).details.outcome, "no_op");
   assert.equal((await f.call({ scope: "project", path: "cpus", operation: "inherit" })).details.outcome, "no_op");
   assert.equal(f.reviews.length, 5); assert.equal(f.reloads(), 1);
@@ -130,7 +130,7 @@ test("msb_config_set: no UI and abort before/during/after review never mutate", 
   assert.equal((await f.call(set())).details.outcome, "rejected"); f.ctx.hasUI = true;
   const prior = AbortSignal.abort(); assert.equal((await f.call(set(), prior)).details.outcome, "cancelled");
   const controller = new AbortController();
-  f.choose(async (_title, _options, signal) => { assert.equal(signal?.aborted, false); controller.abort(); return "Approve"; });
+  f.choose(async (_title, _options, signal) => { assert.equal(signal?.aborted, false); controller.abort(); return "Yes"; });
   assert.equal((await f.call(set(), controller.signal)).details.outcome, "cancelled");
   f.choose(async () => { throw new Error("PRIVATE_SENTINEL"); }); noPrivate(await f.call(set()));
   assert.deepEqual(f.editor.temporary(), {}); assert.equal(f.reloads(), 0);
@@ -147,7 +147,7 @@ for (const race of ["target", "other-file", "same-content-file", "ephemeral", "s
       if (race === "session") { f.editor.endSession(); assert.equal(signal?.aborted, true); }
       if (race === "context") f.switchContext();
       if (race === "environment") f.input.env!.PI_MSB_CPUS = "2";
-      return "Approve";
+      return "Yes";
     });
     const got = await f.call(set("project"));
     assert.ok(["conflict", "cancelled"].includes(got.details.outcome), JSON.stringify(got.details));
@@ -164,7 +164,7 @@ test("msb_config_set: shared modal lease rejects concurrent tools/panel without 
   const first = f.call(set()); await ready;
   assert.equal((await f.call(set("global"))).details.outcome, "rejected");
   await assert.rejects(openControlPanel({ ui: { custom: async () => { throw new Error("must not open"); } }, waitForIdle: async () => {} } as any, f.control));
-  approve("Approve"); assert.equal((await first).details.outcome, "applied"); assert.equal(f.reviews.length, 1);
+  approve("Yes"); assert.equal((await first).details.outcome, "applied"); assert.equal(f.reviews.length, 1);
   const lease = f.editor.acquireInteraction()!;
   assert.equal((await f.call(set("global"))).details.outcome, "rejected"); lease.release();
 });
@@ -203,10 +203,21 @@ test("msb_config_set: native scalar lists, rename, whole-list replacement/clear 
   ]) assert.equal((await f.call(proposal)).details.outcome, "applied");
   for (const title of f.reviews) {
     assert.match(title, /HOST/); assert.match(title, /without per-call host approval/);
-    assert.equal(title.includes("pass_through_tools"), !title.includes("block_third_party"));
+    assert.equal(title.includes("These tools run"), !title.includes("Unrecognized tools"));
   }
-  assert.match(f.reviews[3]!, /Replaces the whole target-scope list/);
-  assert.match(f.reviews[4]!, /Clears the whole target-scope list/);
+  assert.match(f.reviews[3]!, /Replaces this scope’s entire list/);
+  assert.match(f.reviews[4]!, /Clears this scope’s entire list/);
+});
+
+for (const [path, before, after, condition] of [
+  ["allow_host_execution", true, false, /When enabled:.*HOST execution/],
+  ["block_third_party", false, true, /When disabled:.*HOST without per-call host approval/],
+] as const) test(`compact review: tightening ${path} qualifies its HOST warning`, async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.project, `${path} = ${JSON.stringify(before)}\n`);
+  const got = await f.call(set("project", path, after));
+  assert.equal(got.details.outcome, "applied");
+  assert.match(f.reviews.at(-1)!, condition);
 });
 
 test("msb_config_set: mount native CRUD retains canonical workspace/symlink/protected-guest safety", async (t) => {
@@ -259,7 +270,7 @@ test("msb_config_set: proposed mount/FILE canonical identities are bound to the 
     if (kind === "mount") { await mkdir(first); await mkdir(second); }
     else { await writeFile(first, "FIRST_PRIVATE_SENTINEL"); await writeFile(second, "SECOND_PRIVATE_SENTINEL"); }
     await symlink(first, alias);
-    f.choose(async () => { await rm(alias); await symlink(second, alias); return "Approve"; });
+    f.choose(async () => { await rm(alias); await symlink(second, alias); return "Yes"; });
     const proposal = kind === "mount"
       ? { scope: "project", path: "mounts", operation: "upsert", value: { type: "dir", hostPath: alias, guestPath: "/mnt/data", readonly: true, options: [] } }
       : { scope: "project", path: "secrets", operation: "upsert", value: { env: "TOKEN", value: `$FILE:${alias}`, allowHosts: ["a.example"] } };
@@ -414,21 +425,23 @@ test("compact review: secret host edit includes only selected entry and changed 
   const edit = { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["keep.example", "new.example"] } };
   const changed = await f.call(edit);
   const text = f.reviews.at(-1)!;
-  assert.match(text, /global · secrets · upsert · TOKEN/);
-  assert.match(text, /- allow_hosts: old.example\n\+ allow_hosts: new.example/);
-  assert.doesNotMatch(text, /keep.example|UNRELATED|unrelated.example|credential|HOST|block_third_party|desired|provenance|adoptedRuntime|"before"|"after"/);
+  assert.match(text, /All projects · Secret TOKEN/);
+  assert.equal(text.split("\n").filter((line) => line.includes("TOKEN")).length, 1);
+  assert.doesNotMatch(text, /Target:|upsert|Entry source|explicit/);
+  assert.match(text, /- Hosts: old.example\n\+ Hosts: new.example/);
+  assert.doesNotMatch(text, /keep.example|UNRELATED|unrelated.example|Credential|HOST|block_third_party|desired|provenance|adoptedRuntime|"before"|"after"/);
   assert.doesNotMatch(changed.content[0].text, /UNRELATED|keep.example|provenance|adoptedRuntime/);
   assert.doesNotMatch(text, /\x1b/); noPrivate(changed); noPrivate(text);
   assert.equal((await f.call(edit)).details.outcome, "no_op");
-  assert.match(f.reviews.at(-1)!, /No stored change/); assert.doesNotMatch(f.reviews.at(-1)!, /credential|changed\)/);
+  assert.match(f.reviews.at(-1)!, /No change/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|changed\)/);
   const reference = `$FILE:${join(f.root, "ROTATED_PRIVATE_SENTINEL")}`;
   await writeFile(reference.slice(6), "ROTATED_BYTES_PRIVATE_SENTINEL");
   const rotated = await f.call({ ...edit, value: { ...edit.value, value: reference } });
   assert.equal(rotated.details.outcome, "applied"); noPrivate(rotated);
-  assert.match(f.reviews.at(-1)!, /- credential: <redacted>\n\+ credential: <redacted> \(changed\)/);
-  assert.doesNotMatch(f.reviews.at(-1)!, /allow_hosts|keep.example|old.example|new.example|UNRELATED/);
+  assert.match(f.reviews.at(-1)!, /- Credential: <redacted>\n\+ Credential: <redacted> \(changed\)/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /Hosts|keep.example|old.example|new.example|UNRELATED/);
   assert.equal((await f.call({ ...edit, value: { ...edit.value, value: reference } })).details.outcome, "no_op");
-  assert.doesNotMatch(f.reviews.at(-1)!, /credential/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /Credential/);
 });
 
 test("compact review: shadowed target baseline and retained higher-scope credential promotion are truthful", async (t) => {
@@ -438,9 +451,9 @@ test("compact review: shadowed target baseline and retained higher-scope credent
   const got = await f.call({ scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["changed.example"] } });
   assert.equal(got.details.outcome, "applied");
   const text = f.reviews.at(-1)!; noPrivate(text);
-  assert.match(text, /- allow_hosts: target.example/); assert.match(text, /\+ allow_hosts: changed.example/);
-  assert.match(text, /credential: <redacted> \(changed\)/);
-  assert.match(text, /Promotion:.*host-project.*global/); assert.match(text, /Shadowed/); assert.match(text, /Desired value unchanged; scope intent only/);
+  assert.match(text, /- Hosts: target.example/); assert.match(text, /\+ Hosts: changed.example/);
+  assert.match(text, /Credential: <redacted> \(changed\)/);
+  assert.match(text, /Copies this entry from project into global/); assert.match(text, /Higher-priority/); assert.match(text, /Higher-priority settings still apply/);
   assert.doesNotMatch(text, /higher.example/);
 });
 
@@ -449,14 +462,14 @@ test("compact review: inherit/no-op and shadowed bypass intent keep only relevan
   await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nblock_third_party = false\n');
   await writeFile(f.paths.project, 'cpus = 4\nblock_third_party = true\n');
   await f.call(set("global", "cpus", 5));
-  assert.match(f.reviews.at(-1)!, /- cpus: 3\n\+ cpus: 5/); assert.match(f.reviews.at(-1)!, /Shadowed/); assert.doesNotMatch(f.reviews.at(-1)!, /HOST|block_third_party/);
+  assert.match(f.reviews.at(-1)!, /- CPUs: 3\n\+ CPUs: 5/); assert.match(f.reviews.at(-1)!, /Higher-priority/); assert.doesNotMatch(f.reviews.at(-1)!, /HOST|block_third_party/);
   await f.call(set("global", "block_third_party", false));
-  assert.match(f.reviews.at(-1)!, /No stored change/); assert.match(f.reviews.at(-1)!, /HOST.*block_third_party = false/); assert.match(f.reviews.at(-1)!, /Shadowed/);
+  assert.match(f.reviews.at(-1)!, /No change/); assert.match(f.reviews.at(-1)!, /Unrecognized tools can run on the HOST/); assert.match(f.reviews.at(-1)!, /Higher-priority/);
   await f.call({ scope: "project", path: "block_third_party", operation: "inherit" });
-  assert.match(f.reviews.at(-1)!, /Target: explicit → inherit/); assert.match(f.reviews.at(-1)!, /Desired after inherit/);
-  assert.match(f.reviews.at(-1)!, /\+ block_third_party: false/); assert.match(f.reviews.at(-1)!, /HOST.*block_third_party = false/);
+  assert.match(f.reviews.at(-1)!, /Removes this override/); assert.match(f.reviews.at(-1)!, /Inherited changes/);
+  assert.match(f.reviews.at(-1)!, /\+ Block third-party tools: false/); assert.match(f.reviews.at(-1)!, /Unrecognized tools can run on the HOST/);
   await f.call({ scope: "project", path: "block_third_party", operation: "inherit" });
-  assert.match(f.reviews.at(-1)!, /No stored change/); assert.match(f.reviews.at(-1)!, /HOST/);
+  assert.match(f.reviews.at(-1)!, /No change/); assert.match(f.reviews.at(-1)!, /HOST/);
   assert.doesNotMatch(f.reviews.at(-1)!, /pass_through_tools|allow_skill_reads|fallback_mode|Restart/);
 });
 
@@ -466,14 +479,14 @@ test("compact review: native secret rename/remove and whole-list set/clear show 
   const b = { env: "B", value: "B_PRIVATE_SENTINEL", allowHosts: ["b.example"] };
   await f.call(set("global", "secrets", [a, b]));
   await f.call({ scope: "global", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "RENAMED", allowHosts: ["a.example"] } });
-  assert.match(f.reviews.at(-1)!, /A → RENAMED/); assert.match(f.reviews.at(-1)!, /- env: A\n\+ env: RENAMED/);
-  assert.doesNotMatch(f.reviews.at(-1)!, /credential|allow_hosts|b.example/);
+  assert.match(f.reviews.at(-1)!, /A → RENAMED/); assert.match(f.reviews.at(-1)!, /- Name: A\n\+ Name: RENAMED/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Hosts|b.example/);
   await f.call({ scope: "global", path: "secrets", operation: "remove", identity: "RENAMED" });
-  assert.match(f.reviews.at(-1)!, /- env: RENAMED/); assert.match(f.reviews.at(-1)!, /Removes the selected entry/); assert.doesNotMatch(f.reviews.at(-1)!, /b.example/);
+  assert.match(f.reviews.at(-1)!, /- Name: RENAMED/); assert.match(f.reviews.at(-1)!, /Removes this entry/); assert.doesNotMatch(f.reviews.at(-1)!, /b.example/);
   await f.call(set("global", "secrets", [{ ...b, allowHosts: ["new.example"] }]));
-  assert.match(f.reviews.at(-1)!, /Replaces the whole target-scope list/); assert.match(f.reviews.at(-1)!, /- allow_hosts: b.example\n\+ allow_hosts: new.example/); assert.doesNotMatch(f.reviews.at(-1)!, /credential|env:/);
+  assert.match(f.reviews.at(-1)!, /Replaces this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Hosts: b.example\n\+ Hosts: new.example/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Name:/);
   await f.call(set("global", "secrets", []));
-  assert.match(f.reviews.at(-1)!, /Clears the whole target-scope list/); assert.match(f.reviews.at(-1)!, /- credential: <redacted>/);
+  assert.match(f.reviews.at(-1)!, /Clears this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/);
 });
 
 test("compact review: mount edits/rename and scalar-list edits omit unchanged fields", async (t) => {
@@ -482,12 +495,12 @@ test("compact review: mount edits/rename and scalar-list edits omit unchanged fi
   const mount = { type: "dir", hostPath: data, guestPath: "/mnt/data", readonly: true, options: [] };
   await f.call({ scope: "global", path: "mounts", operation: "upsert", value: mount });
   await f.call({ scope: "global", path: "mounts", operation: "upsert", value: { ...mount, readonly: false } });
-  assert.match(f.reviews.at(-1)!, /- readonly: true\n\+ readonly: false/); assert.doesNotMatch(f.reviews.at(-1)!, /host_path|options|type:/);
+  assert.match(f.reviews.at(-1)!, /- Read only: true\n\+ Read only: false/); assert.doesNotMatch(f.reviews.at(-1)!, /Host path|Options|Type:/);
   await f.call({ scope: "global", path: "mounts", operation: "upsert", previousIdentity: "/mnt/data", value: { ...mount, readonly: false, guestPath: "/mnt/renamed" } });
-  assert.match(f.reviews.at(-1)!, /- guest_path: \/mnt\/data\n\+ guest_path: \/mnt\/renamed/); assert.doesNotMatch(f.reviews.at(-1)!, /readonly:|host_path/);
+  assert.match(f.reviews.at(-1)!, /- Guest path: \/mnt\/data\n\+ Guest path: \/mnt\/renamed/); assert.doesNotMatch(f.reviews.at(-1)!, /Read only:|Host path/);
   await f.call(set("global", "host_env", ["KEEP", "OLD"]));
   await f.call({ scope: "global", path: "host_env", operation: "upsert", value: "NEW", previousIdentity: "OLD" });
-  assert.match(f.reviews.at(-1)!, /- host_env: OLD\n\+ host_env: NEW/); assert.doesNotMatch(f.reviews.at(-1)!, /KEEP|HOST/);
+  assert.match(f.reviews.at(-1)!, /- Host variables: OLD\n\+ Host variables: NEW/); assert.doesNotMatch(f.reviews.at(-1)!, /KEEP|HOST/);
 });
 
 test("compact review: collection reorder, inherited assignment and removal reconciliation remain visible", async (t) => {
@@ -496,14 +509,15 @@ test("compact review: collection reorder, inherited assignment and removal recon
   const b = { env: "B", value: "B_PRIVATE_SENTINEL", allowHosts: ["b.example"] };
   await f.call(set("global", "secrets", [a, b]));
   await f.call(set("global", "secrets", [b, a]));
-  assert.match(f.reviews.at(-1)!, /entry order: \["A","B"\]/); assert.match(f.reviews.at(-1)!, /entry order: \["B","A"\]/);
-  assert.doesNotMatch(f.reviews.at(-1)!, /credential|allow_hosts/);
+  assert.match(f.reviews.at(-1)!, /Entry order: \["A","B"\]/); assert.match(f.reviews.at(-1)!, /Entry order: \["B","A"\]/);
+  assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Hosts/);
   await f.call({ scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["changed.example"] } });
-  assert.match(f.reviews.at(-1)!, /Target: inherit → explicit · compared with inherited baseline/);
-  assert.match(f.reviews.at(-1)!, /- allow_hosts: a.example\n\+ allow_hosts: changed.example/); assert.doesNotMatch(f.reviews.at(-1)!, /credential|b.example/);
+  assert.match(f.reviews.at(-1)!, /This project/);
+  assert.match(f.reviews.at(-1)!, /Overrides inherited values/);
+  assert.match(f.reviews.at(-1)!, /- Hosts: a.example\n\+ Hosts: changed.example/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|b.example/);
   await writeFile(f.paths.project, 'remove_secrets = ["A"]\n');
   await f.call(set("project", "secrets", [a]));
-  assert.match(f.reviews.at(-1)!, /Reconciles target-scope removal controls/); assert.match(f.reviews.at(-1)!, /remove_secrets: A/);
+  assert.match(f.reviews.at(-1)!, /Updates exclusions/); assert.match(f.reviews.at(-1)!, /Secret exclusions: A/);
 });
 
 test("compact setter renderers: never echo raw arguments or full review JSON, preserve useful outcomes and failures", async (t) => {
@@ -515,7 +529,7 @@ test("compact setter renderers: never echo raw arguments or full review JSON, pr
   for (const expanded of [false, true]) {
     const frame = tool.renderResult!(got, { expanded, isPartial: false } as any, theme, {} as any).render(100).join("\n");
     assert.match(frame, /Saved · reloaded · runtime off/); assert.doesNotMatch(frame, /adoptedRuntime|provenance|effectiveToml|supportedPaths/);
-    if (expanded) assert.match(frame, /\+ show_footer: false/);
+    if (expanded) assert.match(frame, /\+ Show footer: false/);
   }
   f.failReload(); const failed = await f.call(set("global"));
   const frame = tool.renderResult!(failed, { expanded: false } as any, theme, {} as any).render(100).join("\n");
@@ -527,12 +541,12 @@ test("compact setter renderers: never echo raw arguments or full review JSON, pr
 test("compact review: actual restart/start and explicit host intents retain relevant consequences", async (t) => {
   const f = await fixture(t);
   await f.call(set("ephemeral", "memory_mib", 4096));
-  assert.match(f.reviews.at(-1)!, /Restart: guest ephemeral state and nested containers may be lost/);
+  assert.match(f.reviews.at(-1)!, /Restart: temporary guest data and nested containers may be lost/);
   assert.doesNotMatch(f.reviews.at(-1)!, /HOST/);
   await writeFile(f.paths.global, "auto_start = true\n");
   await f.call(set("ephemeral", "show_footer", false));
-  assert.match(f.reviews.at(-1)!, /Reload may start the inactive sandbox/);
-  for (const [path, value, pattern] of [["allow_host_execution", true, /individual tool-call approval/], ["fallback_mode", "host", /after sandbox failure/], ["allow_skill_reads", true, /HOST read/]] as const) {
+  assert.match(f.reviews.at(-1)!, /May start the sandbox/);
+  for (const [path, value, pattern] of [["allow_host_execution", true, /individual tool-call approval/], ["fallback_mode", "host", /Sandbox failure/], ["allow_skill_reads", true, /read from the HOST/]] as const) {
     await f.call(set("global", path, value)); assert.match(f.reviews.at(-1)!, pattern);
     assert.doesNotMatch(f.reviews.at(-1)!, /pass_through_tools|block_third_party = false/);
   }
@@ -544,16 +558,16 @@ test("compact review: malformed shadowed raw scalar is projected, never an unkno
   await writeFile(f.paths.project, "cpus = 4\n");
   const got = await f.call(set("global", "cpus", 3));
   assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews);
-  assert.match(f.reviews.at(-1)!, /- cpus: <invalid>\n\+ cpus: 3/);
+  assert.match(f.reviews.at(-1)!, /- CPUs: <invalid>\n\+ CPUs: 3/);
 });
 
 test("compact review: whole-list clear without an own assignment shows affected inherited entries", async (t) => {
   const f = await fixture(t);
   await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="LOWER",value="LOWER_PRIVATE_SENTINEL",allow_hosts=["lower.example"]}]\n');
   await f.call(set("project", "secrets", []));
-  assert.match(f.reviews.at(-1)!, /Target: inherit → explicit · compared with inherited baseline/);
-  assert.match(f.reviews.at(-1)!, /- env: LOWER/); assert.match(f.reviews.at(-1)!, /- allow_hosts: \["lower.example"\]/);
-  assert.match(f.reviews.at(-1)!, /- credential: <redacted>/); noPrivate(f.reviews);
+  assert.match(f.reviews.at(-1)!, /This project/);
+  assert.match(f.reviews.at(-1)!, /- Name: LOWER/); assert.match(f.reviews.at(-1)!, /- Hosts: \["lower.example"\]/);
+  assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/); noPrivate(f.reviews);
 });
 
 test("compact review: oversized diffs reject without opening UI or mutating, then release the shared lease", async (t) => {
@@ -569,7 +583,7 @@ test("compact review: changing adopted runtime while reviewing still conflicts w
   f.control.getAgentRuntimePolicy = () => undefined;
   f.choose(async () => {
     f.control.getAgentRuntimePolicy = () => ({ settings: { cpus: 2 }, knownFields: ["cpus"], provenance: {}, verification: "created", adoptedAt: 1 });
-    return "Approve";
+    return "Yes";
   });
   assert.equal((await f.call(set())).details.outcome, "conflict");
   assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
@@ -590,8 +604,8 @@ test("compact review: renaming onto an inherited entry discloses the overwritten
   await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",value="A_PRIVATE_SENTINEL",allow_hosts=["a.example"]},{env="B",value="B_PRIVATE_SENTINEL",allow_hosts=["b.example"]}]\n');
   const got = await f.call({ scope: "project", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "B", allowHosts: ["a.example"] } });
   assert.equal(got.details.outcome, "applied");
-  assert.match(f.reviews.at(-1)!, /- allow_hosts: \["b.example"\]/);
-  assert.match(f.reviews.at(-1)!, /Rename replaces an existing entry/); noPrivate(got); noPrivate(f.reviews);
+  assert.match(f.reviews.at(-1)!, /- Hosts: \["b.example"\]/);
+  assert.match(f.reviews.at(-1)!, /Replaces the entry with this name/); noPrivate(got); noPrivate(f.reviews);
 });
 
 test("compact review: malformed shadowed native entry fields retain the strict JSON whitelist", async (t) => {
@@ -600,12 +614,12 @@ test("compact review: malformed shadowed native entry fields retain the strict J
   await writeFile(f.paths.project, "secrets = []\n");
   const got = await f.call(set("global", "secrets", [{ env: "TOKEN", value: "NEW_PRIVATE_SENTINEL", allowHosts: ["new.example"] }]));
   assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews);
-  assert.match(f.reviews.at(-1)!, /- allow_hosts: <invalid>/); assert.match(f.reviews.at(-1)!, /credential: <redacted> \(changed\)/);
+  assert.match(f.reviews.at(-1)!, /- Hosts: <invalid>/); assert.match(f.reviews.at(-1)!, /Credential: <redacted> \(changed\)/);
 });
 
 
 const consequenceTheme = { fg: (role: string, text: string) => `<${role}>${text}</${role}>`, bold: (text: string) => text };
-const hostWriteWarning = "! Writable mount: the guest can change actual HOST files.";
+const hostWriteWarning = "! This mount allows changes to HOST files.";
 
 for (const type of ["dir", "file"] as const) for (const readonly of [false, true]) {
   test(`inherited consequences: ${type} mount readonly=${readonly} reaches plain and themed backend review`, async (t) => {
@@ -625,7 +639,7 @@ for (const type of ["dir", "file"] as const) for (const readonly of [false, true
     assert.equal(plain.includes(hostWriteWarning), !readonly);
     assert.equal(f.reviews.at(-1)!.includes(hostWriteWarning), !readonly);
     assert.equal(themed.includes(`<warning>${hostWriteWarning}</warning>`), !readonly);
-    if (!readonly) { assert.match(plain, /\+ readonly: false/); assert.match(themed, /<toolDiffAdded>false<\/toolDiffAdded>/); }
+    if (!readonly) { assert.match(plain, /\+ Read only: false/); assert.match(themed, /<toolDiffAdded>false<\/toolDiffAdded>/); }
     else assert.doesNotMatch(plain, /HOST/);
     noPrivate(got);
   });
@@ -651,8 +665,8 @@ for (const scope of ["global", "project"] as const) {
     assert.equal(got.details.review.desired.before.mounts[0].readonly, true);
     assert.equal(got.details.review.desired.after.mounts[0].readonly, true);
     assert.equal(got.details.review.focus[0].writableMount, true);
-    assert.match(f.reviews.at(-1)!, /Desired value unchanged; scope intent only/);
-    assert.match(f.reviews.at(-1)!, /Shadowed/);
+    assert.match(f.reviews.at(-1)!, /Higher-priority settings still apply/);
+    assert.match(f.reviews.at(-1)!, /Higher-priority/);
     assert.ok(f.reviews.at(-1)!.includes(hostWriteWarning));
     assert.ok(formatSettingsDiff(settingsDiff(got.details.review), consequenceTheme).join("\n").includes(`<warning>${hostWriteWarning}</warning>`));
     noPrivate(got);
@@ -679,9 +693,12 @@ test("inherited consequences: native mount warnings remain isolated to the selec
   assert.doesNotMatch(f.reviews.at(-1)!, /unrelated/);
 });
 
-for (const [path, inherited, override] of [
-  ["block_third_party", false, true], ["pass_through_tools", ["trusted"], []],
-  ["allow_host_execution", true, false], ["allow_skill_reads", true, false], ["fallback_mode", "host", "block"],
+for (const [path, inherited, override, consequence] of [
+  ["block_third_party", false, true, /Unrecognized tools.*HOST without per-call host approval/],
+  ["pass_through_tools", ["trusted"], [], /These tools run.*HOST without per-call host approval/],
+  ["allow_host_execution", true, false, /HOST execution after individual tool-call approval/],
+  ["allow_skill_reads", true, false, /Skills and generated prompts may be read from the HOST/],
+  ["fallback_mode", "host", "block", /Sandbox failure may run tools on the HOST/],
 ] as const) {
   test(`inherited consequences: shadowed ${path} inherit and no-op retain their specific HOST warning`, async (t) => {
     const f = await fixture(t);
@@ -694,9 +711,9 @@ for (const [path, inherited, override] of [
       assert.deepEqual(got.details.review.focus[0].hostBypass, [path]);
       const lines = settingsDiff(got.details.review);
       const hostWarnings = lines.filter((line) => line.kind === "warning" && line.text.includes("HOST"));
-      assert.equal(hostWarnings.length, 1); assert.ok(hostWarnings[0]!.text.includes(path));
-      assert.match(f.reviews.at(-1)!, /HOST/); assert.match(f.reviews.at(-1)!, /Shadowed/);
-      assert.match(formatSettingsDiff(lines, consequenceTheme).join("\n"), /<warning>! HOST/);
+      assert.equal(hostWarnings.length, 1); assert.match(hostWarnings[0]!.text, consequence);
+      assert.match(f.reviews.at(-1)!, /HOST/); assert.match(f.reviews.at(-1)!, /Higher-priority/);
+      assert.match(formatSettingsDiff(lines, consequenceTheme).join("\n"), /<warning>! .*HOST/);
       noPrivate(got);
     }
   });

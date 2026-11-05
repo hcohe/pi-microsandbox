@@ -14,28 +14,46 @@ function review(overrides: Partial<SettingsReviewFocus> = {}) {
 
 test("settings diff: focused semantic lines share plain RPC and themed output without guessing prefixes", () => {
   const lines = settingsDiff(review());
-  assert.deepEqual(lines.filter((line) => ["added", "removed"].includes(line.kind)), [
-    { kind: "removed", label: "allow_hosts", text: "old.example" }, { kind: "added", label: "allow_hosts", text: "new.example" },
+  assert.deepEqual(lines, [
+    { kind: "context", text: "This project · Secret TOKEN" },
+    { kind: "removed", label: "Hosts", text: "old.example" }, { kind: "added", label: "Hosts", text: "new.example" },
   ]);
   assert.doesNotMatch(formatSettingsDiff(lines).join("\n"), /NOT_FOR_DISPLAY|keep.example|\x1b/);
   const calls: string[] = [];
   const theme = { fg: (role: string, text: string) => { calls.push(role); return `<${role}>${text}</${role}>`; }, bold: (text: string) => text };
   const styled = formatSettingsDiff([...lines, { kind: "context", text: "+ not a diff" }], theme).join("\n");
   assert.match(styled, /<toolDiffRemoved>old.example/); assert.match(styled, /<toolDiffAdded>new.example/);
-  assert.match(styled, /<muted>allow_hosts: /); assert.match(styled, /<muted>\+ not a diff/);
+  assert.match(styled, /<muted>Hosts: /); assert.match(styled, /<muted>\+ not a diff/);
   assert.ok(calls.includes("toolDiffAdded") && calls.includes("toolDiffRemoved"));
 });
 
 test("settings diff: equal redacted values remain a visible private change, without claiming retained credentials changed", () => {
   const changed = formatSettingsDiff(settingsDiff(review({ deltas: [{ entry: "TOKEN", field: "credential", before: "<redacted>", after: "<redacted>" }] }))).join("\n");
-  assert.match(changed, /- credential: <redacted>\n\+ credential: <redacted> \(changed\)/);
+  assert.match(changed, /- Credential: <redacted>\n\+ Credential: <redacted> \(changed\)/);
   const noOp = formatSettingsDiff(settingsDiff(review({ deltas: [], changed: false, effectiveChanged: false }))).join("\n");
-  assert.match(noOp, /No stored change/); assert.doesNotMatch(noOp, /credential|Restart/);
+  assert.match(noOp, /No change/); assert.doesNotMatch(noOp, /Credential|Restarts/);
 });
 
 test("settings diff: array ordering is visible, and terminal controls cannot create a forged styled line", () => {
   const lines = settingsDiff(review({ deltas: [{ field: "order", before: ["A", "B"], after: ["B", "A"] }, { field: "path", before: undefined, after: "safe\x1b[31m\n- forged" }] }));
   const plain = formatSettingsDiff(lines).join("\n");
-  assert.match(plain, /- order: \["A","B"\]\n\+ order: \["B","A"\]/);
+  assert.match(plain, /- Order: \["A","B"\]\n\+ Order: \["B","A"\]/);
   assert.doesNotMatch(plain, /\x1b|\n- forged/);
+});
+
+
+test("settings diff: inherited comparisons get one short caption, not new entries or no-ops", () => {
+  const inherited = review({ baseline: "inherited", targetBefore: "inherit" });
+  assert.match(formatSettingsDiff(settingsDiff(inherited)).join("\n"), /Overrides inherited values/);
+  const added = review({ baseline: "inherited", targetBefore: "inherit", deltas: [{ entry: "NEW", field: "credential", before: undefined, after: "<redacted>" }] });
+  assert.doesNotMatch(formatSettingsDiff(settingsDiff(added)).join("\n"), /Overrides inherited/);
+  const noOp = review({ baseline: "inherited", changed: false, deltas: [] });
+  assert.doesNotMatch(formatSettingsDiff(settingsDiff(noOp)).join("\n"), /Overrides inherited/);
+});
+
+test("settings diff: routine same-scope edits omit repeated identity, source, operation and target jargon", () => {
+  const data = { ...review(), collections: [{ path: "secrets", operation: "upsert", identities: ["TOKEN"], source: "host-project", promoted: false, shadowed: false }] };
+  const text = formatSettingsDiff(settingsDiff(data)).join("\n");
+  assert.equal(text, "This project · Secret TOKEN\n- Hosts: old.example\n+ Hosts: new.example");
+  assert.doesNotMatch(text, /upsert|Target:|Entry source|explicit/);
 });

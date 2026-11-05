@@ -99,7 +99,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
   });
   pi.registerTool({
     name: "msb_config_set", label: "Propose Microsandbox setting",
-    description: "Propose ONE setting operation in ONE explicit scope. Every invocation requires fresh, cancel-first user approval. No headless mutation. Arrays set replaces/clears the whole list; prefer native upsert/remove to preserve siblings and credentials. Ephemeral lasts only this session. No lifecycle/reset/file-path overrides.",
+    description: "Propose ONE setting operation in ONE explicit scope. Every invocation requires fresh, No-first user approval. No headless mutation. Arrays set replaces/clears the whole list; prefer native upsert/remove to preserve siblings and credentials. Ephemeral lasts only this session. No lifecycle/reset/file-path overrides.",
     parameters, executionMode: "sequential",
     // Arguments may contain credentials or repeat them in arbitrary identity fields.
     // Until execute has produced a bound sanitized review, display no argument data.

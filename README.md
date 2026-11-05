@@ -48,8 +48,8 @@ value editors explain the format with examples. [All keys →](docs/commands.md)
 
 The agent can also inspect all settings with `msb_config_get` or propose a
 scoped change with `msb_config_set`. Every change needs your explicit approval;
-approval shows a compact color-coded diff with secrets/references masked, and
-headless inspection is read-only.
+a HOST-style No/Yes question shows only the focused color-coded diff and relevant
+warnings, with secrets/references masked. Headless inspection is read-only.
 [Configuration tools →](docs/tools.md)
 
 The Pi footer shows **`msb-ID ●`**: a green circle when live, or a yellow/grey

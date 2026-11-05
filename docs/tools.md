@@ -97,27 +97,29 @@ execution. `allow_host_execution` does not waive it. No UI, print/JSON mode, or 
 competing panel/review rejects without mutation. Interactive RPC requires a client
 that supports Pi's UI selector; there is no timeout/automatic approval.
 
-Approval shows a compact diff, not a configuration dump: a short accented
-heading, muted scope/setting/entry identity, and only added/removed/changed
-values in your theme's diff colors. Native entry edits omit siblings and
-unchanged fields. Credentials/references stay `<redacted>`; a real rotation
+Approval looks like the HOST-command question: **Allow configuration change?**,
+one friendly scope/item line, a focused color-coded diff, and vertical **No / Yes**
+choices. There is no dashboard header, duplicate identity or routine source dump.
+Native entry edits omit siblings and unchanged fields. Credentials/references stay `<redacted>`; a real rotation
 shows `(changed)` even when both safe values look identical. Retained credentials
 are not marked changed.
 
-Target-scope assignment and inherited-baseline context remain distinct from
-desired settings. No-op, promotion and higher-scope shadowing are explicit, even
+Edits based on inherited values are marked as overrides.
+No-op, promotion and higher-scope shadowing are explicit, even
 when the effective value does not change. Only relevant consequences accompany
 the diff: restart/guest-state loss, inactive sandbox start, whole-list replacement
 or clearing, removal/inherit, writable host mounts, and the proposal's HOST bypass
 policy (including pass-through tools and `block_third_party = false`). Unrelated
 HOST reminders and full raw/desired/adopted/provenance JSON are not displayed.
 
-In TUI, Cancel is initially selected. Scroll with arrows/j/k, PageUp/PageDown,
-or g/G; Tab/left/right chooses Cancel/Approve, Enter activates, Escape cancels.
-Approve stays disabled until the review's end has been visible. Resize as needed;
-viewports below 32×10 cannot approve. RPC sends the equivalent compact plain-text
-diff, without ANSI, in a Cancel-first selector. Oversized diffs reject instead of
-hiding changed values.
+In TUI, **No** is initially selected. Arrows/j/k choose No/Yes, Enter selects,
+and Escape cancels. Short reviews need no scrolling. Long reviews show a bounded
+scroll area with Ctrl+PageUp/PageDown and g/G hints; Yes cannot be chosen until
+the end has been visible. A compact bottom overlay (not a full-screen panel)
+keeps the whole question and choices visible even with custom widgets or footers.
+Resize as needed: review areas below 32×10, or unable to fit the controls, cannot
+approve. RPC sends the same plain-text question/diff with No/Yes and no ANSI.
+Oversized diffs reject instead of hiding changed values.
 Abort, cancellation, session replacement or changed source/ephemeral/runtime
 state invalidates approval; nothing is automatically rebased/retried.
 

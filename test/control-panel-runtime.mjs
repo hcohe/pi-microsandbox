@@ -29,6 +29,7 @@ try {
   const { loadExtensions } = await mod("core/extensions/loader");
   const { ExtensionRunner } = await mod("core/extensions/runner");
   const { InteractiveMode } = await mod("modes/interactive/interactive-mode");
+  const { ExtensionSelectorComponent } = await mod("modes/interactive/components/extension-selector");
   const { initTheme, theme } = await mod("modes/interactive/theme/theme");
   initTheme("dark");
   const require = createRequire(join(pkg, "package.json"));
@@ -58,7 +59,7 @@ try {
     const showOverlay = ui.showOverlay.bind(ui);
     ui.showOverlay = (component, options) => { panel = component; return showOverlay(component, options); };
     const mode = Object.create(InteractiveMode.prototype);
-    Object.assign(mode, { ui, editor, keybindings: {} });
+    Object.assign(mode, { ui, editor, keybindings: tui.getKeybindings() });
     const context = mode.createExtensionUIContext();
     context.notify = (message) => notices.push(message);
     runner.setUIContext(context, "tui");
@@ -207,10 +208,11 @@ try {
       const inspection = await inspect.execute("inspect", {}, undefined, undefined, runner.createContext());
       assert.equal(inspection.details.outcome, "inspected");
       assert.doesNotMatch(JSON.stringify(inspection), /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
-      for (const action of ["default-cancel", "escape", "approve", "apply", "restart", "abort", "too-small", "secret-hosts", "secret-rotation"]) {
+      for (const action of ["default-cancel", "escape", "approve", "apply", "restart", "abort", "too-small", "secret-hosts", "secret-rotation", "long-warnings"]) {
         panel = undefined;
         const abort = new AbortController();
-        const proposal = action === "secret-hosts" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: Array.from({ length: 40 }, (_, n) => `host-${n}.example`) } }
+        const proposal = action === "long-warnings" ? { scope: "global", path: "pass_through_tools", operation: "set", value: Array.from({ length: 40 }, (_, n) => `trusted-${n}`) }
+          : action === "secret-hosts" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: Array.from({ length: 40 }, (_, n) => `host-${n}.example`) } }
           : action === "secret-rotation" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["api.example"], value: "ROTATED_PRIVATE_SENTINEL" } }
           : action === "apply" ? { scope: "ephemeral", path: "show_footer", operation: "set", value: !inspection.details.desired.show_footer }
           : action === "restart" ? { scope: "ephemeral", path: "memory_mib", operation: "set", value: inspection.details.desired.memory_mib + 128 }
@@ -223,39 +225,76 @@ try {
         for (const [width, height] of [[32, 10], [80, 24], [24, 2], [120, 40], [80, 24]]) {
           terminal.columns = width; terminal.rows = height;
           const frame = panel.render(width);
-          assert.equal(frame.length, height); assert.ok(frame.every((line) => tui.visibleWidth(line) === width));
+          assert.ok(frame.length <= height); assert.ok(frame.every((line) => tui.visibleWidth(line) <= width));
           assert.doesNotMatch(frame.join("\n"), /PRIVATE_SENTINEL|\$FILE:|\$ENV:|UNDERLYING/);
         }
         const frame = panel.render(100).join("\n");
-        assert.ok(frame.includes(theme.bold(theme.fg("accent", "MICROSANDBOX · Review change"))));
-        assert.ok(frame.includes(theme.fg("muted", theme.bold("> [ Cancel ]"))));
-        assert.ok(frame.includes(theme.bold(theme.fg("accent", "↑↓/j/k"))));
+        const native = new ExtensionSelectorComponent("Allow host execution?", ["No", "Yes"], () => {}, () => {});
+        const nativeRows = native.render(100);
+        assert.equal(panel.render(100)[0], nativeRows[0]);
+        assert.equal(panel.render(100).at(-1), nativeRows.at(-1));
+        assert.ok(frame.includes(theme.fg("accent", theme.bold("Allow configuration change?"))));
+        assert.ok(nativeRows.join("\n").includes(theme.fg("accent", theme.bold("Allow host execution?"))));
+        assert.ok(frame.includes(theme.fg("accent", "→ No")));
+        assert.ok(nativeRows.join("\n").includes(theme.fg("accent", "→ ") + theme.fg("accent", "No")));
+        assert.match(tui.stripTerminalSequences(frame), /\n → No\n   Yes\n/);
+        assert.doesNotMatch(frame, /MICROSANDBOX|End seen/);
+        const painted = () => {
+          output = ""; ui.renderNow(true);
+          if (ui instanceof tui.TuiMainScreen) return tui.stripTerminalSequences(ui.captureRenderState().previousLines.slice(-terminal.rows).join("\n"));
+          const rows = [...output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H\x1b\[2K|$)/g)];
+          assert.equal(rows.length, terminal.rows);
+          return rows.map((row) => tui.stripTerminalSequences(row[2])).join("\n");
+        };
+        if (action === "secret-rotation") {
+          assert.ok(panel.render(100).length < terminal.rows);
+          assert.doesNotMatch(frame, /PgUp|Read to end/);
+        }
         const callFrame = setter.renderCall({ ...proposal, identity: "UNSAFE_PRIVATE_SENTINEL" }, theme, {}).render(100).join("\n");
         assert.doesNotMatch(callFrame, /PRIVATE_SENTINEL|allowHosts|value/);
         if (action.startsWith("secret-")) {
           assert.ok(frame.includes(theme.fg("toolDiffRemoved", "- ")));
           assert.ok(frame.includes(theme.fg("toolDiffAdded", "+ ")));
           assert.notEqual(theme.fg("toolDiffRemoved", "test"), theme.fg("toolDiffAdded", "test"));
-          assert.ok(frame.includes(theme.fg("muted", "global · secrets · upsert · TOKEN")));
+          assert.ok(frame.includes(theme.fg("muted", "All projects · Secret TOKEN")));
           assert.doesNotMatch(frame, /HOST|adoptedRuntime|provenance|"before"|"after"/);
           if (action === "secret-rotation") {
             assert.ok(frame.includes(theme.fg("toolDiffAdded", "<redacted> (changed)")));
-            assert.doesNotMatch(frame, /allow_hosts/);
-          } else {
-            assert.match(tui.stripTerminalSequences(frame), /Approve disabled/);
-            let seen = "";
-            for (let n = 0; n < 100; n++) { seen += tui.stripTerminalSequences(panel.render(32).join("\n")) + "\n"; input("j"); }
-            for (let n = 0; n < 40; n++) assert.ok(seen.includes(`host-${n}.example`));
+            assert.doesNotMatch(frame, /Hosts:/);
           }
         }
+        if (action === "secret-hosts" || action === "long-warnings") {
+          input("\x1b[B"); assert.match(tui.stripTerminalSequences(panel.render(100).join("\n")), /→ No/);
+          assert.match(tui.stripTerminalSequences(frame), /Read to end for Yes/);
+          // A custom dock cannot clip the consent surface, in either renderer.
+          const dock = new tui.Text("CUSTOM DOCK\n".repeat(50), 0, 0);
+          if (ui instanceof tui.TuiAltScreen) ui.setLayoutRoot(new tui.VStack([editor, dock]));
+          else ui.addChild(dock);
+          let seen = "";
+          for (const [width, height] of [[32, 10], [80, 24]]) {
+            terminal.columns = width; terminal.rows = height; input("g");
+            for (let n = 0; n < 120; n++) {
+              const visible = painted(); seen += visible + "\n";
+              assert.match(visible, /Allow configuration change\?/); assert.match(visible, /→ No/); assert.match(visible, /Yes/);
+              input("\x1b[6;5~");
+            }
+          }
+          for (let n = 0; n < 40; n++) assert.ok(seen.includes(action === "secret-hosts" ? `host-${n}.example` : `trusted-${n}`));
+          if (action === "long-warnings") {
+            assert.match(seen, /without per-call host approval/);
+            assert.match(seen, /Replaces this scope’s entire list/);
+          }
+          if (ui instanceof tui.TuiAltScreen) ui.setLayoutRoot(editor); else ui.removeChild(dock);
+          terminal.columns = 80; terminal.rows = 24;
+        }
         const key = (value) => { input(value); ui.renderNow(true); };
-        if (action === "default-cancel") key("\r");
-        if (action === "escape" || action.startsWith("secret-")) key("\x1b");
+        if (["default-cancel", "secret-hosts", "long-warnings"].includes(action)) key("\r");
+        if (action === "escape" || action === "secret-rotation") key("\x1b");
         if (action === "abort") abort.abort();
         if (action === "too-small") { terminal.columns = 24; terminal.rows = 2; panel.render(24); key("\t"); key("G"); key("\r"); }
         if (["approve", "apply", "restart"].includes(action)) {
-          key("G"); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /End seen/);
-          key("\t"); key("\r");
+          key("G"); panel.render(80);
+          key("\x1b[B"); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /→ Yes/); key("\r");
         }
         const result = await pending;
         for (const expanded of [false, true]) {
@@ -299,5 +338,5 @@ try {
   assert.doesNotMatch(policy, /RUNTIME_PRIVATE_SENTINEL/);
   assert.match(policy, /"show_footer" = false/);
   assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /"show_footer" = true/);
-  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, config tools approval/default-cancel/abort/resize/provenance-collision-gate and focus teardown (fake SDK)`);
+  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, native-style No/Yes config approval, compact bounded overlay/custom-dock scrolling/default-No/abort/resize/provenance-collision-gate and focus teardown (fake SDK)`);
 } finally { await rm(root, { recursive: true, force: true }); }
