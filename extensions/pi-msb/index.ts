@@ -16,6 +16,7 @@ import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
 import { registerConfigTools } from "./settings-tools.ts";
+import { registerDiagnosticsTool } from "./diagnostics-tools.ts";
 import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 import { registerSandboxTools } from "./tools.ts";
 import { displayId, type ResolvedConfig, type RuntimeState } from "./types.ts";
@@ -130,6 +131,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
   registerMsbCommand(pi, integration.control);
   registerConfigTools(pi, integration.control);
+  registerDiagnosticsTool(pi, integration.control);
 
   pi.on("session_start", async (_event, ctx) => {
     stopBootAnimation();

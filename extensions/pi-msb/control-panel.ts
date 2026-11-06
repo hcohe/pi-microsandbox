@@ -6,7 +6,7 @@ import { MaskedInput } from "./masked-input.ts";
 import { SECTIONS, SETTINGS_FIELDS, valueAt, SECRET_HOST_HELP, MOUNT_OPTION_HELP, type FieldHelp, type SettingsField } from "./settings-fields.ts";
 import type { SettingsDraft, SettingsScope } from "./settings.ts";
 import type { MsbControl, Config } from "./types.ts";
-import { DNS_EXCEPTION_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
+import { DNS_EXCEPTION_WARNING, HOST_SECRET_COMMAND_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
 type Row = { id: string; label: string; detail?: string; instructions?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
@@ -16,7 +16,10 @@ const ROOT_ORDER = [
   "configuration/Mounts", "configuration/Tools", "configuration/Image", "configuration/sources",
   "configuration/actions", "configuration/status", "configuration/General", "configuration/Advanced",
 ];
-type FormField = FieldHelp & { name: string; value: string; secret?: boolean; choices?: string[] };
+type FormField = FieldHelp & { name: string; value: string; secret?: boolean; choices?: string[]; onChange?: (value: string) => void };
+const SECRET_SOURCES = { "Literal value": "textValue", "Host environment variable": "hostEnv", "Host shell command": "hostCmd" } as const;
+type SecretSource = keyof typeof SECRET_SOURCES;
+const secretSource = (entry?: Partial<Record<(typeof SECRET_SOURCES)[SecretSource], string>>): SecretSource => entry?.hostEnv !== undefined ? "Host environment variable" : entry?.hostCmd !== undefined ? "Host shell command" : "Literal value";
 /** Display-only aliases keep historical reviews and resolver IDs on the same three scope labels. */
 export const settingsSourceLabel = (source: unknown): string => ({ global: "Global", "host-default": "Global", project: "Project", "host-project": "Project", session: "Session", ephemeral: "Session", temporary: "Session", env: "environment", defaults: "default" }[String(source)] ?? String(source));
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
@@ -32,7 +35,7 @@ export const HOST_BOUNDARY_WARNINGS: Readonly<Record<string, string>> = {
 };
 function displayConfig(toml: string) {
   const value = parseTomlConfig(toml, "global").value;
-  return { ...value, ...(value.secrets ? { secrets: value.secrets.map((secret) => ({ env: secret.env, allowHosts: secret.allowHosts, value: "<redacted>" })) } : {}) };
+  return { ...value, ...(value.secrets ? { secrets: value.secrets.map((secret) => ({ env: secret.env, allowHosts: secret.allowHosts, [SECRET_SOURCES[secretSource(secret)]]: "<redacted>" })) } : {}) };
 }
 
 /** Stable tree identities share a bounded viewport with transient editors and confirmations. */
@@ -75,7 +78,7 @@ export class ControlPanel implements Component, Focusable {
   constructor(options: { draft: SettingsDraft; control: MsbControl; ctx: Context; tui: Pick<TUI, "terminal" | "requestRender">; theme: Pick<Theme, "fg" | "bold" | "inverse">; done: () => void; paths: Record<string, string> }) {
     this.#draft = options.draft; this.#control = options.control; this.#ctx = options.ctx; this.#tui = options.tui; this.#theme = options.theme; this.#done = options.done; this.#paths = options.paths;
     const snapshot = this.#draft.snapshot();
-    // Mask references too; only private backend entry edits retain credential origins.
+    // Mask every source payload; only private backend entry edits retain credentials.
     this.#values = displayConfig(snapshot.effectiveToml);
     if (snapshot.automaticSandboxName) this.#values.sandboxName = null;
     this.#provenance = snapshot.provenance; this.#warnings = snapshot.warnings;
@@ -92,7 +95,7 @@ export class ControlPanel implements Component, Focusable {
     this.#proposalTree = { focus: this.#treeFocus, expanded: new Set(this.#expanded) };
     this.#proposal = true;
     try { mutate(this.#draft); }
-    catch { this.#formCleanup?.(); this.#proposalError("Invalid entry. Cancel to correct required names, hosts, references and field types.", false); return; }
+    catch { this.#formCleanup?.(); this.#proposalError("Invalid entry. Cancel to correct required names, hosts, secret sources and field types.", false); return; }
     this.#formCleanup?.();
     if (scope) await this.#applyScope(scope); else this.#scopeActions();
   }
@@ -160,7 +163,7 @@ export class ControlPanel implements Component, Focusable {
             const remove = readonly ? undefined : () => this.#removeEntry(field, entry);
             const result: Row = { id: entryId, label: String(identity), value: path === "secrets" ? "********" : path === "mounts" ? entry.readonly ? "ro" : "rw" : undefined, origin: entryOrigin, readonly, edit: editEntry, add, remove, removeLabel: "delete" };
             if (path === "secrets" || path === "mounts") {
-              const children = path === "secrets" ? { "Environment name": entry.env, "Allowed hosts": entry.allowHosts, "Value / reference": "********" } : { Type: entry.type, "Host path / volume name": entry.hostPath ?? "memory", "Guest path": entry.guestPath, "Read only": entry.readonly, Options: entry.options ?? [] };
+              const children = path === "secrets" ? { "Environment name": entry.env, "Allowed hosts": entry.allowHosts, Source: secretSource(entry), "Source value": "********" } : { Type: entry.type, "Host path / volume name": entry.hostPath ?? "memory", "Guest path": entry.guestPath, "Read only": entry.readonly, Options: entry.options ?? [] };
               result.children = Object.entries(children).map(([label, value]) => {
                 const childId = `${entryId}/${label}`;
                 const listAdd = readonly ? undefined : () => this.#recordList(path, entry, label);
@@ -259,16 +262,32 @@ export class ControlPanel implements Component, Focusable {
       this.#entryDone(field.path, value, entry);
     }));
   }
-  #secret(entry?: { env: string; allowHosts: string[] }, child?: string): void {
+  #secret(entry?: { env: string; allowHosts: string[] } & Partial<Record<(typeof SECRET_SOURCES)[SecretSource], string>>, child?: string): void {
+    const existingSource = secretSource(entry);
+    const sourceHelp: Record<SecretSource, string> = {
+      "Literal value": "Enter the literal secret value; input stays masked.\nThe text is used exactly as entered, without expansion.",
+      "Host environment variable": "Enter the HOST environment variable name; input stays masked.\nExample: SERVICE_TOKEN\nIts value is read privately from the host environment, not the guest.",
+      "Host shell command": "Enter a HOST shell command; input stays masked.\nExample: op read op://vault/service/token\nThe command executes on the HOST to obtain the secret from stdout, outside the sandbox.",
+    };
+    const payload: FormField = { name: "Source value", value: "", secret: true, hint: "Keep or replace the private source", editorHelp: "" };
+    const updateSource = (source: string) => {
+      payload.value = "";
+      payload.editorHelp = (entry && source === existingSource ? "Leave blank to keep the existing secret source.\n" : "A new source value is required.\n") + sourceHelp[source as SecretSource];
+    };
+    updateSource(existingSource);
     this.#form("Secret (never displayed)", [
       { name: "Environment name", value: entry?.env ?? "", hint: "The variable your app reads", editorHelp: "Enter an environment variable name using letters, digits and underscores; do not start with a digit.\nExample: SERVICE_TOKEN\nProcess-control variable names are not allowed." },
       { name: "Allowed hosts", value: (entry?.allowHosts ?? []).join(", "), ...SECRET_HOST_HELP },
-      { name: "Replace value / reference", value: "", secret: true, hint: entry ? "Keep or replace the private value" : "A private value for your app", editorHelp: (entry ? "Leave blank to keep the existing secret and its original reference.\n" : "Enter a secret value or reference; input stays masked.\n") + "Reference syntax: $ENV:NAME or $FILE:/absolute/path (recommended).\nReferences are resolved privately; never paste credentials into help or logs." },
+      { name: "Source", value: existingSource, choices: Object.keys(SECRET_SOURCES), hint: "How the host obtains this secret", editorHelp: "Choose exactly one secret source.\nChanging the source clears any pending replacement; enter a new source value.", choiceHelp: sourceHelp, onChange: updateSource },
+      payload,
     ], (fields, scope) => this.#propose((draft) => {
-      const env = fields[0]!.value; const allowHosts = fields[1]!.value.split(",").map((host) => host.trim()).filter(Boolean); const value = fields[2]!.value;
-      draft.upsertSecret({ env, allowHosts, ...(value ? { value } : {}) }, entry?.env);
+      const env = fields[0]!.value; const allowHosts = fields[1]!.value.split(",").map((host) => host.trim()).filter(Boolean);
+      const source = fields[2]!.value as SecretSource; const value = fields[3]!.value;
+      if (!value && (!entry || source !== existingSource)) throw new ConfigError(["new secret sources require a source value"]);
+      // Omit sources for metadata-only edits; the backend retains or replaces exactly one source.
+      draft.upsertSecret({ env, allowHosts, ...(value ? { [SECRET_SOURCES[source]]: value } : {}) }, entry?.env);
       this.#entryDone("secrets", env, entry?.env);
-    }, scope), () => this.#home(), child === "Value / reference" ? "Replace value / reference" : child);
+    }, scope), () => this.#home(), child);
   }
   #mount(entry?: Config["mounts"][number], child?: string): void {
     this.#form("Mount", [
@@ -288,11 +307,14 @@ export class ControlPanel implements Component, Focusable {
     const show = () => this.#page([
       { id: "title", label: title },
       ...fields.map((field) => ({ id: field.name, label: `${field.name}: ${field.secret ? field.value ? "******** (replacement)" : "not replaced" : field.value}`, detail: field.hint, action: () => {
-        if (field.choices) this.#page([
-          { id: "title", label: field.name, instructions: field.editorHelp },
-          ...field.choices.map((value) => ({ id: value, label: value, instructions: field.choiceHelp![value]!, action: () => { this.#formDirty ||= field.value !== value; field.value = value; show(); } })),
-          { id: "back", label: "Back", action: show },
-        ], show);
+        if (field.choices) {
+          this.#page([
+            { id: "title", label: field.name, instructions: field.editorHelp },
+            ...field.choices.map((value) => ({ id: value, label: value, instructions: field.choiceHelp![value]!, action: () => { this.#formDirty ||= field.value !== value; if (field.value !== value) { field.value = value; field.onChange?.(value); } show(); } })),
+            { id: "back", label: "Back", action: show },
+          ], show);
+          this.#focus = Math.max(0, this.#rows.findIndex((row) => row.id === field.value));
+        }
         else this.#input(field.name, field.secret ? "" : field.value, !!field.secret, field.editorHelp, (value) => { this.#formDirty ||= field.value !== value; field.value = value; show(); }, show);
       } })),
       ...this.#scopeRows((scope) => save(fields, scope)),
@@ -331,9 +353,13 @@ export class ControlPanel implements Component, Focusable {
       const effective = displayConfig(preview.effectiveToml);
       const intentPaths = new Set([...this.#scalarIntent.keys(), ...preview.changes.map((change) => change.path), ...preview.collections.map((entry) => entry.path)]);
       const hostBoundaryWarnings = [...intentPaths].map((path) => HOST_BOUNDARY_WARNINGS[path]).filter((warning): warning is string => warning !== undefined);
+      const hostCommand = preview.changes.some((change) => change.path === "secrets" && (change.operation === "inherit"
+        ? effective.secrets?.some((secret) => secret.hostCmd !== undefined)
+        : Array.isArray(change.after) && change.after.some((secret) => secret && typeof secret === "object" && ("hostCmd" in secret || "host_cmd" in secret))));
       const summary = [
         `Scope: ${settingsSourceLabel(scope)}`,
         ...hostBoundaryWarnings,
+        ...(hostCommand ? [HOST_SECRET_COMMAND_WARNING] : []),
         ...([...intentPaths].some((path) => path.startsWith("network.")) ? [NETWORK_IDENTITY_WARNING, ...(effective.network?.mode === "allowlist" && effective.network.allowDns ? [DNS_EXCEPTION_WARNING] : [])] : []),
         ...(scope === "temporary" ? ["Memory only; no disk writes.", SESSION_LIFETIME_WARNING] : [
           `Settings file: ${target.path}`,
@@ -360,7 +386,7 @@ export class ControlPanel implements Component, Focusable {
           if (this.#closed) return;
           appliedSuccessfully = true;
           message = `${saved ? "Applied" : "No changes"}${result.shadowed.length ? `; shadowed: ${result.shadowed.join(", ")}` : ""}. Runtime: ${this.#control.getState().status}`;
-        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Status and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret references, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
+        } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Review Status and retry Reload; no automatic host escape.` : "Apply failed. Check values, secret sources, policy paths and external edits. Reopen to verify storage after an I/O error; no automatic host escape."; }
         finally {
           pending.discard(); this.#pending = undefined;
           if (!this.#closed) {
@@ -373,10 +399,10 @@ export class ControlPanel implements Component, Focusable {
           }
         }
       };
-      const needsConfirmation = hostBoundaryWarnings.length > 0 || preview.effect === "restart" || preview.collections.some((entry) => entry.promoted || entry.operation === "remove") || preview.shadowed.length > 0 || [...this.#scalarIntent.values()].includes(undefined) || preview.changes.some((change) => /network|mount|host|fallback|docker/.test(change.path));
+      const needsConfirmation = hostCommand || hostBoundaryWarnings.length > 0 || preview.effect === "restart" || preview.collections.some((entry) => entry.promoted || entry.operation === "remove") || preview.shadowed.length > 0 || [...this.#scalarIntent.values()].includes(undefined) || preview.changes.some((change) => /network|mount|host|fallback|docker/.test(change.path));
       if (needsConfirmation) this.#confirm("Review change", summary, apply, () => this.#cancelProposal());
       else await apply();
-    } catch { target?.discard(); this.#pending = undefined; this.#proposalError("Validation failed. Check types/ranges, required secret hosts, references and mount/host policy guards. Nothing applied."); }
+    } catch { target?.discard(); this.#pending = undefined; this.#proposalError("Validation failed. Check types/ranges, required secret hosts, sources and mount/host policy guards. Nothing applied."); }
   }
   #load(): void {
     const snapshot = this.#draft.snapshot(); this.#values = displayConfig(snapshot.effectiveToml);

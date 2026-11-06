@@ -19,9 +19,10 @@ occurs when constructing the editor.
   is an **explicit whole-list replacement** (`[]` is an explicit clear), not CRUD.
   `inherit(path)` removes that target-layer assignment, distinct from `[]` or `""`.
   Snake/camel names work; values use the existing normalized Config shapes.
-- `draft.upsertSecret({env, allowHosts, value?}, previousEnv?)` retains the selected
-  entry's credential/reference privately when `value` is omitted, including prior
-  pending replacements. `removeSecret(env)` records deletion of that identity.
+- `draft.upsertSecret({env, allowHosts, textValue?, hostEnv?, hostCmd?}, previousEnv?)`
+  accepts exactly one source for a new secret. Omitting all source fields retains
+  the selected entry's private source, including prior pending replacements.
+  Supplying a source replaces the previous source rather than combining them. `removeSecret(env)` records deletion of that identity.
   `upsertMount(mount, previousGuest?)`/`removeMount(guest)` likewise record only
   deliberate entry operations, including renames.
 - `upsertListEntry(path, value, previousValue?)`/`removeListEntry(path, value)` do
@@ -32,9 +33,10 @@ occurs when constructing the editor.
   operations**, not the materialized candidate and never an effective config
   suitable for persistence. Inherited baseline entries are not flattened into
   that snapshot. Original raw keys can be snake/camel spelling.
-  Secret values (including reference strings) are masked in raw snapshots/diffs.
-  Use the effective TOML display for ENV/FILE reference details; literal secrets
-  are redacted there. Never feed masked values back into `set`.
+  Literal `textValue` credentials are masked in snapshots/diffs and agent JSON.
+  `hostEnv` names and `hostCmd` text are readable agent metadata; effective TOML
+  still masks all source fields. Never feed masked values back into `set`.
+  Native editor APIs support literals; the agent setter rejects `textValue`.
 - `await draft.forScope(scope)` transfers dirty scalar fields and **entry intent**,
   not an effective collection snapshot. On preview/apply, entry operations replay
   over the chosen scope's at-or-below-scope baseline: Global excludes Project/Session;
@@ -74,15 +76,14 @@ review; configuration tools return relevant warnings to the agent after completi
 rather than showing warning lines in their confirmation dialog. Metadata-only
 secret editing retains that selected entry's private credential, not a different same-name target credential.
 
-Unedited target-owned references retain their raw spelling. References inherited
-from lower policies or deliberately imported from another scope are anchored to
-their actual origin before persistence; `$ENV:NAME` remains a reference. New
-relative FILE input originates beside the draft's policy file, or at session cwd
-for Session input. FILE paths are canonicalized when necessary, but credential
-bytes are **never read/resolved for persistence**. Explicit whole-array `set`
-means exactly the supplied replacement, does not preserve omitted target entries,
-and is always distinguished from entry CRUD in confirmation. `[]` clears only the
-chosen scope; higher layers can still shadow that clear.
+Secret sources retain their raw spelling across scopes. `textValue` is always
+literal; `hostEnv` names a host variable and `hostCmd` specifies a host shell
+command. Credential bytes are **never read/resolved for persistence**, and host
+commands are never executed for inspection, validation, preview or saving.
+Explicit whole-array `set` means exactly the supplied replacement, does not
+preserve omitted target entries, and is always distinguished from entry CRUD in
+confirmation. `[]` clears only the chosen scope; higher layers can still shadow
+that clear.
 
 TOML has no null: persistent `sandbox_name = null` is rejected; choose inherit or
 an explicit string. Session null is supported. The existing limited TOML
@@ -147,6 +148,33 @@ below. Filesystem errors after atomic replacement
 (e.g. directory sync) may mean the file was saved despite an error: reload/reopen
 before retrying. Runtime is not mutated by the settings editor in that case.
 
+## Passive diagnostics and blocked-state recovery
+
+`msb_diagnostics` uses the native control facade's cached, sanitized diagnostic
+snapshot of allowlisted enums, booleans, counts and constrained host versions.
+Arbitrary error/configuration strings are withheld, even if they appear redactable.
+Its invocation does not call the settings inspector (which fingerprints
+sources/environment), load the SDK, resolve credentials, read logs, execute host
+commands, or perform lifecycle operations. Runtime and desired/adopted information
+is explicitly last-known; missing redaction context produces a generic failure
+rather than raw error text. Output is bounded in both presentation and structured
+results. Registration is unconditional and the third-party gate grants only the
+exact tool name with this extension's verified entry provenance.
+
+Blocked runtime state does not disable configuration inspection or approved
+settings changes. Invalid configuration inspection exposes degraded `recovery`
+metadata instead of claiming defaults are a valid desired policy. Supported
+semantic repairs retain the original raw scope source for truthful review and
+source/anchor guards, validate the complete final layered candidate, and use the
+normal approval-bound atomic commit. A recovery review additionally discloses the
+complete newly activated safety policy, including read-only mounts, environment
+forwarding, next-session host mode, network, and secret destinations. Private
+`draft.hostCommandsForApproval()` binds exact final host command source to that
+same review and supplies only the human command appendix; never serialize it.
+Masked critical policy or an oversized review fails closed. Invalid syntax or unknown workspace identity
+cannot be repaired by silently dropping/overwriting source data. Activation stays
+separate: an already saved repair can still report `saved_but_reload_failed`.
+
 ## Agent-safe inspection and approval-bound commits
 
 The model-facing getter adds static `settings-schema.ts` discovery (value schemas,
@@ -176,12 +204,12 @@ remove the bounded filesystem guarantees above.
 returns all supported effective settings, sparse Global/Project/Session layers (`layers.global`, `.project`, `.session`),
 origins and warnings as JSON, and does not bootstrap/write/reload. `settings-json.ts`
 whitelists schema fields and omits arbitrary unknown raw values. The dependency-free
-`settings-redaction.ts` masks literal credentials plus ENV/FILE references (including
-repeated occurrences and bare reference identifiers in metadata).
-Do not send the older reference-preserving TOML APIs to the model.
+`settings-redaction.ts` masks literal credentials (and deprecated `value` inputs),
+including repeated occurrences in metadata. Host environment source names and
+host commands are readable; resolved credential bytes never enter inspection.
 
 `draft.reviewForApproval(effect)` binds the draft's private intent and resolved
-candidate digest (including proposed mount/FILE canonical identities) to every source
+candidate digest (including proposed mount canonical identities) to every source
 content/identity/metadata fingerprint, resolver/environment state, and editor
 revision captured at open. It returns a strict masked JSON before/after review.
 `apply({guard})` rechecks that binding and caller abort/session/runtime conditions
@@ -207,11 +235,15 @@ review metadata are unchanged. Setter model-visible plain text includes relevant
 warnings for applied/no-op and saved-but-reload-failed outcomes, with saved versus
 activated status explicit. The agent is instructed to explain these warnings to
 the user after completion. Getter inspection diagnostics are unchanged.
+Proposed host commands have a JSON-quoted appendix in the human approval question.
+This executable code must be visible to the human; the source command text is
+also readable agent metadata. Literal credentials remain masked. The complete
+question remains size-bounded.
 No ordinary panel conditional-confirmation path authorizes tool mutations.
 
-Secret upsert with omitted value prefers the selected effective identity as
-before. If absent there, it can retain only a target-owned hidden raw identity,
-with that target's lexical reference origin and truthful shadowing metadata.
+Secret upsert with all source fields omitted prefers the selected effective
+identity. If absent there, it can retain only a target-owned hidden raw identity,
+with truthful origin and shadowing metadata.
 Earlier removal/clear/replacement/inheritance prevents fallback resurrection.
 This fallback never selects unrelated scope credentials or promotes siblings.
 

@@ -15,7 +15,9 @@ import {
   toEffectiveToml,
   validateConfig,
 } from "./config.ts";
+import type { SecretConfig } from "./types.ts";
 
+const secret = (source: Partial<SecretConfig>): SecretConfig => ({ env: "TOKEN", allowHosts: ["api.example"], ...source });
 const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ name, value, warnings: [] });
 
 test("defaults and precedence are deterministic and ignore worktree config", async () => {
@@ -127,7 +129,7 @@ test("worktree config is never probed or read regardless of trust, syntax, or re
 test("identity arrays replace and remove safely", () => {
   const value = mergeConfigLayers([
     { name: "defaults", value: DEFAULT_CONFIG, warnings: [] },
-    layer("global", { secrets: [{ env: "TOKEN", value: "$ENV:A", allowHosts: ["a"] }], mounts: [{ type: "dir", hostPath: "/a", guestPath: "/mnt/data", readonly: true, options: [] }] }),
+    layer("global", { secrets: [{ env: "TOKEN", hostEnv: "A", allowHosts: ["a"] }], mounts: [{ type: "dir", hostPath: "/a", guestPath: "/mnt/data", readonly: true, options: [] }] }),
     layer("cli", { removeSecrets: ["TOKEN"], mounts: [{ type: "dir", hostPath: "/b", guestPath: "/mnt/data", readonly: false, options: [] }] }),
   ]);
   assert.deepEqual(value.value.secrets, []);
@@ -301,7 +303,7 @@ test("process-control environment cannot be forwarded or injected as a secret", 
   for (const env of ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "PATH", "BASH_ENV", "LD_PRELOAD"]) {
     assert.throws(() => validateConfig({ hostEnv: [env] }), new RegExp(`must not forward protected process environment variable ${env}`));
     assert.throws(
-      () => validateConfig({ secrets: [{ env, value: "unsafe", allowHosts: ["docker.example"] }] }),
+      () => validateConfig({ secrets: [{ env, textValue: "unsafe", allowHosts: ["docker.example"] }] }),
       new RegExp(`must not set protected process environment variable ${env}`),
     );
   }
@@ -397,12 +399,14 @@ test("environment JSON, nesting, POSIX arrays, and controls", () => {
   assert.equal(isDisabledByEnv({ PI_MSB_DISABLE: "0" }), false);
 });
 
-test("effective TOML redacts literal secret values", () => {
-  const config = validateConfig({ secrets: [{ env: "TOKEN", value: "do-not-print", allowHosts: ["api.example"] }] });
-  const output = toEffectiveToml({ config, provenance: {}, warnings: [] });
-  assert.doesNotMatch(output, /do-not-print/);
-  assert.match(output, /<redacted>/);
-  assert.match(toEffectiveToml({ config: validateConfig({ secrets: [{ env: "TOKEN", value: "$ENV:TOKEN", allowHosts: ["api.example"] }] }), provenance: {}, warnings: [] }), /\$ENV:TOKEN/);
+test("effective TOML masks every secret source including literal reference-like strings", () => {
+  for (const source of [{ textValue: "do-not-print" }, { textValue: "$ENV:PRIVATE" }, { textValue: "$FILE:private" }, { hostEnv: "PRIVATE_HOST_ENV" }, { hostCmd: "printf PRIVATE_HOST_COMMAND" }]) {
+    const config = validateConfig({ secrets: [secret(source)] });
+    const output = toEffectiveToml({ config, provenance: {}, warnings: [] });
+    assert.doesNotMatch(output, /do-not-print|PRIVATE|private|\$ENV:|\$FILE:/);
+    assert.match(output, /<redacted>/);
+    assert.deepEqual(config.secrets[0], secret(source), "redaction must not mutate the original source");
+  }
 });
 
 test("table-array overrides round trip with valid TOML headers", () => {
@@ -411,7 +415,7 @@ test("table-array overrides round trip with valid TOML headers", () => {
     { type: "file", hostPath: "/host/two", guestPath: "/mnt/two", readonly: true, options: ["noexec"] },
   ]);
   overrides = applyOverride(overrides, "remove_mounts", [{ guestPath: "/mnt/old" }]);
-  overrides = applyOverride(overrides, "secrets", [{ env: "TOKEN", value: "$ENV:TOKEN", allowHosts: ["api.example"] }]);
+  overrides = applyOverride(overrides, "secrets", [{ env: "TOKEN", hostEnv: "TOKEN", allowHosts: ["api.example"] }]);
 
   const toml = overridesToToml(overrides);
   assert.equal(toml.match(/^\[\[mounts\]\]$/gm)?.length, 2);
@@ -425,7 +429,7 @@ test("overrides round trip and secret references never leak on errors", async ()
   assert.deepEqual((base.network as any).publishPorts, ["8080"]);
   assert.deepEqual(removeOverride(base, "network.publish_ports"), { network: {} });
   assert.deepEqual(parseTomlConfig(overridesToToml(base), "cli").value, base);
-  await assert.rejects(() => resolveSecretValue("$ENV:MISSING", {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("MISSING"));
+  await assert.rejects(() => resolveSecretValue(secret({ hostEnv: "MISSING" }), {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("MISSING"));
 });
 
 test("explicit legacy global files remain supported only outside the workspace", async () => {
@@ -454,9 +458,137 @@ test("explicit legacy global files remain supported only outside the workspace",
 test("open mode warning and empty secret host hard fail", async () => {
   await assert.rejects(() => resolveConfig({
     cwd: "/repo", agentDir: "/host/agent", projectTrusted: true, configDirName: "pi", env: { PI_MSB_NETWORK__MODE: "open" },
-    cliOverridesToml: '[[secrets]]\nenv="TOKEN"\nvalue="$ENV:TOKEN"\nallow_hosts=[]',
+    cliOverridesToml: '[[secrets]]\nenv="TOKEN"\nhost_env="TOKEN"\nallow_hosts=[]',
     readFile: async () => null, realpath: async (path) => path,
   }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("allowHosts")));
+});
+
+test("secret configs require exactly one typed source without exposing its contents", async () => {
+  const sources = [{ textValue: "PRIVATE_VALUE" }, { hostEnv: "PRIVATE_ENV" }, { hostCmd: "printf PRIVATE_COMMAND" }];
+  for (let mask = 0; mask < 8; mask++) {
+    const source = Object.assign({}, ...sources.filter((_, index) => mask & (1 << index)));
+    if ([1, 2, 4].includes(mask)) {
+      assert.deepEqual(validateConfig({ secrets: [secret(source)] }).secrets, [secret(source)]);
+    } else {
+      assert.throws(() => validateConfig({ secrets: [secret(source)] }), /exactly one/);
+      await assert.rejects(resolveSecretValue(secret(source), {}), /exactly one/);
+    }
+  }
+  for (const source of [{ textValue: undefined }, { textValue: 7 }, { hostEnv: null }, { hostEnv: "" }, { hostEnv: "PRIVATE-NAME" }, { hostEnv: "$ENV:PRIVATE_NAME" }, { hostCmd: 3 }, { hostCmd: " \t\n" }, { textValue: "PRIVATE_VALUE", hostEnv: undefined }]) {
+    const invalid = secret(source as any);
+    assert.throws(() => validateConfig({ secrets: [invalid] }), (error: unknown) => error instanceof ConfigError && !/PRIVATE/.test(error.message));
+    await assert.rejects(resolveSecretValue(invalid, {}), (error: unknown) => error instanceof ConfigError && !/PRIVATE/.test(error.message));
+  }
+  assert.equal(validateConfig({ secrets: [secret({ textValue: "" })] }).secrets[0]!.textValue, "");
+});
+
+test("deprecated secret value is rejected with static actionable errors even alongside new sources", async () => {
+  const messages = new Map<string, string>();
+  const rejectsRemoved = (ingress: string) => (error: unknown): boolean => {
+    assert.ok(error instanceof ConfigError);
+    assert.match(error.message, /\bvalue\b.*removed/);
+    assert.match(error.message, /use textValue.*hostEnv/);
+    assert.doesNotMatch(JSON.stringify(error), /PRIVATE/);
+    if (messages.has(ingress)) assert.equal(error.message, messages.get(ingress));
+    else messages.set(ingress, error.message);
+    return true;
+  };
+  for (const value of [undefined, "PRIVATE_LEGACY_LITERAL", "$ENV:PRIVATE_LEGACY_ENV", "$FILE:/PRIVATE_LEGACY_FILE", 7]) {
+    for (const replacement of [{}, { textValue: "PRIVATE_NEW_LITERAL" }, { text_value: "PRIVATE_NEW_SNAKE" }, { hostEnv: "PRIVATE_HOST_ENV" }, { hostCmd: "printf PRIVATE_COMMAND" }]) {
+      const entry = { env: "TOKEN", value, ...replacement, allowHosts: ["api.example"] };
+      const config = { secrets: [entry] };
+      assert.throws(() => validateConfig(config), rejectsRemoved("validate"));
+      assert.throws(() => mergeConfigLayers([layer("global", config)]), rejectsRemoved("merge"));
+      assert.throws(() => validateConfig(applyOverride({}, "secrets", [entry])), rejectsRemoved("override"));
+      assert.throws(() => overridesToToml(config as any), rejectsRemoved("serialize"));
+      await assert.rejects(resolveSecretValue(entry as any, {}), rejectsRemoved("resolve"));
+      if (value !== undefined) {
+        assert.throws(() => parseEnvConfig({ PI_MSB_SECRETS: JSON.stringify([entry]) }), rejectsRemoved("env"));
+        const fields = Object.entries(entry).map(([key, field]) => `${key} = ${JSON.stringify(field)}`).join(", ");
+        assert.throws(() => parseTomlConfig(`secrets = [{ ${fields} }]`, "global"), rejectsRemoved("toml"));
+      }
+    }
+  }
+});
+
+test("secret sources parse and serialize explicit snake_case TOML and environment JSON", () => {
+  const secrets = [secret({ textValue: "$FILE:literal" }), secret({ env: "ENV_LITERAL", textValue: "$ENV:HOST_TOKEN" }), secret({ env: "ENV_TOKEN", hostEnv: "HOST_TOKEN" }), secret({ env: "CMD_TOKEN", hostCmd: "printf token" })];
+  const toml = overridesToToml({ secrets });
+  assert.match(toml, /text_value = "\$FILE:literal"/);
+  assert.match(toml, /text_value = "\$ENV:HOST_TOKEN"/);
+  assert.doesNotMatch(toml, /^value\s*=/m);
+  assert.match(toml, /host_env = "HOST_TOKEN"/);
+  assert.match(toml, /host_cmd = "printf token"/);
+  const parsed = parseTomlConfig(toml, "global");
+  assert.deepEqual(parsed.value.secrets, secrets);
+  assert.deepEqual(parsed.warnings, []);
+  const environment = parseEnvConfig({ PI_MSB_SECRETS: JSON.stringify([
+    { env: "TOKEN", text_value: "$FILE:literal", allow_hosts: ["api.example"] },
+    { env: "ENV_LITERAL", text_value: "$ENV:HOST_TOKEN", allow_hosts: ["api.example"] },
+    { env: "ENV_TOKEN", host_env: "HOST_TOKEN", allow_hosts: ["api.example"] },
+    { env: "CMD_TOKEN", host_cmd: "printf token", allow_hosts: ["api.example"] },
+  ]) });
+  assert.deepEqual(environment.value.secrets, secrets);
+  assert.deepEqual(environment.warnings, []);
+  assert.deepEqual(parseTomlConfig(overridesToToml(environment.value), "cli").value.secrets, secrets);
+});
+
+test("literal secret values never expand environment or file prefixes", async () => {
+  for (const value of ["", "literal\n", "$ENV:HOST_TOKEN", "$FILE:/does/not/exist", "$FILE:../../token"]) {
+    assert.equal(await resolveSecretValue(secret({ textValue: value }), { HOST_TOKEN: "EXPANDED" }, async () => { throw new Error("must not run"); }), value);
+  }
+});
+
+test("host environment secret sources resolve privately and preserve their bytes", async () => {
+  assert.equal(await resolveSecretValue(secret({ hostEnv: "HOST_TOKEN" }), { HOST_TOKEN: " token\n" }), " token\n");
+  assert.equal(await resolveSecretValue(secret({ hostEnv: "HOST_TOKEN" }), { HOST_TOKEN: "" }), "");
+  await assert.rejects(resolveSecretValue(secret({ hostEnv: "PRIVATE_MISSING" }), {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("PRIVATE"));
+  await assert.rejects(resolveSecretValue(secret({ hostEnv: "PRIVATE_INHERITED" }), Object.create({ PRIVATE_INHERITED: "token" })), /missing or invalid/);
+});
+
+test("temporary secret literals and commands are neither canonicalized nor eagerly resolved", async () => {
+  const secrets = [secret({ textValue: "$FILE:../../missing" }), secret({ env: "ENV_TOKEN", hostEnv: "MISSING" }), secret({ env: "CMD_TOKEN", hostCmd: "exit 99" })];
+  const result = await resolveConfig({
+    cwd: "/repo", agentDir: "/host/agent", projectTrusted: true, configDirName: "pi", env: {},
+    temporaryOverrides: { secrets }, readFile: async () => null,
+    realpath: async (path) => { assert.doesNotMatch(path, /missing/); return path; },
+  });
+  assert.deepEqual(result.config.secrets, secrets);
+});
+
+test("host commands execute a host shell with the supplied environment and trim only final newlines", async () => {
+  assert.equal(await resolveSecretValue(secret({ hostCmd: String.raw`printf ' %s \r\n\n' "$HOST_TOKEN"` }), { HOST_TOKEN: "PRIVATE_TOKEN" }), " PRIVATE_TOKEN ");
+  assert.equal(await resolveSecretValue(secret({ hostCmd: "printf 'one\\ntwo\\n'" }), {}), "one\ntwo");
+  const env = { HOST_TOKEN: "token" };
+  assert.equal(await resolveSecretValue(secret({ hostCmd: "PRIVATE_COMMAND" }), env, async (command, actualEnv) => {
+    assert.equal(command, "PRIVATE_COMMAND"); assert.equal(actualEnv, env); return " token \r\n\n";
+  }), " token ");
+});
+
+test("host command failures and empty output never expose command, stdout, stderr, or injected errors", async () => {
+  const safeError = (error: unknown) => error instanceof ConfigError && error.message === "host secret command failed" && !/PRIVATE/.test(JSON.stringify(error));
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: "printf PRIVATE_STDOUT; printf PRIVATE_STDERR >&2; exit 7 # PRIVATE_COMMAND" }), {}), safeError);
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: "PRIVATE_COMMAND" }), {}, async () => { throw new Error("PRIVATE_COMMAND PRIVATE_STDOUT PRIVATE_STDERR"); }), safeError);
+  for (const output of ["", "\n", "\r\n\n"]) await assert.rejects(resolveSecretValue(secret({ hostCmd: "PRIVATE_COMMAND" }), {}, async () => output), safeError);
+});
+
+test("host command stdout and stderr have a bounded combined output budget", async () => {
+  for (const stream of ["stdout", "stderr"]) {
+    const command = `${JSON.stringify(process.execPath)} -e 'process.${stream}.write("PRIVATE".repeat(12000))'`;
+    await assert.rejects(resolveSecretValue(secret({ hostCmd: command }), {}), (error: unknown) => error instanceof ConfigError && error.message === "host secret command failed");
+  }
+  const combined = `${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(40000)); process.stderr.write("y".repeat(40000))'`;
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: combined }), {}), /host secret command failed/);
+  const boundary = `${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(65536))'`;
+  assert.equal((await resolveSecretValue(secret({ hostCmd: boundary }), {})).length, 65536);
+});
+
+test("host commands have a bounded deadline even when descendants keep pipes open", { timeout: 15_000 }, async () => {
+  const started = Date.now();
+  const command = `${JSON.stringify(process.execPath)} -e 'setTimeout(() => {}, 30000)' & wait # PRIVATE_COMMAND`;
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: command }), {}), (error: unknown) => error instanceof ConfigError && error.message === "host secret command failed");
+  assert.ok(Date.now() - started >= 9_000, "command must fail at the deadline, not during startup");
+  assert.ok(Date.now() - started < 14_000);
 });
 
 test("memory_mib round trips without losing its word separator", () => {

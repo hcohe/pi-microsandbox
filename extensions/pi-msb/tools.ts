@@ -139,9 +139,9 @@ function isSandboxActive(state: RuntimeState, provider: ToolOpsProvider): boolea
   return state.status === "active" && provider.isActive();
 }
 
-function unavailableError(state: RuntimeState): Error {
-  const reason = state.reason ? `: ${state.reason}` : "";
-  return new Error(`Sandbox is unavailable${reason}; routed tool execution is blocked.`);
+function unavailableError(_state: RuntimeState): Error {
+  // Startup/adapter reasons can contain data for which no redaction context exists.
+  return new Error("Sandbox is unavailable; routed tool execution is blocked. Use msb_diagnostics and msb_config_get to diagnose it; msb_config_set can request an approved repair without a running sandbox.");
 }
 
 function routeError(tool: string): Error {
@@ -369,7 +369,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const registered = (typeof (pi as ExtensionAPI).getAllTools === "function"
       ? pi.getAllTools()
       : []).find((candidate) => candidate.name === tool);
-    if ((tool === "msb_config_get" || tool === "msb_config_set") && ownedConfigToolEntry
+    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics") && ownedConfigToolEntry
       && canonicalEntry(registered?.sourceInfo?.path) === ownedConfigToolEntry) return;
     const source = registered?.sourceInfo?.source;
     if (source === "builtin") return;

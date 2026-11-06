@@ -49,7 +49,8 @@ async function fixture(t: TestContext, missing = false) {
     resultTexts.push(result.content[0].text);
     if (result.details.review) {
       const lines = settingsDiff(result.details.review);
-      assert.equal(reviews.at(-1), ["Allow configuration change?", "", ...formatSettingsDiff(lines.filter((line) => line.kind !== "warning"))].join("\n"));
+      const safeQuestion = reviews.at(-1)!.split("\n\nHOST secret commands (")[0];
+      assert.equal(safeQuestion, ["Allow configuration change?", "", ...formatSettingsDiff(lines.filter((line) => line.kind !== "warning"))].join("\n"));
       assert.equal(result.content[0].text.split("\n").slice(1).join("\n"), formatSettingsDiff(lines).join("\n"));
       assert.doesNotMatch(result.content[0].text, /\x1b/);
       const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as any;
@@ -77,7 +78,7 @@ const batch = (scope = "session", operations: unknown[] = [
 
 test("inspection filters select sections and leaves after redaction; default text and optional JSON are readable", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nnetwork.mode = "allowlist"\nnetwork.allow_hosts = ["github.com"]\nnetwork.remove_allow_hosts = ["old.example"]\nsecrets = [{env="TOKEN",value="PRIVATE_SENTINEL",allow_hosts=["api.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nnetwork.mode = "allowlist"\nnetwork.allow_hosts = ["github.com"]\nnetwork.remove_allow_hosts = ["old.example"]\nsecrets = [{env="TOKEN",text_value="PRIVATE_SENTINEL",allow_hosts=["api.example"]}]\n');
   const got = await f.get({ sections: ["desired", "layers", "origins", "schema"], paths: ["network"] });
   assert.equal(got.details.outcome, "inspected"); noPrivate(got);
   assert.deepEqual(Object.keys(got.details.desired), ["network"]);
@@ -117,19 +118,38 @@ test("inspection rejects mutated/unknown filters without echoing input or readin
   assert.equal(reads, 0); assert.equal(f.reloads(), 0);
 });
 
-test("filtered JSON/text and getter renderers preserve credential/reference redaction and reject foreign errors", async (t) => {
+test("filtered JSON/text getters expose host source metadata and reject foreign errors", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["api.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",host_env="PUBLIC_HOST_SOURCE",allow_hosts=["api.example"]}]\n');
   const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as any;
   const tool = f.tools.get("msb_config_get")!;
   noPrivate(tool.renderCall!({ paths: ["PRIVATE_SENTINEL"] } as any, theme, {} as any).render(100));
   for (const format of ["text", "json"]) {
     const got = await f.get({ sections: ["desired", "layers", "runtime", "policy"], paths: ["secrets"], format }); noPrivate(got);
     for (const expanded of [false, true]) noPrivate(tool.renderResult!(got, { expanded, isPartial: false }, theme, {} as any).render(100));
-    assert.equal(got.details.desired.secrets[0].value, "<redacted>");
+    assert.equal(got.details.desired.secrets[0].host_env, "PUBLIC_HOST_SOURCE");
   }
   const failed = tool.renderResult!({ content: [{ type: "text", text: "PRIVATE_SENTINEL" }], details: {} } as any, { expanded: true } as any, theme, { isError: true } as any).render(100).join("\n");
   noPrivate(failed); assert.match(failed, /inspection failed/);
+});
+
+test("getter exposes host source metadata without resolving environment values or executing commands", async (t) => {
+  const f = await fixture(t);
+  const marker = join(f.root, "getter-must-not-execute");
+  const command = `touch ${JSON.stringify(marker)}`;
+  Object.defineProperty(f.input.env!, "PUBLIC_GETTER_SOURCE", { get: () => assert.fail("getter must not resolve hostEnv") });
+  await writeFile(f.paths.global, `auto_start = false\nsecrets = [{env="ENV_TOKEN",host_env="PUBLIC_GETTER_SOURCE",allow_hosts=["api.example"]},{env="CMD",host_cmd=${JSON.stringify(command)},allow_hosts=["api.example"]},{env="LITERAL",text_value="LITERAL_PRIVATE_SENTINEL",allow_hosts=["api.example"]}]\n`);
+  for (const format of ["text", "json"]) {
+    const got = await f.get({ sections: ["desired", "layers"], paths: ["secrets"], format });
+    assert.equal(got.details.outcome, "inspected", JSON.stringify(got.details)); noPrivate(got);
+    assert.deepEqual(got.details.desired.secrets, [
+      { env: "ENV_TOKEN", host_env: "PUBLIC_GETTER_SOURCE", allow_hosts: ["api.example"] },
+      { env: "CMD", host_cmd: command, allow_hosts: ["api.example"] },
+      { env: "LITERAL", text_value: "<redacted>", allow_hosts: ["api.example"] },
+    ]);
+  }
+  await assert.rejects(stat(marker), { code: "ENOENT" });
+  assert.equal(f.reloads(), 0); assert.deepEqual(f.reviews, []);
 });
 
 test("runtime path filtering cannot turn partial/reconnected fields into proof of network enforcement", async (t) => {
@@ -157,7 +177,7 @@ test("precise batch validation returns zero-based operation index, safe path and
   assert.equal(bad.details.validation[0].operationIndex, 0); assert.equal(bad.details.validation[0].code, "invalid_value_argument"); noPrivate(bad);
   const unknown = await f.call({ scope: "session", path: "PRIVATE_SENTINEL", operation: "set", value: "PRIVATE_SENTINEL" });
   assert.equal(unknown.details.validation[0].path, undefined); noPrivate(unknown);
-  const secret = await f.call(batch("session", [{ path: "show_footer", operation: "set", value: false }, { path: "secrets", operation: "upsert", value: { env: "TOKEN", value: "$ENV:PRIVATE_SENTINEL", allowHosts: ["*.*.example.com"] } }]));
+  const secret = await f.call(batch("session", [{ path: "show_footer", operation: "set", value: false }, { path: "secrets", operation: "upsert", value: { env: "TOKEN", hostEnv: "PUBLIC_HOST_SOURCE", allowHosts: ["*.*.example.com"] } }]));
   assert.equal(secret.details.validation[0].operationIndex, 1); assert.equal(secret.details.validation[0].path, "secrets");
   assert.equal(secret.details.validation[0].code, "invalid_domain"); assert.match(secret.content[0].text, /No URLs, ports/); noPrivate(secret);
   assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
@@ -165,18 +185,117 @@ test("precise batch validation returns zero-based operation index, safe path and
 
 test("secret wildcard destinations can be set and upserted without granting network access", async (t) => {
   const f = await fixture(t);
-  const secret = { env: "TOKEN", value: "$ENV:PRIVATE_SENTINEL", allowHosts: ["*.googleapis.com"] };
+  const secret = { env: "TOKEN", hostEnv: "PUBLIC_HOST_SOURCE", allowHosts: ["*.googleapis.com"] };
   const initial = await f.call(set("session", "secrets", [secret]));
   assert.equal(initial.details.outcome, "applied"); noPrivate(initial);
   const update = await f.call({ scope: "session", path: "secrets", operation: "upsert",
     value: { env: "TOKEN", allowHosts: ["*.googleapis.com", "googleapis.com"] } });
   assert.equal(update.details.outcome, "applied"); noPrivate(update);
   assert.deepEqual(f.editor.temporary().secrets![0]!.allowHosts, ["*.googleapis.com", "googleapis.com"]);
-  assert.equal(f.editor.temporary().secrets![0]!.value, "$ENV:PRIVATE_SENTINEL");
+  assert.equal(f.editor.temporary().secrets![0]!.hostEnv, "PUBLIC_HOST_SOURCE");
   const policy = (await f.get({ sections: ["policy"] })).details.effectivePolicy.desired;
   assert.equal(policy.secretInjection.grantsNetworkAccess, false);
   assert.deepEqual(policy.secretInjection.destinations, [{ env: "TOKEN", allowHosts: ["*.googleapis.com", "googleapis.com"] }]);
   assert.deepEqual(policy.allowedDestinations, []);
+});
+
+test("secret setters reject deprecated value and missing/multiple/invalid sources before review or command execution", async (t) => {
+  const f = await fixture(t);
+  const marker = join(f.root, "validation-must-not-execute");
+  const command = `touch ${JSON.stringify(marker)}`;
+  const sources = [{}, { textValue: "PRIVATE_SENTINEL" }, { textValue: "" },
+    { text_value: "PRIVATE_SENTINEL" }, { TEXT_VALUE: "PRIVATE_SENTINEL" },
+    { textValue: "PRIVATE_SENTINEL", hostEnv: "ENV_PRIVATE_SENTINEL" },
+    { textValue: "PRIVATE_SENTINEL", hostCmd: command }, { hostEnv: "ENV_PRIVATE_SENTINEL", hostCmd: command },
+    { textValue: "PRIVATE_SENTINEL", hostEnv: "ENV_PRIVATE_SENTINEL", hostCmd: command },
+    { textValue: null }, { hostEnv: 1 }, { hostCmd: [] }, { hostEnv: "" }, { hostCmd: "" },
+    { value: "PRIVATE_SENTINEL" }, { value: "PRIVATE_SENTINEL", textValue: "PRIVATE_SENTINEL" },
+    { value: "PRIVATE_SENTINEL", hostEnv: "ENV_PRIVATE_SENTINEL" }, { value: "PRIVATE_SENTINEL", hostCmd: command }];
+  for (const source of sources) for (const operation of ["set", "upsert"] as const) {
+    const secret = { env: "TOKEN", ...source, allowHosts: ["api.example"] };
+    const got = await f.call({ scope: "session", path: "secrets", operation, value: operation === "set" ? [secret] : secret });
+    assert.equal(got.details.outcome, "rejected"); noPrivate(got);
+    assertPrivateChannels(got, [command]);
+  }
+  const invalidCandidate = await f.call(batch("session", [
+    { path: "secrets", operation: "upsert", value: { env: "TOKEN", hostCmd: command, allowHosts: ["api.example"] } },
+    { path: "cpus", operation: "set", value: 0 },
+  ]));
+  assert.equal(invalidCandidate.details.outcome, "rejected"); noPrivate(invalidCandidate);
+  assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
+  await assert.rejects(stat(marker), { code: "ENOENT" });
+});
+
+test("agent literal writes reject atomically in single, batch and set-list forms", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",text_value="EXISTING_PRIVATE_SENTINEL",allow_hosts=["old.example"]}]\n');
+  const before = await readFile(f.paths.global, "utf8");
+  for (const source of [{ textValue: "NEW_PRIVATE_SENTINEL" }, { textValue: "" }, { text_value: "NEW_PRIVATE_SENTINEL" }, { value: "NEW_PRIVATE_SENTINEL" }]) {
+    const secret = { env: "TOKEN", allowHosts: ["new.example"], ...source };
+    for (const operation of [
+      { path: "secrets", operation: "upsert", value: secret },
+      { path: "secrets", operation: "set", value: [{ env: "PUBLIC", hostEnv: "PUBLIC_SOURCE", allowHosts: ["public.example"] }, secret] },
+    ]) for (const scope of ["session", "project", "global"]) {
+      for (const proposal of [{ scope, ...operation }, batch(scope, [{ path: "show_footer", operation: "set", value: false }, operation])]) {
+        const got = await f.call(proposal);
+        assert.equal(got.details.outcome, "rejected"); noPrivate(got);
+      }
+    }
+  }
+  assert.deepEqual(f.editor.temporary(), {});
+  assert.equal(await readFile(f.paths.global, "utf8"), before);
+  await assert.rejects(stat(f.paths.project), { code: "ENOENT" });
+  assert.deepEqual(f.reviews, []); assert.equal(f.reloads(), 0);
+});
+
+test("secret setters roundtrip public host sources and retain private literals through metadata-only edits", async (t) => {
+  for (const scope of ["session", "project", "global"] as const) {
+    const f = await fixture(t);
+    const marker = join(f.root, "inspection-must-not-execute");
+    const command = `touch ${JSON.stringify(marker)}`;
+    f.input.env!.LITERAL_PRIVATE_SENTINEL = "EXPANDED_PRIVATE_SENTINEL";
+    f.input.env!.PUBLIC_HOST_SOURCE = "RESOLVED_PRIVATE_SENTINEL";
+    const sources = [{ textValue: "$ENV:LITERAL_PRIVATE_SENTINEL" }, { hostEnv: "PUBLIC_HOST_SOURCE" },
+      { hostCmd: command }, { textValue: "$FILE:LITERAL_PRIVATE_SENTINEL" }];
+    const forbidden = ["LITERAL_PRIVATE_SENTINEL", "RESOLVED_PRIVATE_SENTINEL"];
+    for (const source of sources) {
+      const secret = { env: "TOKEN", ...source, allowHosts: ["api.example"] };
+      // Literal writes belong to the native editor, never the agent setter.
+      if ("textValue" in source) {
+        const draft = await f.editor.open(scope === "session" ? "temporary" : scope);
+        draft.upsertSecret(secret); await draft.apply();
+        await f.control.reload();
+      } else {
+        const changed = await f.call({ scope, path: "secrets", operation: "upsert", value: secret });
+        assert.equal(changed.details.outcome, "applied"); noPrivate(changed); assertPrivateChannels(changed, forbidden);
+        const key = "hostEnv" in source ? "host_env" : "host_cmd";
+        assert.equal(changed.details.review.desired.after.secrets[0][key], source.hostEnv ?? source.hostCmd);
+      }
+      const metadata = await f.call({ scope, path: "secrets", operation: "upsert", previousIdentity: "TOKEN",
+        value: { env: "RENAMED", allowHosts: ["changed.example"] } });
+      assert.equal(metadata.details.outcome, "applied"); noPrivate(metadata); assertPrivateChannels(metadata, forbidden);
+      const saved = scope === "session" ? f.editor.temporary().secrets : parseTomlConfig(await readFile(f.paths[scope], "utf8"), scope).value.secrets;
+      assert.deepEqual(saved, [{ env: "RENAMED", ...source, allowHosts: ["changed.example"] }]);
+      if ("textValue" in source) assert.equal(f.control.getEffectiveConfig().config.secrets[0]!.textValue, source.textValue);
+      for (const format of ["text", "json"]) {
+        const inspected = await f.get({ sections: ["desired", "layers", "runtime"], paths: ["secrets"], format });
+        assert.equal(inspected.details.outcome, "inspected"); noPrivate(inspected); assertPrivateChannels(inspected, forbidden);
+        const key = "hostEnv" in source ? "host_env" : "hostCmd" in source ? "host_cmd" : "text_value";
+        assert.equal(inspected.details.desired.secrets[0][key], source.hostEnv ?? source.hostCmd ?? "<redacted>");
+      }
+      const renamed = await f.call({ scope, path: "secrets", operation: "upsert", previousIdentity: "RENAMED",
+        value: { env: "TOKEN", allowHosts: ["api.example"] } });
+      assert.equal(renamed.details.outcome, "applied"); noPrivate(renamed);
+      noPrivate(f.reviews);
+      for (const title of f.reviews) {
+        const [safeQuestion, hostAppendix] = title.split("\n\nHOST secret commands (");
+        for (const value of forbidden) assert.equal(safeQuestion!.includes(value), false);
+        if (hostAppendix) assert.ok(hostAppendix.includes(JSON.stringify(command)));
+      }
+      if ("hostCmd" in source) assert.ok(f.reviews.some((title) => title.includes(JSON.stringify(command))));
+    }
+    await assert.rejects(stat(marker), { code: "ENOENT" });
+  }
 });
 
 test("cross-field validation identifies related operations instead of falsely blaming one entry", async (t) => {
@@ -214,7 +333,25 @@ test("discovery: every leaf has value schema, constraints, operations, scopes an
   assert.equal(schema.cpus.valueSchema.maximum, 64); assert.equal(schema.memory_mib.valueSchema.minimum, 128);
   assert.equal(schema["docker.startup_timeout_ms"].valueSchema.type, "integer");
   assert.deepEqual(schema.secrets.upsertSchema.required, ["env", "allowHosts"]);
-  assert.deepEqual(schema.secrets.valueSchema.items.required, ["env", "allowHosts", "value"]);
+  assert.deepEqual(schema.secrets.valueSchema.items.required, ["env", "allowHosts"]);
+  assert.equal(schema.secrets.valueSchema.items.properties.textValue, undefined);
+  assert.equal(schema.secrets.upsertSchema.properties.textValue, undefined);
+  assert.equal("value" in schema.secrets.valueSchema.items.properties, false);
+  assert.equal("value" in schema.secrets.upsertSchema.properties, false);
+  const base = { env: "TOKEN", allowHosts: ["api.example"] };
+  for (const source of [{ hostEnv: "TOKEN" }, { hostCmd: "printf token" }]) {
+    assert.equal(Check(schema.secrets.valueSchema.items, { ...base, ...source }), true);
+    assert.equal(Check(schema.secrets.upsertSchema, { ...base, ...source }), true);
+  }
+  assert.equal(Check(schema.secrets.valueSchema.items, base), false);
+  assert.equal(Check(schema.secrets.upsertSchema, base), true);
+  for (const source of [{ textValue: "literal" }, { textValue: "" }, { textValue: "literal", hostEnv: "TOKEN" }, { textValue: "literal", hostCmd: "printf token" },
+    { hostEnv: "TOKEN", hostCmd: "printf token" }, { textValue: "literal", hostEnv: "TOKEN", hostCmd: "printf token" },
+    { value: "literal" }, { value: "literal", textValue: "literal" },
+    { value: "literal", hostEnv: "TOKEN" }, { value: "literal", hostCmd: "printf token" }]) {
+    assert.equal(Check(schema.secrets.valueSchema.items, { ...base, ...source }), false);
+    assert.equal(Check(schema.secrets.upsertSchema, { ...base, ...source }), false);
+  }
   assert.equal(schema.show_footer.effect, "live"); assert.equal(schema["network.mode"].effect, "restart");
   assert.match(schema["network.allow_hosts"].semantics.wildcards, /Rejected in network.allow_hosts/);
   assert.deepEqual(schema.secrets.upsertSchema.properties.allowHosts.items.anyOf[0], schema["network.allow_hosts"].semantics.domainFormat);
@@ -229,7 +366,8 @@ test("discovery: every leaf has value schema, constraints, operations, scopes an
 test("discovery survives invalid desired configuration without leaking parser input", async (t) => {
   const f = await fixture(t);
   await writeFile(f.paths.global, 'network.allow_hosts = ["*.github.com"]\n');
-  const got = await f.get(); assert.equal(got.details.outcome, "rejected");
+  const got = await f.get(); assert.equal(got.details.outcome, "inspected");
+  assert.equal(got.details.recovery.configurationValid, false);
   assert.ok(got.details.settingsSchema["network.allow_hosts"]);
   assert.match(got.details.capabilities.network.hostMatching.wildcards, /Rejected in network.allow_hosts/);
   assert.equal(got.details.desired, undefined); assert.equal(f.reloads(), 0);
@@ -243,7 +381,7 @@ test("registered setter schema accepts either single or batch form, rejects mixe
 
 test("effective policy: desired versus adoption, DNS exceptions and secret scopes are distinct", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nnetwork.mode = "allowlist"\nnetwork.allow_hosts = ["github.com", "api.github.com", "10.0.0.0/8"]\nsecrets = [{env="TOKEN",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["other.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nnetwork.mode = "allowlist"\nnetwork.allow_hosts = ["github.com", "api.github.com", "10.0.0.0/8"]\nsecrets = [{env="TOKEN",host_env="PUBLIC_HOST_SOURCE",allow_hosts=["other.example"]}]\n');
   let got = await f.get(); let policy = got.details.effectivePolicy;
   assert.equal(policy.adopted, null); assert.equal(policy.desired.egress, "default-deny");
   assert.deepEqual(policy.desired.allowedDestinations.map((item: any) => item.matcher), ["sdk-domain-exact", "sdk-domain-exact", "sdk-cidr"]);
@@ -316,7 +454,7 @@ test("batch: strict execute-time validation rejects mixed shapes, nested scope, 
     batch("session", [{ path: "network.mode", operation: "set", value: "allowlist" }, { path: "network.allow_dns", operation: "set", value: false }]),
     batch("project", [{ path: "sandbox_name", operation: "set", value: null }]),
     batch("session", [{ path: "network.allow_hosts", operation: "set", value: ["*.github.com"] }]),
-    batch("session", [{ path: "secrets", operation: "upsert", value: { env: "A", value: "PRIVATE_SENTINEL", allowHosts: ["api*.github.com"] } }]),
+    batch("session", [{ path: "secrets", operation: "upsert", value: { env: "A", textValue: "PRIVATE_SENTINEL", allowHosts: ["api*.github.com"] } }]),
   ];
   for (const proposal of invalid) assert.equal((await f.call(proposal)).details.outcome, "rejected", JSON.stringify(proposal));
   assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
@@ -348,17 +486,20 @@ test("batch: no-op still approves once; reload failure reports the entire saved 
   assert.equal(f.reloads(), 1);
 });
 
-test("batch: native secret edits retain credentials, preserve siblings and mask the complete review/results", async (t) => {
+test("batch: native secret edits preserve siblings and roundtrip public source metadata", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["a.example"]},{env="B",value="B_PRIVATE_SENTINEL",allow_hosts=["b.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",host_env="PUBLIC_HOST_SOURCE",allow_hosts=["a.example"]},{env="B",host_cmd="printf PUBLIC_COMMAND_SOURCE",allow_hosts=["b.example"]}]\n');
   const got = await f.call(batch("session", [
     { path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["changed.example"] } },
     { path: "network.allow_hosts", operation: "set", value: ["github.com"] },
     { path: "network.mode", operation: "set", value: "allowlist" },
   ]));
-  assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews); noPrivate(await f.get());
-  assert.equal(f.editor.temporary().secrets![0]!.value, "$ENV:PRIVATE_SENTINEL");
-  assert.equal(f.editor.temporary().secrets![1]!.value, "B_PRIVATE_SENTINEL");
+  assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews);
+  const inspected = await f.get(); noPrivate(inspected);
+  assert.equal(inspected.details.desired.secrets[0].host_env, "PUBLIC_HOST_SOURCE");
+  assert.equal(inspected.details.desired.secrets[1].host_cmd, "printf PUBLIC_COMMAND_SOURCE");
+  assert.equal(f.editor.temporary().secrets![0]!.hostEnv, "PUBLIC_HOST_SOURCE");
+  assert.equal(f.editor.temporary().secrets![1]!.hostCmd, "printf PUBLIC_COMMAND_SOURCE");
   assert.equal(f.reviews.length, 1); assert.equal(f.reloads(), 1);
   const noResurrection = await f.call(batch("session", [
     { path: "secrets", operation: "set", value: [] },
@@ -399,23 +540,29 @@ test("msb_config_get: all layers and default/environment/legacy provenance remai
   assert.deepEqual(details.runtime.adopted.settings, { cpus: 1 });
 });
 
-test("msb_config_get and reviews: mask literals/ENV/FILE, unknown raw data, errors and every serialized channel", async (t) => {
+test("msb_config_get and reviews: expose host metadata but mask literals, unknown raw data and errors", async (t) => {
   const f = await fixture(t);
-  await writeFile(join(dirname(f.paths.global), "credential"), "RESOLVED_PRIVATE_SENTINEL");
   await writeFile(f.paths.global, `auto_start = false
 unknown_field = { body = "UNRECOGNIZED_RAW_VALUE", value = "UNKNOWN_PRIVATE_SENTINEL" }
-secrets = [{ env = "A", value = "LITERAL_PRIVATE_SENTINEL", allow_hosts = ["a.example"], unknown = "UNRECOGNIZED_RAW_VALUE" }, { env = "B", value = "$ENV:ENV_PRIVATE_SENTINEL", allow_hosts = ["b.example"] }, { env = "C", value = "$FILE:credential", allow_hosts = ["c.example"] }]
+secrets = [{ env = "A", text_value = "LITERAL_PRIVATE_SENTINEL", allow_hosts = ["a.example"], unknown = "UNRECOGNIZED_RAW_VALUE" }, { env = "B", host_env = "PUBLIC_HOST_SOURCE", allow_hosts = ["b.example"] }, { env = "C", host_cmd = "printf PUBLIC_COMMAND_SOURCE", allow_hosts = ["c.example"] }, { env = "D", text_value = "$ENV:LITERAL_PRIVATE_SENTINEL", allow_hosts = ["d.example"] }, { env = "E", text_value = "$FILE:LITERAL_PRIVATE_SENTINEL", allow_hosts = ["e.example"] }]
 `);
-  f.input.env!.ENV_PRIVATE_SENTINEL = "RESOLVED_PRIVATE_SENTINEL";
+  f.input.env!.PUBLIC_HOST_SOURCE = "RESOLVED_PRIVATE_SENTINEL";
   const got = await f.get(); noPrivate(got); assert.ok(got.details.warnings.length);
-  assert.equal(got.details.layers.global.secrets[0].value, "<redacted>");
+  assert.equal(got.details.layers.global.secrets[0].text_value, "<redacted>");
+  assert.equal(got.details.layers.global.secrets[1].host_env, "PUBLIC_HOST_SOURCE");
+  assert.equal(got.details.layers.global.secrets[2].host_cmd, "printf PUBLIC_COMMAND_SOURCE");
+  assert.equal(got.details.layers.global.secrets[3].text_value, "<redacted>");
+  assert.equal(got.details.layers.global.secrets[4].text_value, "<redacted>");
   assert.equal("unknown_field" in got.details.layers.global, false);
   const changed = await f.call({ scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["new.example"] } });
   assert.equal(changed.details.outcome, "applied"); noPrivate(changed); noPrivate(f.reviews);
   f.failReload(); const failed = await f.call(set("session", "allow_host_execution", true));
   assert.equal(failed.details.outcome, "saved_but_reload_failed"); noPrivate(failed);
   await writeFile(f.paths.project, 'cpus = "INVALID_PRIVATE_SENTINEL"\n');
-  noPrivate(await f.get()); assert.equal((await f.get()).details.outcome, "rejected");
+  const degraded = await f.get(); noPrivate(degraded);
+  assert.equal(degraded.details.outcome, "inspected");
+  assert.equal(degraded.details.recovery.configurationValid, false);
+  assert.equal(degraded.details.desired, undefined);
 });
 
 test("msb_config_set: exact one scope/operation schema; invalid, removed and unsafe proposals cannot review or mutate", async (t) => {
@@ -424,9 +571,10 @@ test("msb_config_set: exact one scope/operation schema; invalid, removed and uns
   const invalid = [set("ephemeral"), set("temporary"), set("Session"), set("workspace"), set("session", "host_ro_allowlist", []), set("session", "cpus.foo", 1), set("session", "network", {}), set("project", "sandbox_name", null), set("session", "cpus", 0), set("session", "cpus", {}),
     { ...set(), auto_approve: true }, { ...set(), file: "/tmp/forbidden" }, { ...set(), identity: "unexpected" }, { ...set(), previousIdentity: "unexpected" }, { ...set(), operations: [] },
     { scope: "session", path: "cpus", operation: "remove", identity: "a" },
-    { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], value: "<redacted>" } },
-    { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], value: "$ENV:[REDACTED]" } },
-    set("global", "secrets", [{ env: "A", allowHosts: ["a.example"], value: "LITERAL_PRIVATE_SENTINEL", unknown: true }]),
+    { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], textValue: "<redacted>" } },
+    { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], hostEnv: "<redacted>" } },
+    { scope: "project", path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["a.example"], hostCmd: "<redacted>" } },
+    set("global", "secrets", [{ env: "A", allowHosts: ["a.example"], textValue: "LITERAL_PRIVATE_SENTINEL", unknown: true }]),
   ];
   for (const proposal of invalid) assert.equal((await f.call(proposal)).details.outcome, "rejected", JSON.stringify(proposal));
   assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
@@ -491,9 +639,9 @@ test("msb_config_set: shared modal lease rejects concurrent tools/panel without 
 for (const scope of ["global", "project", "session"]) {
   test(`msb_config_set: ${scope} sparse scalar/entry/inherit isolation and credential retention`, async (t) => {
     const f = await fixture(t);
-    await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nunknown = "UNRECOGNIZED_RAW_VALUE"\nsecrets = [{env="GLOBAL",value="$ENV:G",allow_hosts=["g.example"]}]\n');
-    await writeFile(f.paths.project, 'memory_mib = 4096\nsecrets = [{env="PROJECT",value="$ENV:P",allow_hosts=["p.example"]}]\n');
-    const temp = await f.editor.open("temporary"); temp.upsertSecret({ env: "TEMP", value: "$ENV:T", allowHosts: ["t.example"] }); await temp.apply();
+    await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nunknown = "UNRECOGNIZED_RAW_VALUE"\nsecrets = [{env="GLOBAL",host_env="G",allow_hosts=["g.example"]}]\n');
+    await writeFile(f.paths.project, 'memory_mib = 4096\nsecrets = [{env="PROJECT",host_env="P",allow_hosts=["p.example"]}]\n');
+    const temp = await f.editor.open("temporary"); temp.upsertSecret({ env: "TEMP", hostEnv: "T", allowHosts: ["t.example"] }); await temp.apply();
     const globalBefore = await readFile(f.paths.global, "utf8"); const projectBefore = await readFile(f.paths.project, "utf8");
     const own = scope === "global" ? "GLOBAL" : scope === "project" ? "PROJECT" : "TEMP";
     const got = await f.call({ scope, path: "secrets", operation: "upsert", value: { env: own, allowHosts: ["new.example"] } });
@@ -507,7 +655,7 @@ for (const scope of ["global", "project", "session"]) {
     assert.equal(names.includes("TEMP"), scope === "session");
     if (scope === "global") { assert.deepEqual(names, ["GLOBAL"]); assert.match(await readFile(f.paths.global, "utf8"), /UNRECOGNIZED_RAW_VALUE/); }
     if (scope === "project") assert.deepEqual(names, ["PROJECT"]);
-    assert.equal(layer.secrets!.find((secret) => secret.env === own)!.value, `$ENV:${own[0]}`);
+    assert.equal(layer.secrets!.find((secret) => secret.env === own)!.hostEnv, own[0]);
     if (scope !== "global") assert.equal(await readFile(f.paths.global, "utf8"), globalBefore);
     if (scope !== "project") assert.equal(await readFile(f.paths.project, "utf8"), projectBefore);
     assert.equal((await f.call({ scope, path: "secrets", operation: "remove", identity: own })).details.outcome, "applied");
@@ -552,7 +700,7 @@ for (const scope of ["session", "project", "global"]) test(`setter channels: ${s
     { path: "network.mode", operation: "set", value: "allowlist" },
     { path: "pass_through_tools", operation: "set", value: ["trusted"] },
     { path: "mounts", operation: "upsert", value: { type: "dir", hostPath, guestPath: "/mnt/data", readonly: false, options: [] } },
-    { path: "secrets", operation: "upsert", value: { env: "TOKEN", value: "$ENV:PRIVATE_SENTINEL", allowHosts: ["api.example"] } },
+    { path: "secrets", operation: "upsert", value: { env: "TOKEN", hostEnv: "PUBLIC_HOST_SOURCE", allowHosts: ["api.example"] } },
   ]);
   f.choose(async () => {
     proposal.operations.push({ path: "host_env", operation: "set", value: ["UNREVIEWED_PRIVATE_SENTINEL"] });
@@ -563,10 +711,11 @@ for (const scope of ["session", "project", "global"]) test(`setter channels: ${s
   assert.equal(got.details.saved, true); assert.equal(got.details.reloaded, false);
   assert.equal(f.reloads(), 1); assert.equal(f.control.getEffectiveConfig().config.network.mode, "default");
   assert.match(got.content[0].text, /saved but not fully activated/);
-  assert.doesNotMatch(got.content[0].text, /Saved · reloaded|runtime active|Host variables/);
+  assert.doesNotMatch(got.content[0].text, /Saved · reloaded|runtime active|Host variables: \[/);
+  assert.deepEqual((await f.get()).details.desired.host_env, []);
   for (const warning of [/DNS\/IP/, /DNS exfiltration/, /Restart: temporary guest data/, /May start the sandbox/, /without per-call host approval/, /allows changes to HOST files/, /Replaces this scope’s entire list/]) assert.match(got.content[0].text, warning);
   assert.equal(got.content[0].text.includes("Settings reload does not clear"), scope === "session");
-  assert.match(got.content[0].text, /Credential: <redacted>/); noPrivate(got); noPrivate(f.reviews);
+  assert.match(got.content[0].text, /Host variables: PUBLIC_HOST_SOURCE/); noPrivate(got); noPrivate(f.reviews);
   assert.match(f.tools.get("msb_config_set")!.description, /After completion, explain relevant returned safety\/impact warnings to the user/);
 });
 
@@ -613,21 +762,14 @@ test("msb_config_set: real controller reconciliation, no bootstrap outside selec
   assert.equal((await call(set("project"))).details.outcome, "saved_but_reload_failed"); assert.equal(boots, 0);
 });
 
-test("msb_config_set: proposed mount/FILE canonical identities are bound to the approved candidate too", async (t) => {
-  for (const kind of ["mount", "secret"] as const) {
-    const f = await fixture(t);
-    const first = join(f.root, "first"); const second = join(f.root, "second"); const alias = join(f.root, "alias");
-    if (kind === "mount") { await mkdir(first); await mkdir(second); }
-    else { await writeFile(first, "FIRST_PRIVATE_SENTINEL"); await writeFile(second, "SECOND_PRIVATE_SENTINEL"); }
-    await symlink(first, alias);
-    f.choose(async () => { await rm(alias); await symlink(second, alias); return "Yes"; });
-    const proposal = kind === "mount"
-      ? { scope: "project", path: "mounts", operation: "upsert", value: { type: "dir", hostPath: alias, guestPath: "/mnt/data", readonly: true, options: [] } }
-      : { scope: "project", path: "secrets", operation: "upsert", value: { env: "TOKEN", value: `$FILE:${alias}`, allowHosts: ["a.example"] } };
-    const got = await f.call(proposal);
-    assert.equal(got.details.outcome, "conflict"); noPrivate(got); noPrivate(f.reviews);
-    assert.equal(f.reloads(), 0); await assert.rejects(stat(f.paths.project), { code: "ENOENT" });
-  }
+test("msb_config_set: proposed mount canonical identity is bound to the approved candidate too", async (t) => {
+  const f = await fixture(t);
+  const first = join(f.root, "first"); const second = join(f.root, "second"); const alias = join(f.root, "alias");
+  await mkdir(first); await mkdir(second); await symlink(first, alias);
+  f.choose(async () => { await rm(alias); await symlink(second, alias); return "Yes"; });
+  const got = await f.call({ scope: "project", path: "mounts", operation: "upsert", value: { type: "dir", hostPath: alias, guestPath: "/mnt/data", readonly: true, options: [] } });
+  assert.equal(got.details.outcome, "conflict"); noPrivate(got); noPrivate(f.reviews);
+  assert.equal(f.reloads(), 0); await assert.rejects(stat(f.paths.project), { code: "ENOENT" });
 });
 
 
@@ -637,56 +779,84 @@ function assertPrivateChannels(value: { content: unknown; details: unknown }, fo
   }
 }
 
-for (const valueKey of ["value", "VALUE"] as const) for (const source of ["global", "project", "legacy", "environment", "cli"] as const) {
-  for (const kind of ["literal", "ENV", "FILE"] as const) {
-    test(`privacy: hidden ${source} ${kind} ${valueKey} credentials mask approval, applied/no-op/failed-reload results and readonly inspection`, async (t) => {
+for (const valueKey of ["value", "VALUE", "text_value", "TEXT_VALUE"] as const) for (const source of ["global", "project", "legacy", "environment", "cli"] as const) {
+  for (const kind of ["literal", "ENV literal", "FILE literal", "hostEnv", "hostCmd"] as const) {
+    const publicSource = kind === "hostEnv" || kind === "hostCmd";
+    const deprecated = (valueKey === "value" || valueKey === "VALUE") && !publicSource;
+    test(`${publicSource ? "metadata" : "privacy"}: hidden ${source} ${kind} ${valueKey} sources ${deprecated ? "reject deprecated sources privately without writes, reloads or reviews" : publicSource ? "roundtrip public metadata in results and inspection" : "mask approval, applied/no-op/failed-reload results and readonly inspection"}`, async (t) => {
       const f = await fixture(t);
-      const identifier = kind === "literal" ? "AbcPrivateCredential123" : kind === "ENV" ? "PrivateEnvReference123" : "PrivateFileReference123";
-      const credential = kind === "literal" ? identifier : `$${kind}:${identifier}`;
-      const raw = `secrets = [{ env = "TOKEN", ${valueKey} = ${JSON.stringify(credential)}, allow_hosts = ["api.example"] }]\n${JSON.stringify(identifier)} = true\n`;
+      const credential = kind === "literal" ? "AbcPrivateCredential123" : kind === "ENV literal" ? "$ENV:PrivateLiteralEnv123"
+        : kind === "FILE literal" ? "$FILE:PrivateLiteralFile123" : kind === "hostEnv" ? "PrivateEnvReference123" : "printf PrivateCmdReference123";
+      const sourceKey = kind === "hostEnv" ? "host_env" : kind === "hostCmd" ? "host_cmd" : valueKey.toLowerCase();
+      const key = valueKey === valueKey.toUpperCase() ? sourceKey.toUpperCase() : sourceKey;
+      const raw = `secrets = [{ env = "TOKEN", ${key} = ${JSON.stringify(credential)}, allow_hosts = ["api.example"] }]\n${JSON.stringify(credential)} = true\n`;
       const legacy = join(f.input.homedir!, ".config/pi-msb/config.toml");
       let target: "global" | "project" = "project";
       if (source === "environment") {
-        f.input.env!.PI_MSB_SECRETS = JSON.stringify([{ env: "TOKEN", [valueKey]: credential, allowHosts: ["api.example"] }]);
-        f.input.env![`PI_MSB_${identifier}`] = "true";
+        f.input.env!.PI_MSB_SECRETS = JSON.stringify([{ env: "TOKEN", [key === "text_value" ? "textValue" : key]: credential, allowHosts: ["api.example"] }]);
+        f.input.env![`PI_MSB_${credential}`] = "true";
       } else if (source === "cli") f.input.cliOverridesToml = raw;
       else {
         const path = source === "legacy" ? legacy : f.paths[source];
         await mkdir(dirname(path), { recursive: true });
-        if (kind === "FILE") await writeFile(join(dirname(path), identifier), "RESOLVED_FILE_BYTES_PRIVATE");
         await writeFile(path, raw);
       }
       if (source === "project") {
         target = "global";
-        const temporary = await f.editor.open("temporary"); temporary.set("secrets", []); await temporary.apply();
+        if (!deprecated) {
+          const temporary = await f.editor.open("temporary"); temporary.set("secrets", []); await temporary.apply();
+        }
       } else await writeFile(f.paths.project, "secrets = []\n");
-      const forbidden = [identifier, credential, "RESOLVED_FILE_BYTES_PRIVATE"];
+      const forbidden = publicSource ? [] : [credential];
+      if (deprecated) {
+        const snapshot = () => Promise.all([f.paths.global, f.paths.project, legacy].map((path) =>
+          readFile(path, "utf8").catch((error) => { if (error.code === "ENOENT") return null; throw error; })));
+        const before = await snapshot();
+        const temporaryBefore = structuredClone(f.editor.temporary());
+        for (const result of [await f.get(), await f.get()]) {
+          assert.equal(result.details.outcome, "inspected");
+          assert.equal(result.details.recovery.configurationValid, false);
+          assert.equal(result.details.desired, undefined); assertPrivateChannels(result, forbidden);
+        }
+        for (const result of [await f.call(set(target)), await f.call(set(target, "show_footer", true))]) {
+          assert.equal(result.details.outcome, "rejected"); assertPrivateChannels(result, forbidden);
+        }
+        assert.deepEqual(await snapshot(), before);
+        assert.deepEqual(f.editor.temporary(), temporaryBefore);
+        assert.equal(f.reloads(), 0); assert.deepEqual(f.reviews, []);
+        return;
+      }
       const initial = await f.get(); assert.equal(initial.details.outcome, "inspected"); assertPrivateChannels(initial, forbidden);
+      if (publicSource && (source === "global" || source === "project")) {
+        assert.equal(initial.details.layers[source].secrets[0][sourceKey], credential);
+      }
       const applied = await f.call(set(target)); assert.equal(applied.details.outcome, "applied"); assertPrivateChannels(applied, forbidden);
       const noOp = await f.call(set(target)); assert.equal(noOp.details.outcome, "no_op"); assertPrivateChannels(noOp, forbidden);
       f.failReload(); const failed = await f.call(set(target, "show_footer", true));
       assert.equal(failed.details.outcome, "saved_but_reload_failed"); assertPrivateChannels(failed, forbidden);
       for (const title of f.reviews) for (const secret of forbidden) assert.equal(title.includes(secret), false);
       const after = await f.get(); assert.equal(after.details.outcome, "inspected"); assertPrivateChannels(after, forbidden);
-      assert.ok(applied.details.review.warnings.some((warning: string) => warning.includes("<redacted>")));
-      assert.ok(Object.keys(applied.details.review.provenance).some((key) => key.includes("<redacted>")));
+      const expected = publicSource ? credential : "<redacted>";
+      assert.ok(applied.details.review.warnings.some((warning: string) => warning.includes(expected)));
+      assert.ok(Object.keys(applied.details.review.provenance).some((key) => key.includes(expected)));
     });
   }
 }
 
-for (const valueKey of ["value", "VALUE"] as const) test(`privacy: historical real masked adoption keeps literal and bare ENV/FILE identifiers private after desired ${valueKey} sources disappear`, async (t) => {
+for (const valueKey of ["text_value", "TEXT_VALUE"] as const) test(`privacy: historical adoption retains public host sources and private literals after desired ${valueKey} sources disappear`, async (t) => {
   const f = await fixture(t);
-  const literal = "AbcPrivateCredential123"; const envReference = "PrivateAdoptedEnv123"; const fileReference = "PrivateAdoptedFile123";
+  const literal = "AbcPrivateCredential123"; const envReference = "PrivateAdoptedEnv123"; const command = "pwd";
+  const envKey = valueKey === "text_value" ? "host_env" : "HOST_ENV";
+  const cmdKey = valueKey === "text_value" ? "host_cmd" : "HOST_CMD";
   const hidden = "PrivateShadowedAdoption123";
   const env: NodeJS.ProcessEnv = { HOME: f.input.homedir, [envReference]: "RESOLVED_ENV_BYTES_PRIVATE" };
   const legacy = join(f.input.homedir!, ".config/pi-msb/config.toml");
   await mkdir(dirname(legacy), { recursive: true });
   await writeFile(legacy, `secrets = [{env="HIDDEN",${valueKey}="${hidden}",allow_hosts=["api.example"]}]\n`);
-  await writeFile(join(dirname(f.paths.global), fileReference), "RESOLVED_FILE_BYTES_PRIVATE");
   await writeFile(f.paths.global, `auto_start = true\nprune_on_start = false\nbootstrap_tools = false\nimage = "${hidden}-image"\n[docker]\nmode = "disabled"\n` +
     `[[secrets]]\nenv = "LITERAL_TOKEN"\n${valueKey} = "${literal}"\nallow_hosts = ["${literal}.example"]\n` +
-    `[[secrets]]\nenv = "ENV_TOKEN"\n${valueKey} = "$ENV:${envReference}"\nallow_hosts = ["${envReference}.example"]\n` +
-    `[[secrets]]\nenv = "FILE_TOKEN"\n${valueKey} = "$FILE:${fileReference}"\nallow_hosts = ["${fileReference}.example"]\n`);
+    `[[secrets]]\nenv = "ENV_TOKEN"\n${envKey} = "${envReference}"\nallow_hosts = ["${envReference}.example"]\n` +
+    `[[secrets]]\nenv = "CMD_TOKEN"\n${cmdKey} = "${command}"\nallow_hosts = ["${command}.example"]\n`);
   const sdk = fakeSdk([]);
   const integration = createMsbIntegration({ sessionId: "one", cwd: f.cwd, agentDir: f.input.agentDir, configDirName: ".pi", env,
     sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(f.root, "owner.lock"), release: async () => {} }) });
@@ -694,13 +864,16 @@ for (const valueKey of ["value", "VALUE"] as const) test(`privacy: historical re
   assert.equal((await integration.configureSession({ sessionId: "one", cwd: f.cwd, projectTrusted: true })).status, "active");
   const maskedPanelSnapshot = integration.control.getRuntimePolicy!()!;
   const maskedPanelConfig = parseTomlConfig(maskedPanelSnapshot.effectiveToml, "global").value;
-  // Native panel snapshots deliberately mask only value; regression must not supply an unmasked mock.
-  assert.ok(maskedPanelConfig.secrets!.every((secret) => secret.value === "<redacted>"));
+  // Use real masked snapshots, not an unmasked mock, to exercise retained adoption privacy.
+  assert.ok(maskedPanelConfig.secrets!.every((secret) => (secret.textValue ?? secret.hostEnv ?? secret.hostCmd) === "<redacted>"));
   assert.ok(maskedPanelSnapshot.effectiveToml.includes(literal));
   assert.ok(maskedPanelSnapshot.effectiveToml.includes(envReference));
-  assert.ok(maskedPanelSnapshot.effectiveToml.includes(fileReference));
+  assert.ok(maskedPanelSnapshot.effectiveToml.includes(command));
   const safeAdoption = integration.control.getAgentRuntimePolicy!()!;
-  const forbidden = [literal, envReference, fileReference, hidden, `$ENV:${envReference}`, `$FILE:${fileReference}`, "RESOLVED_ENV_BYTES_PRIVATE", "RESOLVED_FILE_BYTES_PRIVATE"];
+  const forbidden = [literal, hidden, "RESOLVED_ENV_BYTES_PRIVATE"];
+  const adoptedSecrets = safeAdoption.settings.secrets as Record<string, unknown>[];
+  assert.equal(adoptedSecrets[1]!.host_env, envReference);
+  assert.equal(adoptedSecrets[2]!.host_cmd, command);
   for (const secret of forbidden) assert.equal(JSON.stringify(safeAdoption).includes(secret), false);
   assert.deepEqual(safeAdoption.knownFields, maskedPanelSnapshot.knownFields);
   assert.deepEqual(safeAdoption.provenance, maskedPanelSnapshot.provenance);
@@ -734,7 +907,7 @@ for (const valueKey of ["value", "VALUE"] as const) test(`privacy: historical re
 
 test("privacy: legacy masked runtime adapters without a safe adoption accessor expose no unprovable values", async (t) => {
   const f = await fixture(t);
-  f.adopt({ effectiveToml: 'secrets = [{ env="TOKEN", value="<redacted>", allow_hosts=["AbcPrivateCredential123.example"] }]\n',
+  f.adopt({ effectiveToml: 'secrets = [{ env="TOKEN", text_value="<redacted>", allow_hosts=["AbcPrivateCredential123.example"] }]\n',
     knownFields: ["secrets"], provenance: { secrets: "host-default" }, verification: "created", automaticSandboxName: true, adoptedAt: 1 });
   assert.equal(f.control.getAgentRuntimePolicy, undefined);
   const inspected = await f.get(); assert.equal(inspected.details.runtime.adopted, null);
@@ -747,15 +920,13 @@ test("privacy: legacy masked runtime adapters without a safe adoption accessor e
 
 test("privacy: resolver sanitizer capture changes no reads/output and runs only after successful resolution", async (t) => {
   const f = await fixture(t);
-  const reference = "PrivateResolverFile123";
-  const bytes = "UNREAD_FILE_CREDENTIAL_BYTES";
-  const secretFile = join(dirname(f.paths.global), reference);
-  await writeFile(secretFile, bytes);
-  await writeFile(f.paths.global, `secrets = [{env="TOKEN",value="$FILE:${reference}",allow_hosts=["api.example"]}]\n`);
+  const reference = "PrivateResolverEnv123";
+  const marker = join(f.root, "must-not-execute-private-command");
+  const command = `touch ${JSON.stringify(marker)}`;
+  await writeFile(f.paths.global, `secrets = [{env="TOKEN",host_env="${reference}",allow_hosts=["api.example"]},{env="CMD",host_cmd=${JSON.stringify(command)},allow_hosts=["api.example"]}]\n`);
   const reads: string[] = [];
   const read = async (path: string) => {
     reads.push(path);
-    assert.notEqual(path, secretFile, "redactor capture must never read credential bytes");
     return readFile(path, "utf8").catch((error) => { if (error.code === "ENOENT") return null; throw error; });
   };
   const normal = await resolveConfig({ ...f.input, readFile: read }); const normalReads = [...reads]; reads.length = 0;
@@ -764,16 +935,19 @@ test("privacy: resolver sanitizer capture changes no reads/output and runs only 
   assert.deepEqual(captured, normal); assert.deepEqual(reads, normalReads);
   assert.deepEqual(Object.keys(captured), ["config", "provenance", "warnings"]);
   assert.equal(typeof sanitize, "function");
-  assert.deepEqual(sanitize!({ value: "PRIVATE_LOWERCASE", VALUE: "PRIVATE_UPPERCASE" }), { value: "<redacted>", VALUE: "<redacted>" });
-  assert.equal(sanitize!({ note: `${reference}.example`, descriptor: `$FILE:${reference}` }).note, "<redacted>.example");
+  assert.deepEqual(sanitize!({ value: "PRIVATE_LOWERCASE", VALUE: "PRIVATE_UPPERCASE", textValue: "PRIVATE_CAMELCASE", text_value: "PRIVATE_SNAKECASE", TEXT_VALUE: "PRIVATE_UPPER_SNAKECASE", hostEnv: reference, host_env: reference, hostCmd: command, HOST_CMD: command }),
+    { value: "<redacted>", VALUE: "<redacted>", textValue: "<redacted>", text_value: "<redacted>", TEXT_VALUE: "<redacted>", hostEnv: reference, host_env: reference, hostCmd: command, HOST_CMD: command });
+  assert.equal(sanitize!({ note: `${reference}.example`, descriptor: command }).note, `${reference}.example`);
+  assert.equal(sanitize!({ descriptor: command }).descriptor, command);
+  await assert.rejects(stat(marker), { code: "ENOENT" });
   await writeFile(f.paths.global, 'cpus = "invalid"\n');
   let callbacks = 0;
   await assert.rejects(resolveConfig(f.input, () => { callbacks++; })); assert.equal(callbacks, 0);
 });
 
-test("compact review: secret host edit includes only selected entry and changed hosts; rotation stays visibly masked", async (t) => {
+test("compact review: secret host edit includes only changed fields; rotation exposes public source metadata", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["keep.example","old.example"]}, {env="UNRELATED",value="OTHER_PRIVATE_SENTINEL",allow_hosts=["unrelated.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",host_env="PUBLIC_HOST_SOURCE",allow_hosts=["keep.example","old.example"]}, {env="UNRELATED",text_value="OTHER_PRIVATE_SENTINEL",allow_hosts=["unrelated.example"]}]\n');
   const edit = { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["keep.example", "new.example"] } };
   const changed = await f.call(edit);
   const text = f.reviews.at(-1)!;
@@ -786,20 +960,23 @@ test("compact review: secret host edit includes only selected entry and changed 
   assert.doesNotMatch(text, /\x1b/); noPrivate(changed); noPrivate(text);
   assert.equal((await f.call(edit)).details.outcome, "no_op");
   assert.match(f.reviews.at(-1)!, /No change/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|changed\)/);
-  const reference = `$FILE:${join(f.root, "ROTATED_PRIVATE_SENTINEL")}`;
-  await writeFile(reference.slice(6), "ROTATED_BYTES_PRIVATE_SENTINEL");
-  const rotated = await f.call({ ...edit, value: { ...edit.value, value: reference } });
+  const command = "printf ROTATED_PUBLIC_COMMAND";
+  const rotated = await f.call({ ...edit, value: { ...edit.value, hostCmd: command } });
   assert.equal(rotated.details.outcome, "applied"); noPrivate(rotated);
-  assert.match(f.reviews.at(-1)!, /- Credential: <redacted>\n\+ Credential: <redacted> \(changed\)/);
+  assert.match(f.reviews.at(-1)!, /- Host variables: PUBLIC_HOST_SOURCE\n\+ Host command: printf ROTATED_PUBLIC_COMMAND/);
   assert.doesNotMatch(f.reviews.at(-1)!, /Hosts|keep.example|old.example|new.example|UNRELATED/);
-  assert.equal((await f.call({ ...edit, value: { ...edit.value, value: reference } })).details.outcome, "no_op");
-  assert.doesNotMatch(f.reviews.at(-1)!, /Credential/);
+  const replacement = "printf REPLACED_PUBLIC_COMMAND";
+  const changedCommand = await f.call({ ...edit, value: { ...edit.value, hostCmd: replacement } });
+  assert.equal(changedCommand.details.outcome, "applied"); noPrivate(changedCommand);
+  assert.match(f.reviews.at(-1)!, /- Host command: printf ROTATED_PUBLIC_COMMAND\n\+ Host command: printf REPLACED_PUBLIC_COMMAND/);
+  assert.equal((await f.call({ ...edit, value: { ...edit.value, hostCmd: replacement } })).details.outcome, "no_op");
+  assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Host command/);
 });
 
 test("compact review: shadowed target baseline and retained higher-scope credential promotion are truthful", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",value="OLD_PRIVATE_SENTINEL",allow_hosts=["target.example"]}]\n');
-  await writeFile(f.paths.project, 'secrets = [{env="TOKEN",value="HIGH_PRIVATE_SENTINEL",allow_hosts=["higher.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",text_value="OLD_PRIVATE_SENTINEL",allow_hosts=["target.example"]}]\n');
+  await writeFile(f.paths.project, 'secrets = [{env="TOKEN",text_value="HIGH_PRIVATE_SENTINEL",allow_hosts=["higher.example"]}]\n');
   const got = await f.call({ scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["changed.example"] } });
   assert.equal(got.details.outcome, "applied");
   const text = f.reviews.at(-1)!; noPrivate(text);
@@ -827,8 +1004,8 @@ test("compact review: inherit/no-op and shadowed bypass intent keep only relevan
 
 test("compact review: native secret rename/remove and whole-list set/clear show changed fields without siblings", async (t) => {
   const f = await fixture(t);
-  const a = { env: "A", value: "A_PRIVATE_SENTINEL", allowHosts: ["a.example"] };
-  const b = { env: "B", value: "B_PRIVATE_SENTINEL", allowHosts: ["b.example"] };
+  const a = { env: "A", hostEnv: "PUBLIC_A_SOURCE", allowHosts: ["a.example"] };
+  const b = { env: "B", hostEnv: "PUBLIC_B_SOURCE", allowHosts: ["b.example"] };
   await f.call(set("global", "secrets", [a, b]));
   await f.call({ scope: "global", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "RENAMED", allowHosts: ["a.example"] } });
   assert.match(f.reviews.at(-1)!, /A → RENAMED/); assert.match(f.reviews.at(-1)!, /- Name: A\n\+ Name: RENAMED/);
@@ -838,7 +1015,7 @@ test("compact review: native secret rename/remove and whole-list set/clear show 
   await f.call(set("global", "secrets", [{ ...b, allowHosts: ["new.example"] }]));
   assert.match(f.resultTexts.at(-1)!, /Replaces this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Hosts: b.example\n\+ Hosts: new.example/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Name:/);
   await f.call(set("global", "secrets", []));
-  assert.match(f.resultTexts.at(-1)!, /Clears this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/);
+  assert.match(f.resultTexts.at(-1)!, /Clears this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Host variables: PUBLIC_B_SOURCE/);
 });
 
 test("compact review: mount edits/rename and scalar-list edits omit unchanged fields", async (t) => {
@@ -857,8 +1034,8 @@ test("compact review: mount edits/rename and scalar-list edits omit unchanged fi
 
 test("compact review: collection reorder, inherited assignment and removal reconciliation remain visible", async (t) => {
   const f = await fixture(t);
-  const a = { env: "A", value: "A_PRIVATE_SENTINEL", allowHosts: ["a.example"] };
-  const b = { env: "B", value: "B_PRIVATE_SENTINEL", allowHosts: ["b.example"] };
+  const a = { env: "A", hostEnv: "PUBLIC_A_SOURCE", allowHosts: ["a.example"] };
+  const b = { env: "B", hostEnv: "PUBLIC_B_SOURCE", allowHosts: ["b.example"] };
   await f.call(set("global", "secrets", [a, b]));
   await f.call(set("global", "secrets", [b, a]));
   assert.match(f.reviews.at(-1)!, /Entry order: \["A","B"\]/); assert.match(f.reviews.at(-1)!, /Entry order: \["B","A"\]/);
@@ -922,7 +1099,7 @@ test("compact review: malformed shadowed raw scalar is projected, never an unkno
 
 test("compact review: whole-list clear without an own assignment shows affected inherited entries", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="LOWER",value="LOWER_PRIVATE_SENTINEL",allow_hosts=["lower.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="LOWER",text_value="LOWER_PRIVATE_SENTINEL",allow_hosts=["lower.example"]}]\n');
   await f.call(set("project", "secrets", []));
   assert.match(f.reviews.at(-1)!, /Scope: Project/);
   assert.match(f.reviews.at(-1)!, /- Name: LOWER/); assert.match(f.reviews.at(-1)!, /- Hosts: \["lower.example"\]/);
@@ -960,7 +1137,7 @@ test("compact setter renderer: historical full-review results cannot fall back t
 
 test("compact review: renaming onto an inherited entry discloses the overwritten entry safely", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",value="A_PRIVATE_SENTINEL",allow_hosts=["a.example"]},{env="B",value="B_PRIVATE_SENTINEL",allow_hosts=["b.example"]}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",text_value="A_PRIVATE_SENTINEL",allow_hosts=["a.example"]},{env="B",text_value="B_PRIVATE_SENTINEL",allow_hosts=["b.example"]}]\n');
   const got = await f.call({ scope: "project", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "B", allowHosts: ["a.example"] } });
   assert.equal(got.details.outcome, "applied");
   assert.match(f.reviews.at(-1)!, /- Hosts: \["b.example"\]/);
@@ -969,11 +1146,12 @@ test("compact review: renaming onto an inherited entry discloses the overwritten
 
 test("compact review: malformed shadowed native entry fields retain the strict JSON whitelist", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",VALUE="UNKNOWN_PRIVATE_SENTINEL",allow_hosts={body="UNRECOGNIZED_RAW_VALUE"}}]\n');
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",TEXT_VALUE="UNKNOWN_PRIVATE_SENTINEL",allow_hosts={body="UNRECOGNIZED_RAW_VALUE"}}]\n');
   await writeFile(f.paths.project, "secrets = []\n");
-  const got = await f.call(set("global", "secrets", [{ env: "TOKEN", value: "NEW_PRIVATE_SENTINEL", allowHosts: ["new.example"] }]));
+  const got = await f.call(set("global", "secrets", [{ env: "TOKEN", hostEnv: "NEW_PUBLIC_SOURCE", allowHosts: ["new.example"] }]));
   assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews);
-  assert.match(f.reviews.at(-1)!, /- Hosts: <invalid>/); assert.match(f.reviews.at(-1)!, /Credential: <redacted> \(changed\)/);
+  assert.match(f.reviews.at(-1)!, /- Hosts: <invalid>/); assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/);
+  assert.match(f.reviews.at(-1)!, /\+ Host variables: NEW_PUBLIC_SOURCE/);
 });
 
 

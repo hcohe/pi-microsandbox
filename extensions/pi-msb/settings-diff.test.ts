@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { formatSettingsDiff, settingsDiff } from "./settings-diff.ts";
 import type { SettingsReviewFocus } from "./settings.ts";
-import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
+import { HOST_SECRET_COMMAND_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 
 function review(overrides: Partial<SettingsReviewFocus> = {}) {
   const focus: SettingsReviewFocus = {
@@ -12,6 +12,11 @@ function review(overrides: Partial<SettingsReviewFocus> = {}) {
   };
   return { scope: "project", focus: [focus], collections: [], shadowed: [], effect: "live", desired: { unrelated: "NOT_FOR_DISPLAY" }, warnings: ["NOT_FOR_DISPLAY"] };
 }
+
+test("settings diff: command-backed secrets carry an explicit host-execution warning", () => {
+  assert.ok(settingsDiff(review({ hostCommand: true })).some((line) => line.kind === "context" && line.text === HOST_SECRET_COMMAND_WARNING));
+  assert.equal(settingsDiff(review()).some((line) => line.text === HOST_SECRET_COMMAND_WARNING), false);
+});
 
 test("settings diff: focused semantic lines share plain RPC and themed output without guessing prefixes", () => {
   const lines = settingsDiff(review());

@@ -66,18 +66,93 @@ function depsFor(events: string[], overrides: Partial<SandboxManagerDeps> = {}):
   };
 }
 
+test("lifecycle failures mask all secret sources and privately captured resolved tokens", async () => {
+  const sensitive = "literal-private HOST_VARIABLE_PRIVATE host-command-private resolved-private";
+  const req = request({ config: config({ secrets: [
+    { env: "LITERAL", allowHosts: ["api.example"], textValue: "literal-private" },
+    { env: "ENV", allowHosts: ["api.example"], hostEnv: "HOST_VARIABLE_PRIVATE" },
+    { env: "CMD", allowHosts: ["api.example"], hostCmd: "host-command-private" },
+  ] }) });
+  for (const failDuring of ["boot", "shutdown"]) {
+    let disposed = false;
+    const manager = createSandboxManager(depsFor([], {
+      createSandbox: async () => { if (failDuring === "boot") throw new Error(sensitive); return {}; },
+      stopAndRemove: async () => { if (failDuring === "shutdown") throw new Error(sensitive); },
+      redactError: (message) => message.replaceAll("resolved-private", "[REDACTED]"),
+      disposed: () => {
+        assert.doesNotMatch(manager.getState().reason ?? "", /resolved-private/);
+        disposed = true;
+      },
+    }));
+    await manager.boot(req);
+    if (failDuring === "shutdown") await manager.shutdown();
+    assert.equal(manager.getState().status, "unavailable");
+    assert.equal(manager.getState().reason, "[REDACTED] [REDACTED] [REDACTED] [REDACTED]");
+    assert.equal(disposed, failDuring === "shutdown");
+  }
+});
+
+test("lifecycle failures mask JSON-escaped textValue and hostCmd sources", async () => {
+  const literal = 'literal-private\n"quoted"';
+  const command = 'printf "command-private\\n"';
+  const req = request({ config: config({ secrets: [
+    { env: "LITERAL", allowHosts: ["api.example"], textValue: literal },
+    { env: "CMD", allowHosts: ["api.example"], hostCmd: command },
+  ] }) });
+  const manager = createSandboxManager(depsFor([], {
+    createSandbox: async () => {
+      throw new Error([literal, command].map((source) => JSON.stringify(source).slice(1, -1)).join(" / "));
+    },
+  }));
+  await manager.boot(req);
+  assert.equal(manager.getState().status, "unavailable");
+  assert.equal(manager.getState().reason, "[REDACTED] / [REDACTED]");
+});
+
+test("restart preparation and cleanup failures mask literal and privately resolved secrets", async () => {
+  const req = request({ config: config({ secrets: [
+    { env: "TOKEN", allowHosts: ["api.example"], textValue: "literal-private" },
+  ] }) });
+  let restarting = false;
+  const manager = createSandboxManager(depsFor([], {
+    inspectSandbox: async () => restarting
+      ? { name: sandboxNameFor(sessionId), status: "stopped", labels: labels(req) }
+      : null,
+    prepareRuntime: async () => {
+      if (restarting) throw new Error("literal-private resolved-private");
+      return { docker: { mode: "disabled", readiness: "disabled" } };
+    },
+    stopAndRemove: async () => { throw new Error("resolved-private"); },
+    redactError: (message) => message.replaceAll("resolved-private", "[REDACTED]"),
+  }));
+  assert.equal((await manager.boot(req)).status, "active");
+  restarting = true;
+  const reason = "[REDACTED] [REDACTED]; failed to clean up the restarted sandbox";
+  await assert.rejects(manager.withRuntime(async () => assert.fail("must not execute")), { message: reason });
+  assert.equal(manager.getState().status, "unavailable");
+  assert.equal(manager.getState().reason, reason);
+});
+
 test("adoption observer runs only after successful boot/reconnect or live policy adoption", async () => {
   for (const inspectedStatus of [undefined, "running", "stopped"]) {
     const events: string[] = []; const adopted: BootRequest[] = []; let fail = false;
-    const initial = request();
+    const secrets: Config["secrets"] = [
+      { env: "LITERAL", allowHosts: ["api.example"], textValue: "literal-private" },
+      { env: "ENV", allowHosts: ["api.example"], hostEnv: "HOST_VARIABLE_PRIVATE" },
+      { env: "CMD", allowHosts: ["api.example"], hostCmd: "host-command-private" },
+    ];
+    const initial = request({ config: config({ secrets }) });
     const manager = createSandboxManager(depsFor(events, {
       inspectSandbox: async () => inspectedStatus ? { name: sandboxNameFor(sessionId), status: inspectedStatus, labels: labels(initial) } : null,
       adopted: (value) => { assert.equal(manager.getState().status, "active"); adopted.push(value); events.push("adopted"); },
       prepareRuntime: async () => { if (fail) throw new Error("preparation failed"); return { docker: { mode: "disabled", readiness: "disabled" } }; },
     }));
     await manager.boot(initial); assert.equal(adopted.length, 1); assert.ok(events.indexOf("persist") < events.indexOf("adopted"));
+    assert.equal(adopted[0], initial);
+    assert.deepEqual(adopted[0].config.secrets, secrets); // parent projection needs each original source kind
     await manager.boot(initial); assert.equal(adopted.length, 1); // unchanged request keeps original provenance
-    const live = request({ config: config({ showFooter: false }) }); await manager.boot(live); assert.equal(adopted.length, 2); assert.equal(adopted[1], live);
+    const live = request({ config: config({ secrets, showFooter: false }) }); await manager.boot(live); assert.equal(adopted.length, 2); assert.equal(adopted[1], live);
+    assert.deepEqual(adopted[1].config.secrets, secrets);
     fail = true; await manager.boot(request({ config: config({ cpus: 2 }), forceRecreate: true })); assert.equal(manager.getState().status, "unavailable"); assert.equal(adopted.length, 2);
     await manager.shutdown();
   }

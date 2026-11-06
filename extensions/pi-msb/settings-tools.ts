@@ -15,7 +15,7 @@ type Request = { scope: Scope; operations: Operation[] };
 const operationProperties = {
   path: Type.String({ enum: [...SETTINGS_PATHS], description: "Supported snake_case leaf. See msb_config_get.settingsSchema for value schemas, constraints and semantics." }),
   operation: Type.Union([Type.Literal("set"), Type.Literal("inherit"), Type.Literal("upsert"), Type.Literal("remove")]),
-  value: Type.Optional(Type.Unknown({ description: "set: complete value (arrays replace/clear). upsert: one native Config entry (camelCase keys), or one list string. Omit secret.value to retain its credential." })),
+  value: Type.Optional(Type.Unknown({ description: "set: complete value (arrays replace/clear). upsert: one native Config entry (camelCase keys), or one list string. Supply exactly one secret source: hostEnv (host variable NAME only) or hostCmd (human-authorized HOST shell command text). textValue literal credentials are forbidden, including placeholders. Omit both sources on upsert to retain the selected existing source privately, including a literal." })),
   identity: Type.Optional(Type.String({ description: "remove only: secret env, normalized mount guest path, or exact list string." })),
   previousIdentity: Type.Optional(Type.String({ description: "upsert only: existing identity when renaming." })),
 };
@@ -36,11 +36,12 @@ const stringList = (value: unknown): value is string[] => Array.isArray(value) &
 function entry(value: unknown, path: string, retainSecret: boolean): void {
   if (path !== "secrets" && path !== "mounts") { if (typeof value !== "string") throw new Error(); return; }
   if (!object(value)) throw new Error();
-  const allowed = path === "secrets" ? ["env", "allowHosts", "value"] : ["type", "hostPath", "guestPath", "readonly", "options"];
+  const allowed = path === "secrets" ? ["env", "allowHosts", "hostEnv", "hostCmd"] : ["type", "hostPath", "guestPath", "readonly", "options"];
   if (Object.keys(value).some((key) => !allowed.includes(key))) throw new Error();
   if (path === "secrets") {
-    if (typeof value.env !== "string" || !stringList(value.allowHosts) || (!retainSecret || "value" in value) && typeof value.value !== "string") throw new Error();
-    if (typeof value.value === "string" && /<redacted>|\[redacted\]/i.test(value.value)) throw new Error();
+    const sources = ["hostEnv", "hostCmd"].filter((source) => source in value);
+    if (typeof value.env !== "string" || !stringList(value.allowHosts) || sources.length > 1 || !retainSecret && sources.length !== 1) throw new Error();
+    if (sources.some((source) => typeof value[source] !== "string" || /<redacted>|\[redacted\]/i.test(value[source] as string))) throw new Error();
   } else {
     if (!["dir", "file", "named", "tmpfs"].includes(String(value.type)) || typeof value.guestPath !== "string" || typeof value.readonly !== "boolean" || !stringList(value.options)) throw new Error();
     if ("hostPath" in value && typeof value.hostPath !== "string") throw new Error();
@@ -114,7 +115,7 @@ function session(ctx: ExtensionContext): string { return JSON.stringify([ctx.ses
 export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void {
   pi.registerTool({
     name: "msb_config_get", label: "Inspect Microsandbox settings",
-    description: "Read-only settings discovery and inspection. Filter sections and setting paths; text is human-readable by default, json is indented, and structured details contain the selected JSON. Cache schemas with knownSchemaVersion. Includes session-reset warnings, desired versus known adoption, reconnection guidance and DNS/IP limitations. Secrets/references masked. No bootstrap/start/reload. Use instead of reading extension source/docs.",
+    description: "Read-only settings discovery and inspection. Filter sections and setting paths; text is human-readable by default, json is indented, and structured details contain the selected JSON. Cache schemas with knownSchemaVersion. Includes session-reset warnings, desired versus known adoption, reconnection guidance and DNS/IP limitations. Literal credentials are masked; hostEnv variable names and hostCmd command text are readable and writable, but never resolved or executed during inspection. Includes degraded recovery metadata when configuration is invalid. Available while the sandbox is blocked. No bootstrap/start/reload. Use msb_diagnostics for passive startup-failure diagnostics instead of reading extension source/docs.",
     parameters: inspectionParameters,
     renderCall(_args, theme) { return new Text(theme.bold(theme.fg("accent", "Microsandbox settings")), 0, 0); },
     renderResult(result, { expanded, isPartial }, theme, context) {
@@ -130,13 +131,16 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
         reason: "Invalid inspection filters. Use supported sections, setting leaves or network/docker groups, format text/json, and an optional positive knownSchemaVersion. No configuration was read or changed." }); }
       let inspection;
       try { inspection = { outcome: "inspected", ...await control.settings!.inspect(runtime(control), [control.getEffectiveConfig().config]) }; }
-      catch { inspection = { outcome: "rejected", reason: "Settings unavailable or invalid. No configuration or runtime changes were made." }; }
+      catch { inspection = { outcome: "rejected", runtime: runtime(control),
+        recovery: { available: false, configurationValid: false, manualRepairRequired: true,
+          reason: "Settings inspection is unavailable. Use msb_diagnostics to distinguish configuration errors from workspace identity failures." },
+        reason: "Settings unavailable or invalid. No configuration or runtime changes were made." }; }
       return inspectionResult(inspectSettings(inspection, input), input.format, !input.explicitSections);
     },
   });
   pi.registerTool({
     name: "msb_config_set", label: "Propose Microsandbox setting",
-    description: "Propose one setting operation OR an ordered operations array in ONE explicit scope. A batch uses one combined No-first approval, one atomic settings commit and at most one reload; no intermediate VM policy is adopted. Inspect msb_config_get for value schemas and policy semantics. No headless mutation. Array set replaces/clears the whole list; prefer upsert/remove to preserve siblings/credentials. Session is memory-only. No lifecycle/reset/file-path overrides. After completion, explain relevant returned safety/impact warnings to the user.",
+    description: "Propose one setting operation OR an ordered operations array in ONE explicit scope. A batch uses one combined No-first approval, one atomic settings commit and at most one reload; no intermediate VM policy is adopted. Inspect msb_config_get for value schemas and policy semantics. Works without a running sandbox; supported invalid-configuration repairs still require a fully valid final candidate. No headless mutation. Array set replaces/clears the whole list; prefer upsert/remove to preserve siblings/credentials. Session is memory-only. No lifecycle/reset/file-path overrides. After completion, explain relevant returned safety/impact warnings to the user.",
     parameters, executionMode: "sequential",
     // Arguments may contain credentials or repeat them in arbitrary identity fields.
     // Until execute has produced a bound sanitized review, display no argument data.
@@ -188,10 +192,15 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
         const review = await draft.reviewForApproval(preview.effect, runtime(control));
         check();
         const diff = settingsDiff(review);
-        // Refuse oversized proposals instead of hiding affected values from approval.
-        if (formatSettingsDiff(diff).join("\n").length > 48_000) return setterResult({ outcome: "rejected", reason: "Review too large. Use a smaller per-entry operation." });
+        const hostCommands = [...new Set([...(await draft.hostCommandsForApproval()), ...input.operations.flatMap((item) => {
+          if (item.path !== "secrets" || !["set", "upsert"].includes(item.operation)) return [];
+          const entries = item.operation === "set" ? item.value as Record<string, unknown>[] : [item.value as Record<string, unknown>];
+          return entries.flatMap((entry) => typeof entry.hostCmd === "string" ? [entry.hostCmd] : []);
+        })])];
+        // Refuse oversized proposals instead of hiding affected values or executable commands.
+        if (formatSettingsDiff(diff).join("\n").length + hostCommands.reduce((size, command) => size + JSON.stringify(command).length * 6, 0) > 48_000) return setterResult({ outcome: "rejected", reason: "Review too large. Use a smaller per-entry operation." });
         phase = "review";
-        const approved = await approveSettings(ctx, diff, abort);
+        const approved = await approveSettings(ctx, diff, abort, hostCommands);
         if (!approved || abort.aborted) return setterResult({ outcome: "cancelled" });
         check();
         approvedReview = review;
@@ -210,7 +219,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
         if (validation) return setterResult({ outcome: "rejected", saved: false, reloaded: false, validation,
           reason: `${validationMessage(validation)} Nothing applied. Operation indices in details are zero-based.` });
         return setterResult({ outcome: phase === "commit" ? "apply_failed" : "rejected", saved: phase === "commit" ? "unknown" : false, reloaded: false,
-          reason: phase === "commit" ? "Persistence failed; storage may have changed after an I/O error. Inspect before retrying. Runtime was not reloaded." : "Invalid or unavailable settings proposal. Inspect msb_config_get schemas/constraints; check scope, value shape, credential references and mount safety. Network domains must be exact; secret hosts also accept a single leading *. wildcard. IP/CIDR rules are network-only. Nothing applied." });
+          reason: phase === "commit" ? "Persistence failed; storage may have changed after an I/O error. Inspect before retrying. Runtime was not reloaded." : "Invalid or unavailable settings proposal. Inspect msb_config_get schemas/constraints; check scope, value shape, secret sources and mount safety. Network domains must be exact; secret hosts also accept a single leading *. wildcard. IP/CIDR rules are network-only. Nothing applied." });
       } finally { draft?.discard(); release?.(); }
     },
   });

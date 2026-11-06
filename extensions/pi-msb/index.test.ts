@@ -32,6 +32,58 @@ test("index bare import and factory registration do not create host configuratio
   await assert.rejects(stat(agentDir), { code: "ENOENT" });
 });
 
+test("blocked invalid startup exposes passive diagnostics and approval-bound host settings repair", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-blocked-repair-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { mkdir, readFile, writeFile } from 'node:fs/promises';
+    import { dirname } from 'node:path';
+    const { hostConfigPaths } = await import(${JSON.stringify(new URL("./config.ts", import.meta.url).href)});
+    const paths = await hostConfigPaths({ cwd: process.cwd(), agentDir: process.env.PI_CODING_AGENT_DIR, env: process.env });
+    await mkdir(dirname(paths.global), { recursive: true });
+    const original = 'cpus = 0\\nauto_start = false\\n';
+    await writeFile(paths.global, original);
+    const { default: register } = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const tools = new Map(), hooks = new Map(); let answer = 'No', approvals = 0;
+    register({ registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
+      on(event, handler) { hooks.set(event, [...(hooks.get(event) ?? []), handler]); } });
+    const ctx = { cwd: process.cwd(), mode: 'rpc', hasUI: true, isProjectTrusted: () => true,
+      sessionManager: { getSessionId: () => 'blocked-repair', getEntries: () => [] },
+      ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, notify() {},
+        select: async (_question, options) => { approvals++; assert.deepEqual(options, ['No', 'Yes']); return answer; } } };
+    await hooks.get('session_start').at(-1)({}, ctx);
+    const run = (name, args) => tools.get(name).execute(name, args, undefined, undefined, ctx);
+    const diagnostic = await run('msb_diagnostics', {format:'json'});
+    assert.equal(diagnostic.details.runtime.status, 'unavailable');
+    assert.equal(diagnostic.details.readiness.configReady, false);
+    assert.equal(diagnostic.details.readOnly, true);
+    assert.equal(approvals, 0);
+    const inspection = await run('msb_config_get', {});
+    assert.equal(inspection.details.recovery.available, true);
+    assert.equal(inspection.details.recovery.configurationValid, false);
+    const proposal = {scope:'global',path:'cpus',operation:'set',value:2};
+    assert.equal((await run('msb_config_set', proposal)).details.outcome, 'cancelled');
+    assert.equal(await readFile(paths.global, 'utf8'), original);
+    answer = 'Yes';
+    const repaired = await run('msb_config_set', proposal);
+    assert.equal(repaired.details.saved, true, JSON.stringify(repaired.details));
+    assert.ok(['applied', 'saved_but_reload_failed'].includes(repaired.details.outcome));
+    assert.equal(approvals, 2);
+    const after = await run('msb_config_get', {});
+    assert.equal(after.details.desired.cpus, 2);
+    assert.equal(after.details.recovery, undefined);
+    const afterDiagnostic = await run('msb_diagnostics', {});
+    assert.equal(afterDiagnostic.details.readiness.configReady, true);
+    assert.equal(afterDiagnostic.details.runtime.status, 'disabled');
+    assert.equal(afterDiagnostic.details.runtime.execution, 'blocked');
+    await hooks.get('session_shutdown').at(-1)({}, ctx);
+    console.log('PASS blocked-repair');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS blocked-repair/);
+});
+
 for (const event of ["session_shutdown", "session_info_changed"]) for (const throws of [false, true]) test(`${event} warns before clearing overrides, including Pi reload; notification failure=${throws}`, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-msb-session-warning-"));
   t.after(() => rm(root, { recursive: true, force: true }));

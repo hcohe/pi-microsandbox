@@ -103,20 +103,29 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 # startup_timeout_ms = 15000
 
 ## Example: secrets
-## Use references, not literal credentials. env is a valid environment name;
+## Prefer host_env or host_cmd over literal credentials. env is a valid environment name;
 ## allow_hosts must be non-empty exact DNS names or wildcard subdomain scopes
 ## (single leading *. only, e.g. *.googleapis.com). No IP/CIDR, URLs or ports.
 ## Add the apex separately if needed. This scopes credential
 ## injection only; it does not grant network access.
-## $ENV:NAME reads the host environment; $FILE:path reads a host file (relative
-## paths resolve beside this host policy file). Literal values are redacted in the panel; entry is always masked.
+## Choose exactly one source: host_env (host variable name), host_cmd (host shell
+## command whose stdout is the secret), or text_value (literal string, never expanded).
+## Deprecated API: value and $ENV: references are not supported; use text_value or host_env.
+## Sources are resolved only on sandbox creation, never during settings inspection.
+## Commands run with Pi's host privileges; configure only trusted commands.
+## Agent tools can read/set host_env names and host_cmd text, never text_value.
+## Do not embed credentials in command text. Panel entry is always masked.
 # [[secrets]]
 # env = "API_TOKEN"
-# value = "$ENV:API_TOKEN"
+# host_env = "API_TOKEN"
 # allow_hosts = ["api.example.com"]
 # [[secrets]]
+# env = "GOOGLE_CLOUD_ACCESS_TOKEN"
+# host_cmd = "gcloud auth print-access-token --quiet"
+# allow_hosts = ["*.googleapis.com"]
+# [[secrets]]
 # env = "OTHER_TOKEN"
-# value = "$FILE:credentials/token"
+# text_value = "s3cre3t"
 # allow_hosts = ["other.example.com"]
 ## End example
 

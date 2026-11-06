@@ -2,10 +2,21 @@
 
 [Back to README](../README.md)
 
-1. Open `/msb`: inspect Status and Actions → Recent logs.
-2. If the state is `unavailable (blocked)`, fix the displayed configuration,
-   image, virtualization, path, or missing-tool error and choose Actions → Reload settings.
+1. Ask the agent to run `msb_diagnostics` even when routed tools are blocked.
+   This is passive: it uses cached, secret-redacted state without shell commands,
+   native SDK loading, log fetching, credential resolution, or VM startup.
+   Unknown/live health remains explicitly unverified. For human-only follow-up,
+   open `/msb`: inspect Status and Actions → Recent logs when the panel is available.
+2. Use `msb_config_get` to inspect configuration and recovery metadata, then
+   `msb_config_set` for an explicitly approved repair. These host management tools
+   do not require a healthy VM. Supported semantic repairs validate the full final
+   configuration before saving; malformed TOML and unresolved workspace identity
+   require host-side human repair. Fix image, virtualization, path, or missing-tool
+   problems as indicated, then choose Actions → Reload settings or apply a new
+   approved settings change. Saved-but-reload-failed means the file changed, not
+   that the sandbox recovered.
    Startup failures fail closed; routed tools do not silently run on the host.
+   Do not disable protection or broaden host access merely to make recovery tools work.
 3. If a process died, a later startup or Actions → Prune stale sandboxes can remove its labelled
    sandbox after the owner lock is free.
 4. If a same-name resource has different managed labels, pi-microsandbox

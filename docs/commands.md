@@ -41,9 +41,10 @@ review cannot overlap. Existing panel navigation and scope actions are unchanged
   verified live metadata. Live/no-op reloads cannot restore VM certainty.
 
 Secrets and mounts expand into child fields; lists expand into individual entries.
-Secret values/references are always masked, never prefilled. Blank replacement
-retains the private credential, including its FILE reference origin. Compact entry
-forms keep a record together; cancel clears secret buffers.
+Secret source fields are always masked, never prefilled. Choose a literal value,
+host environment variable, or host command; leaving the replacement blank retains
+the private source. Compact entry forms keep a record together; cancel clears
+secret buffers.
 
 ## Keys
 
@@ -113,8 +114,8 @@ entries, including those hidden by higher layers. It never exports unrelated
 Project/Session credentials, mounts, hosts, environment or tool permissions.
 A deliberate higher-scope entry import is identified by origin and identity in
 confirmation: that particular permission/credential may become available to
-other projects. Metadata edits retain private values/references without reading
-credential bytes for display.
+other projects. Metadata edits retain private secret sources without resolving
+credential bytes or executing host commands for display.
 
 Collections have no bulk-clear or parent inheritance control. `d` removes one
 entry; removing the last may leave an explicit empty list, still with entry

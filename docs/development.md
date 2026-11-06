@@ -77,7 +77,7 @@ the latter retains the approved sanitized review and clearly denies full activat
 The tool description asks the agent to explain relevant returned warnings after
 completion. Human setter result renderers filter warning kinds too. Build display
 data only from the sanitized approval-bound review: private comparisons in
-SettingsDraft emit changed-field metadata before credential masking, not raw arguments or credential/reference text. The setter's
+SettingsDraft emit changed-field metadata before credential masking, not raw arguments or literal credential text. The setter's
 public tool renderers never echo arguments or dump review JSON.
 `settings-inspection.ts` validates section/path filters inside execute, filters
 only agent-safe projections, keeps selected structured JSON and produces bounded
@@ -131,7 +131,8 @@ active sandbox. Project/Global defaults never broadcast to unrelated instances.
 `settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
 retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
 never renders plaintext or uses an Input undo/kill ring. The settings backend
-keeps raw credentials/references private; do not stringify effective Config.
+keeps literal credentials private while exposing host source metadata to agent
+tools; do not stringify effective Config.
 The manager's successful boot/live-adoption observer captures a redacted runtime
 policy and frozen provenance, separate from resolved desired config/configRef.
 The UI uses this snapshot for Status/adoption metadata and pending comparisons,

@@ -46,7 +46,7 @@ test("host project settings override host defaults while inheriting unspecified 
     [defaultFile, `
 cpus = 2
 memory_mib = 2048
-secrets = [{ env = "DEFAULT_TOKEN", value = "$ENV:DEFAULT_TOKEN", allow_hosts = ["default.example"] }]
+secrets = [{ env = "DEFAULT_TOKEN", host_env = "DEFAULT_TOKEN", allow_hosts = ["default.example"] }]
 [network]
 mode = "allowlist"
 allow_hosts = ["default.example"]
@@ -70,13 +70,13 @@ allow_hosts = ["project.example"]
   assert.equal(result.provenance.memoryMiB, "host-default");
 });
 
-test("host defaults ignore local lists and resolve their own relative secret references", async () => {
+test("host defaults ignore local lists and preserve literal $FILE secret values verbatim", async () => {
   const files = new Map([
     [localFile, `
 pass_through_tools = ["unsafe"]
 host_env = ["UNSAFE"]
 mounts = [{ host_path = "/sensitive", guest_path = "/mnt/sensitive", readonly = false }]
-secrets = [{ env = "EXTRA", value = "$ENV:EXTRA", allow_hosts = ["evil.example"] }]
+secrets = [{ env = "EXTRA", host_env = "EXTRA", allow_hosts = ["evil.example"] }]
 [network]
 allow_hosts = ["evil.example"]
 `],
@@ -85,7 +85,7 @@ route_tools = ["read"]
 pass_through_tools = []
 host_env = []
 mounts = []
-secrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["api.example"] }]
+secrets = [{ env = "TOKEN", text_value = "$FILE:token", allow_hosts = ["api.example"] }]
 [network]
 allow_hosts = ["api.example"]
 `],
@@ -96,7 +96,7 @@ allow_hosts = ["api.example"]
   assert.deepEqual(result.config.hostEnv, []);
   assert.deepEqual(result.config.mounts, []);
   assert.deepEqual(result.config.network.allowHosts, ["api.example"]);
-  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", value: `$FILE:${dirname(defaultFile)}/token`, allowHosts: ["api.example"] }]);
+  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", textValue: "$FILE:token", allowHosts: ["api.example"] }]);
   assert.equal(result.provenance["secrets[TOKEN]"], "host-default");
 });
 
@@ -128,7 +128,7 @@ test("host policy arrays replace lower-layer secrets, mounts, and allowlists", a
 route_tools = ["read", "bash"]
 pass_through_tools = ["unsafe"]
 host_env = ["UNSAFE"]
-secrets = [{ env = "EXTRA", value = "$ENV:EXTRA", allow_hosts = ["evil.example"] }, { env = "TOKEN", value = "$FILE:/unapproved/token", allow_hosts = ["evil.example"] }]
+secrets = [{ env = "EXTRA", host_env = "EXTRA", allow_hosts = ["evil.example"] }, { env = "TOKEN", text_value = "$FILE:/unapproved/token", allow_hosts = ["evil.example"] }]
 mounts = [{ host_path = "/sensitive", guest_path = "/mnt/sensitive", readonly = false }]
 [network]
 allow_hosts = ["evil.example"]
@@ -139,7 +139,7 @@ route_tools = ["read"]
 pass_through_tools = []
 host_env = []
 mounts = []
-secrets = [{ env = "TOKEN", value = "$ENV:SAFE_TOKEN", allow_hosts = ["api.example"] }]
+secrets = [{ env = "TOKEN", host_env = "SAFE_TOKEN", allow_hosts = ["api.example"] }]
 [network]
 mode = "allowlist"
 allow_hosts = ["api.example"]
@@ -147,7 +147,7 @@ publish_ports = []
 `],
   ]);
   const result = await resolveConfig(fixture(files, {
-    cliOverridesToml: 'secrets = [{ env = "SESSION", value = "$ENV:SESSION", allow_hosts = ["evil.example"] }]',
+    cliOverridesToml: 'secrets = [{ env = "SESSION", host_env = "SESSION", allow_hosts = ["evil.example"] }]',
   }));
   assert.deepEqual(result.config.routeTools, ["read"]);
   assert.deepEqual(result.config.passThroughTools, []);
@@ -155,7 +155,7 @@ publish_ports = []
   assert.deepEqual(result.config.mounts, []);
   assert.deepEqual(result.config.network.allowHosts, ["api.example"]);
   assert.deepEqual(result.config.network.publishPorts, []);
-  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", value: "$ENV:SAFE_TOKEN", allowHosts: ["api.example"] }]);
+  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", hostEnv: "SAFE_TOKEN", allowHosts: ["api.example"] }]);
   assert.equal(result.provenance["secrets[TOKEN]"], "host-project");
   assert.equal(result.provenance["secrets[EXTRA]"], undefined);
   assert.equal(result.provenance["mounts[/mnt/sensitive]"], undefined);
@@ -163,23 +163,40 @@ publish_ports = []
 
 test("empty host secret and route lists stay empty through validation", async () => {
   const result = await resolveConfig(fixture(new Map([
-    [localFile, 'secrets = [{ env = "TOKEN", value = "$ENV:TOKEN", allow_hosts = ["evil.example"] }]'],
+    [localFile, 'secrets = [{ env = "TOKEN", host_env = "TOKEN", allow_hosts = ["evil.example"] }]'],
     [policyFile, "secrets = []\nroute_tools = []"],
   ])));
   assert.deepEqual(result.config.secrets, []);
   assert.deepEqual(result.config.routeTools, []);
 });
 
-test("host policy loads for untrusted projects and resolves relative secret files beside itself", async () => {
+test("host policy loads for untrusted projects and preserves literal $FILE secret values verbatim", async () => {
   const result = await resolveConfig(fixture(new Map([
     [localFile, "memory_mib = 128"],
     [defaultFile, "cpus = 2"],
-    [policyFile, 'memory_mib = 2048\nsecrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["api.example"] }]'],
+    [policyFile, 'memory_mib = 2048\nsecrets = [{ env = "TOKEN", text_value = "$FILE:token", allow_hosts = ["api.example"] }]'],
   ]), { projectTrusted: false }));
   assert.equal(result.config.memoryMiB, 2048);
   assert.equal(result.config.cpus, 2);
-  assert.equal(result.config.secrets[0]?.value, `$FILE:${dirname(policyFile)}/token`);
+  assert.equal(result.config.secrets[0]?.textValue, "$FILE:token");
   assert.deepEqual(result.warnings, []);
+});
+
+test("host policies parse snake_case secret sources without eagerly resolving host values", async () => {
+  for (const [file, source] of [[defaultFile, "host-default"], [policyFile, "host-project"]] as const) {
+    for (const env of [{}, { HOST_TOKEN: "host-secret-value" }]) {
+      const result = await resolveConfig(fixture(new Map([[file, `
+secrets = [{ env = "ENV_TOKEN", host_env = "HOST_TOKEN", allow_hosts = ["env.example"] }, { env = "CMD_TOKEN", host_cmd = "exit 73", allow_hosts = ["cmd.example"] }]
+`]]), { env }));
+      assert.deepEqual(result.config.secrets, [
+        { env: "ENV_TOKEN", hostEnv: "HOST_TOKEN", allowHosts: ["env.example"] },
+        { env: "CMD_TOKEN", hostCmd: "exit 73", allowHosts: ["cmd.example"] },
+      ]);
+      assert.equal(result.provenance["secrets[ENV_TOKEN]"], source);
+      assert.equal(result.provenance["secrets[CMD_TOKEN]"], source);
+      assert.deepEqual(result.warnings, []);
+    }
+  }
 });
 
 test("missing host policy preserves existing precedence and unspecified fields", async () => {
@@ -249,7 +266,7 @@ test("the default policy directory comes from Pi getAgentDir, including PI_CODIN
 
 test("invalid host policies fail closed and literal values remain redacted", async () => {
   for (const file of [defaultFile, policyFile]) {
-    for (const text of ["cpus = 0", 'fallback_mode = "invalid"', 'secrets = [{ env = "TOKEN", value = "private-value", allow_hosts = [] }]', "[[secrets]"]) {
+    for (const text of ["cpus = 0", 'fallback_mode = "invalid"', 'secrets = [{ env = "TOKEN", text_value = "private-value", allow_hosts = [] }]', "[[secrets]"]) {
       await assert.rejects(resolveConfig(fixture(new Map([[file, text]]))), (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.doesNotMatch(error.message, /private-value/);
@@ -257,7 +274,7 @@ test("invalid host policies fail closed and literal values remain redacted", asy
       });
     }
   }
-  const result = await resolveConfig(fixture(new Map([[policyFile, 'secrets = [{ env = "TOKEN", value = "private-value", allow_hosts = ["api.example"] }]']])));
+  const result = await resolveConfig(fixture(new Map([[policyFile, 'secrets = [{ env = "TOKEN", text_value = "private-value", allow_hosts = ["api.example"] }]']])));
   assert.doesNotMatch(toEffectiveToml(result), /private-value/);
   assert.doesNotMatch(result.warnings.join("\n"), /private-value/);
 });

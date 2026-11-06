@@ -1,13 +1,43 @@
-# Configuration tools
+# Diagnostics and configuration tools
 
 [Back to README](../README.md)
 
 The model can discover and inspect settings with **`msb_config_get`** and propose
-one operation or an atomic same-scope batch with **`msb_config_set`**. Neither tool grants general host execution. These two
-exact names remain available under default third-party blocking only when public
+one operation or an atomic same-scope batch with **`msb_config_set`**. Use
+**`msb_diagnostics`** when startup fails or routed tools are blocked. None grants
+general host execution. These three exact names remain available under default third-party blocking only when public
 registration provenance resolves to this extension's actual entry module. Missing,
 mismatched or duplicate-winning foreign registration receives no exemption;
 other `msb_*` names have no exemption.
+
+## `msb_diagnostics`
+
+Call `{}` for a passive diagnostic report, or `{"format":"json"}` for JSON.
+It works headlessly and without a running sandbox. It reports cached runtime and
+configuration readiness, static failure categories, small last-known desired and
+adoption summaries, recovery actions, and checks that have **not** been performed.
+Cached status is not a live health, connectivity, image, or virtualization check.
+
+The diagnostic invocation does not execute commands, load the native SDK,
+start/restart a VM, fetch logs, read configuration files, enumerate the environment,
+resolve credentials, or write anything. It accepts no command or file-path inputs.
+Unknown failures remain generic rather than echoing unsafe exception text. Both
+text and structured output are bounded. Arbitrary parser/error text, configuration
+strings, source descriptors, paths, and logs are deliberately withheld rather than
+risk leaking credentials. The configuration tools still expose host source names
+and command text as described below—do not embed credentials in commands.
+
+For recovery, inspect `msb_config_get`, then propose a scoped `msb_config_set`.
+Repairs still require fresh explicit user approval and a fully valid final
+configuration. Recovery from an invalid baseline additionally discloses the newly
+activated safety policy—including host fallback, next-session host mode, network,
+forwarded environment names, all mounts (even read-only), and secret destinations.
+All retained host commands appear exactly in the human-only approval appendix,
+even if the repair changes only a CPU limit. This is activation authorization,
+not a claim that these unchanged fields were rewritten. If critical policy cannot
+be safely shown, or the review is too large, the tool refuses activation review.
+A failed activation does not undo an already saved repair; inspect
+again rather than silently retrying or disabling sandbox protection.
 
 ## `msb_config_get`
 
@@ -21,12 +51,13 @@ not broken JSON; selected structured `details` stay complete.
 
 | Argument | Values |
 | --- | --- |
-| `sections` | Non-empty list: `summary`, `desired`, `layers`, `origins`, `runtime`, `schema`, `capabilities`, `policy`, `warnings`. Omit for all. `origins` includes provenance; `schema` includes supported paths. |
+| `sections` | Non-empty list: `summary`, `desired`, `layers`, `origins`, `runtime`, `schema`, `capabilities`, `policy`, `warnings`, `recovery`. Omit for all. `origins` includes provenance; `schema` includes supported paths. |
 | `paths` | Non-empty list of supported snake_case leaves or `network`/`docker` groups. Filters desired/layers/origins/runtime settings/schema; no indexed or file paths. Layer filters retain matching removal controls. |
 | `format` | `text` (default) or indented `json`. |
 | `knownSchemaVersion` | Positive integer. When it matches `schemaVersion`, unchanged schema/capabilities are omitted and `schemaUnchanged: true` is returned. Cache only schemas actually requested; no server-side conversation cache. |
 
 Safety context in `summary` and `policy` is deliberately **not path-filtered**.
+Invalid-configuration `recovery` metadata also remains visible with section filters.
 Filtering is applied only after the complete redaction boundary, never to raw
 configuration. Filter errors are rejected inside execute without echoing input
 or reading settings. Filters affect output, not source-resolution semantics.
@@ -60,6 +91,9 @@ The selected inventory contains:
   is last-known, not a connectivity probe; null means unknown, including partially
   verified reconnections. Runtime status remains explicit; an off VM is not proof
   of active enforcement. HOST/pass-through tools are outside the VM boundary.
+- `recovery`: degraded inspection when configuration is invalid, including whether
+  structured repair is available or manual host-file repair is required. Invalid
+  desired settings are not presented as a valid resolved policy.
 - `desired`: all resolved settings, including defaults and automatic
   `sandbox_name: null`. This is **not proof of adopted VM state**.
 - `layers.global`, `.project`, `.session`: complete supported sparse raw
@@ -85,8 +119,15 @@ The selected inventory contains:
 Inspection works without UI and never creates/bootstrap-writes configuration,
 changes overrides, starts a sandbox or reloads. Invalid/unavailable configuration
 returns a sanitized `rejected` result, not arbitrary parser/filesystem errors.
-Secrets **and ENV/FILE credential references** are masked in every output channel.
-Credential bytes and host environment values are never resolved for inspection.
+`textValue` literals are masked in every model-visible output channel and cannot
+be set by agent tools. `hostEnv` variable names and `hostCmd` command text are
+readable configuration metadata, not the resolved credentials. Known literal
+credentials repeated in metadata are still redacted. Do not embed secrets in
+command text. Proposed commands also appear JSON-quoted in human
+approval so executable host code is never approved blindly. Credential bytes
+are never resolved and host commands are never executed for inspection. Use
+`format: "json"` or structured details to round-trip exact multiline command text;
+the readable text view sanitizes terminal controls.
 This does not make files inside the mounted workspace secret.
 
 ## `msb_config_set`
@@ -120,7 +161,7 @@ Examples:
 ```json
 {"scope":"project","path":"cpus","operation":"set","value":4}
 {"scope":"session","path":"network.allow_hosts","operation":"upsert","value":"api.example.com"}
-{"scope":"project","path":"secrets","operation":"upsert","value":{"env":"SERVICE_TOKEN","allowHosts":["api.example.com"]}}
+{"scope":"project","path":"secrets","operation":"upsert","value":{"env":"SERVICE_TOKEN","hostEnv":"SERVICE_TOKEN","allowHosts":["api.example.com"]}}
 {"scope":"global","path":"mounts","operation":"remove","identity":"/mnt/cache"}
 {"scope":"project","path":"cpus","operation":"inherit"}
 ```
@@ -153,12 +194,17 @@ scopes do not grant network access. Neither list accepts URLs, port selectors,
 trailing-dot names or implicit subdomain grants; use punycode for IDNs.
 IP addresses/CIDRs are not secret credential destinations.
 
-For a secret upsert, omitting `value.value` retains the selected effective
-entry's private credential/reference and origin. If that identity is hidden by
-an authoritative higher layer, only the target-owned raw entry is a fallback.
-A value explicitly removed/cleared/replaced away in the draft is not resurrected.
-A new secret needs a literal/reference; `<redacted>`/`[REDACTED]` placeholders
-cannot be saved as credentials. Mount entries use `type`, `hostPath`, `guestPath`,
+For a secret upsert, omitting both `value.hostEnv` and `value.hostCmd` retains the
+selected effective entry's source and origin, including a private literal.
+`value.textValue` is never accepted by the agent setter, including in whole-list
+replacements and batches. Configure literals through host files or the human UI.
+If the selected identity is hidden by an authoritative higher layer, only the
+target-owned raw entry is a fallback. A source explicitly removed/cleared/replaced
+away in the draft is not resurrected. A new agent-created secret needs exactly
+one source: host variable name `hostEnv` or trusted host shell command `hostCmd`.
+Supplying one replaces the previous source. Getters expose these source strings,
+never host environment values or command output. `<redacted>`/`[REDACTED]`
+placeholders cannot be saved as source fields. Mount entries use `type`, `hostPath`, `guestPath`,
 `readonly`, `options` and the same native workspace/canonical/symlink/socket
 protections. Persistent automatic sandbox naming uses `inherit`, not null.
 
@@ -187,7 +233,9 @@ a standalone `Scope: Session`, `Scope: Project`, or `Scope: Global` line
 and the affected item, a focused color-coded diff, and vertical **No / Yes**
 choices. There is no dashboard header, duplicate identity or routine source dump.
 Scope names use the theme’s warning color; the `Scope:` label stays muted.
-Native entry edits omit siblings and unchanged fields. Credentials/references stay `<redacted>`; a real rotation
+Native entry edits omit siblings and unchanged fields. Literal credentials stay
+`<redacted>` in the diff; host source metadata is readable. Proposed host commands
+also appear in a human command appendix for authorization. A real rotation
 shows `(changed)` even when both safe values look identical. Retained credentials
 are not marked changed.
 
@@ -216,8 +264,8 @@ identified: `code`, zero-based `operationIndex` (0 for a single operation), a
 whitelisted `path` and static `expected`/`expectedSchema`. Text uses one-based
 operation numbers. Cross-field failures report `operationIndex: null` and related
 operation indices rather than falsely blaming one entry. Unattributable inherited,
-source, mount or reference failures remain explicitly generic. Raw parser/error
-messages, input values, secret identities and credential references are never
+source, mount or secret failures remain explicitly generic. Raw parser/error
+messages, input values, secret identities and source fields are never
 copied into these diagnostics. Rejections do not review, save or reload.
 
 Outcomes include `inspected`, `rejected`, `cancelled`, `conflict`, `no_op`,

@@ -350,7 +350,7 @@ test("network uses exact domains; wildcard secret destinations stay separate fro
   t.after(() => integration.manager.shutdown());
   const state = await integration.configureSession({ sessionId: "exact", cwd: root, projectTrusted: true, config: resolved(config({
     network: { mode: "allowlist", allowHosts: ["github.com", "api.github.com", "127.0.0.1", "2001:db8::/32"], allowDns: false, publishPorts: [] },
-    secrets: [{ env: "TOKEN", value: "synthetic-private", allowHosts: ["github.com", "other.example", "*.googleapis.com"] }],
+    secrets: [{ env: "TOKEN", textValue: "synthetic-private", allowHosts: ["github.com", "other.example", "*.googleapis.com"] }],
   })) });
   assert.equal(state.status, "active");
   assert.ok(calls.includes("default-deny"));
@@ -401,7 +401,7 @@ test("settings apply reload adopts live fields and recreates SDK resources/netwo
   assert.equal(integration.configRef.value.showFooter, false); assert.ok(!calls.some((call) => /create:|remove:|stop:/.test(call)));
   const draft = await integration.control.settings!.open("temporary");
   draft.set("cpus", 2); draft.set("memory_mib", 2048); draft.set("network.mode", "deny");
-  draft.upsertSecret({ env: "TOKEN", value: "PRIVATE_TEST_SENTINEL", allowHosts: ["api.example.com"] });
+  draft.upsertSecret({ env: "TOKEN", textValue: "PRIVATE_TEST_SENTINEL", allowHosts: ["api.example.com"] });
   await draft.apply(); await integration.control.reload();
   assert.ok(calls.includes("cpus:2")); assert.ok(calls.includes("memory:2048")); assert.ok(calls.includes("network:deny")); assert.ok(calls.includes("secret-env:TOKEN"));
   assert.ok(calls.some((call) => call.startsWith("remove:"))); assert.ok(calls.some((call) => call.startsWith("create:")));
@@ -454,7 +454,7 @@ test("disabled workspace discovery failure stays off and blocks wrong-identity e
 
 test("recent logs redact actual boot-time secret bytes even if an environment reference changes", async (t) => {
   const root = await realpath(await temp(t, "settings-log-redaction")); const cwd = join(root, "workspace"); await mkdir(cwd);
-  const env = { PI_MSB_SECRETS: JSON.stringify([{ env: "TOKEN", value: "$ENV:ACTUAL_TOKEN", allow_hosts: ["api.example.com"] }]), ACTUAL_TOKEN: "BOOT_SECRET_SENTINEL" };
+  const env = { PI_MSB_SECRETS: JSON.stringify([{ env: "TOKEN", hostEnv: "ACTUAL_TOKEN", allow_hosts: ["api.example.com"] }]), ACTUAL_TOKEN: "BOOT_SECRET_SENTINEL" };
   const sdk = fakeSdk([], undefined, "log BOOT_SECRET_SENTINEL and NEW_SECRET_SENTINEL");
   const integration = createMsbIntegration({ sessionId: "logs", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
   await integration.configureSession({ sessionId: "logs", cwd, projectTrusted: true });
@@ -469,7 +469,7 @@ test("runtime activation failure after a valid settings save stays blocked and d
   await integration.configureSession({ sessionId: "failure", cwd, projectTrusted: true });
   const originalBuilder = sdk.Sandbox.builder;
   sdk.Sandbox.builder = (name: string) => { const builder = originalBuilder(name); builder.create = async () => { throw new Error("SDK rejected PRIVATE_FAILURE_SENTINEL"); }; return builder; };
-  const draft = await integration.control.settings!.open("temporary"); draft.set("cpus", 2); draft.upsertSecret({ env: "TOKEN", value: "PRIVATE_FAILURE_SENTINEL", allowHosts: ["api.example.com"] }); await draft.apply();
+  const draft = await integration.control.settings!.open("temporary"); draft.set("cpus", 2); draft.upsertSecret({ env: "TOKEN", textValue: "PRIVATE_FAILURE_SENTINEL", allowHosts: ["api.example.com"] }); await draft.apply();
   await assert.rejects(integration.control.reload(), /activation failed/);
   assert.equal(integration.control.getState().status, "unavailable"); assert.equal(integration.provider.isActive(), false);
   assert.doesNotMatch(JSON.stringify(integration.control.getState()), /PRIVATE_FAILURE_SENTINEL/);
@@ -480,7 +480,7 @@ test("runtime activation failure after a valid settings save stays blocked and d
 
 test("prune diagnostic details redact current and boot-time credential bytes before reaching the panel", async (t) => {
   const root = await realpath(await temp(t, "prune-redaction")); const cwd = join(root, "workspace"); await mkdir(cwd);
-  const env = { PI_MSB_SECRETS: JSON.stringify([{ env: "TOKEN", value: "$ENV:TOKEN", allow_hosts: ["a.example"] }]), TOKEN: "BOOT_PRIVATE_SENTINEL" };
+  const env = { PI_MSB_SECRETS: JSON.stringify([{ env: "TOKEN", hostEnv: "TOKEN", allow_hosts: ["a.example"] }]), TOKEN: "BOOT_PRIVATE_SENTINEL" };
   const sdk = fakeSdk([]);
   const integration = createMsbIntegration({ sessionId: "prune-redaction", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
   await integration.configureSession({ sessionId: "prune-redaction", cwd, projectTrusted: true });

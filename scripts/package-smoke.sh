@@ -57,6 +57,7 @@ extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
 extensions/pi-msb/config-template.ts required
 extensions/pi-msb/control.ts required
+extensions/pi-msb/diagnostics-tools.ts required
 extensions/pi-msb/control-panel.ts required
 extensions/pi-msb/settings.ts required
 extensions/pi-msb/settings-diff.ts required

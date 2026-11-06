@@ -46,13 +46,18 @@ and `q` closes. One contextual hint line stays pinned at the bottom, with accent
 keys and muted actions; narrow screens use grouped keys. Menus offer short hints;
 value editors explain the format with examples. [All keys →](docs/commands.md)
 
+When the sandbox is blocked, the agent can use **`msb_diagnostics`** for passive,
+secret-redacted diagnostics without starting a VM or executing host commands.
+Configuration tools remain available for explicitly approved repairs.
+
 The agent can also inspect all settings with `msb_config_get` or propose a
 scoped change or atomic same-scope batch with `msb_config_set`. The getter includes
 value schemas, constraints and desired/adopted network policy summaries, so the
 model need not read extension source to configure it. Filter by section/setting
 and get readable text or indented JSON; structured results remain available. Every request needs your explicit approval;
 a HOST-style No/Yes question shows `Scope: Session`, `Scope: Project`, or
-`Scope: Global` and the focused color-coded diff, with secrets/references masked.
+`Scope: Global` and the focused color-coded diff, with literal secret data masked. Host source names and commands are readable;
+proposed host commands are shown for authorization.
 Relevant safety/impact warnings are returned as text to the agent after the change
 tool completes so it can advise you, not shown in the confirmation dialog.
 Headless inspection is read-only.

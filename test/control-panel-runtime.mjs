@@ -14,16 +14,13 @@ try {
   await mkdir(cwd, { recursive: true });
   const canonicalAgent = join(root, "srv/pi/agent");
   const lexicalAgent = join(root, "home/.pi/agent");
-  const token = join(root, "home/.pi/token");
   await mkdir(canonicalAgent, { recursive: true }); await mkdir(join(root, "home/.pi"));
   await symlink(canonicalAgent, lexicalAgent);
-  await writeFile(token, "RUNTIME_PRIVATE_SENTINEL");
-  await writeFile(join(root, "srv/pi/token"), "WRONG_RUNTIME_PRIVATE_SENTINEL");
-  Object.assign(process.env, { HOME: join(root, "home"), PI_CODING_AGENT_DIR: lexicalAgent, PI_PACKAGE_DIR: pkg, PI_MSB_UI_FIXTURE_CWD: cwd, PI_MSB_UI_FIXTURE_TOKEN: token });
+  Object.assign(process.env, { HOME: join(root, "home"), PI_CODING_AGENT_DIR: lexicalAgent, PI_PACKAGE_DIR: pkg, PI_MSB_UI_FIXTURE_CWD: cwd, RUNTIME_HOST_ENV_SOURCE: "RUNTIME_PRIVATE_SENTINEL", RUNTIME_COMMAND_TOKEN: "COMMAND_RUNTIME_PRIVATE_SENTINEL" });
   execFileSync("git", ["init", "-q", cwd]);
   // Secret values are synthetic, never read from the real host's Pi config.
   await mkdir(join(canonicalAgent, "pi-microsandbox"));
-  const originalPolicy = 'auto_start = false\n[[secrets]]\nenv = "TOKEN"\nvalue = "$FILE:../../token"\nallow_hosts = ["api.example"]\n';
+  const originalPolicy = 'auto_start = false\n[[secrets]]\nenv = "TOKEN"\nhost_env = "RUNTIME_HOST_ENV_SOURCE"\nallow_hosts = ["api.example"]\n[[secrets]]\nenv = "COMMAND_TOKEN"\nhost_cmd = \'printf %s "$RUNTIME_COMMAND_TOKEN"\'\nallow_hosts = ["command.example"]\n';
   await writeFile(join(canonicalAgent, "pi-microsandbox/default.toml"), originalPolicy);
   const mod = (path) => import(pathToFileURL(join(pkg, "dist", `${path}.js`)));
   const { loadExtensions } = await mod("core/extensions/loader");
@@ -111,7 +108,7 @@ try {
           }
           output = ""; ui.renderNow(true);
           const frame = ui instanceof tui.TuiMainScreen ? ui.captureRenderState().previousLines.slice(-height).join("\n") : output;
-          assert.doesNotMatch(frame, /UNDERLYING|RUNTIME_PRIVATE_SENTINEL/);
+          assert.doesNotMatch(frame, /UNDERLYING|PRIVATE_SENTINEL/);
           input("\t"); assert.equal(baseKeys, launch);
         }
         terminal.columns = 80; terminal.rows = 24;
@@ -193,11 +190,18 @@ try {
           await loaded.extensions[0].commands.get("msb-fixture-verify-origin").handler("", runner.createCommandContext());
           await loaded.extensions[0].commands.get("msb-fixture-stop").handler("", runner.createCommandContext());
         }
-        await expand("Secrets"); await expand("Secrets:"); await expand("TOKEN:");
-        await choose("Value / reference:"); await key("e"); await select("Replace value / reference:");
+        await expand("Secrets"); await expand("Secrets:");
+        for (const [name, source] of [["COMMAND_TOKEN", "Host shell command"], ["TOKEN", "Host environment variable"]]) {
+          await expand(`${name}:`); await choose("Source:");
+          const secretView = tui.stripTerminalSequences(panel.render(80).join("\n"));
+          assert.ok(secretView.includes(source));
+          assert.doesNotMatch(secretView, /PRIVATE_SENTINEL/);
+          if (name === "COMMAND_TOKEN") { await choose(`${name}:`); await key("h"); }
+        }
+        await choose("Source value:"); await key("e"); await select("Source value:");
         assert.match(tui.stripTerminalSequences(panel.render(80).at(-1)), /Enter keep.*Esc cancel.*q literal text/);
         await key("qeadwPGRAW_INPUT_SENTINEL");
-        assert.doesNotMatch(output + panel.render(80).join("\n"), /RAW_INPUT_SENTINEL|RUNTIME_PRIVATE_SENTINEL/);
+        assert.doesNotMatch(output + panel.render(80).join("\n"), /RAW_INPUT_SENTINEL|PRIVATE_SENTINEL/);
         // Escape the masked input, then q closes directly from the clean entry form.
         await key("\x1b"); await key("q");
         await opening;
@@ -223,15 +227,27 @@ try {
       assert.equal(inspection.details.capabilities.mutation.batch.maxReloads, 1);
       assert.deepEqual(inspection.details.settingsSchema["network.mode"].valueSchema.enum, ["default", "open", "allowlist", "deny"]);
       assert.ok(inspection.details.effectivePolicy.adopted);
-      assert.doesNotMatch(JSON.stringify(inspection), /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+      assert.doesNotMatch(JSON.stringify(inspection), /PRIVATE_SENTINEL/);
+      assert.deepEqual(inspection.details.desired.secrets, [
+        { env: "TOKEN", host_env: "RUNTIME_HOST_ENV_SOURCE", allow_hosts: ["api.example"] },
+        { env: "COMMAND_TOKEN", host_cmd: 'printf %s "$RUNTIME_COMMAND_TOKEN"', allow_hosts: ["command.example"] },
+      ]);
       assert.match(inspection.content[0].text, /Microsandbox settings/);
+      for (const expanded of [false, true]) {
+        const frame = inspect.renderResult(inspection, { expanded, isPartial: false }, theme, {}).render(100).join("\n");
+        assert.doesNotMatch(frame, /PRIVATE_SENTINEL/);
+      }
+      const secretInspection = await inspect.execute("secret-sources", { sections: ["desired"], paths: ["secrets"], format: "json" }, undefined, undefined, runner.createContext());
+      assert.deepEqual(JSON.parse(secretInspection.content[0].text), secretInspection.details);
+      assert.deepEqual(secretInspection.details.desired.secrets, inspection.details.desired.secrets);
+      assert.doesNotMatch(JSON.stringify(secretInspection), /PRIVATE_SENTINEL/);
       const filtered = await inspect.execute("filtered", { sections: ["summary", "desired"], paths: ["network"] }, undefined, undefined, runner.createContext());
       assert.deepEqual(Object.keys(filtered.details.desired), ["network"]);
       assert.equal(filtered.details.settingsSchema, undefined);
       for (const expanded of [false, true]) {
         const frame = inspect.renderResult(filtered, { expanded, isPartial: false }, theme, {}).render(100).join("\n");
         assert.match(tui.stripTerminalSequences(frame), /Pi \/reload/);
-        assert.doesNotMatch(frame, /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+        assert.doesNotMatch(frame, /PRIVATE_SENTINEL/);
       }
       const json = await inspect.execute("json", { sections: ["desired"], paths: ["network.mode"], format: "json" }, undefined, undefined, runner.createContext());
       assert.deepEqual(JSON.parse(json.content[0].text), json.details);
@@ -249,7 +265,7 @@ try {
           ] }
           : ["long-warnings", "host-no-op"].includes(action) ? { scope: "session", path: "pass_through_tools", operation: "set", value: Array.from({ length: 40 }, (_, n) => `trusted-${n}-${Renderer.name}`) }
           : action === "secret-hosts" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: Array.from({ length: 40 }, (_, n) => `host-${n}.example`) } }
-          : action === "secret-rotation" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["api.example"], value: "ROTATED_PRIVATE_SENTINEL" } }
+          : action === "secret-rotation" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["api.example"], hostCmd: "printf %s ROTATED_PUBLIC_COMMAND" } }
           : action === "apply" ? { scope: "session", path: "show_footer", operation: "set", value: !inspection.details.desired.show_footer }
           : action === "restart" ? { scope: "session", path: "memory_mib", operation: "set", value: inspection.details.desired.memory_mib + 128 }
           : action === "batch" ? { scope: "session", operations: [
@@ -271,12 +287,13 @@ try {
         for (const [width, height] of [[32, 10], [80, 24], [24, 2], [120, 40], [80, 24]]) {
           terminal.columns = width; terminal.rows = height;
           // Pi owns native layout; long titles can exceed the viewport. No extension clipping/gate.
-          assert.doesNotMatch(panel.render(width).join("\n"), /PRIVATE_SENTINEL|\$FILE:|\$ENV:|UNDERLYING/);
+          assert.doesNotMatch(panel.render(width).join("\n"), /PRIVATE_SENTINEL|UNDERLYING/);
           output = ""; ui.renderNow(true);
-          assert.doesNotMatch(output, /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+          assert.doesNotMatch(output, /PRIVATE_SENTINEL/);
         }
         const frame = selection.title;
-        assert.doesNotMatch(frame, /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+        assert.doesNotMatch(frame, /PRIVATE_SENTINEL/);
+        if (action === "secret-rotation") assert.ok(frame.includes(JSON.stringify(proposal.value.hostCmd)));
         const rendered = panel.render(100).join("\n");
         const native = new ExtensionSelectorComponent("Allow host execution?", ["No", "Yes"], () => {}, () => {});
         const nativeRows = native.render(100);
@@ -301,9 +318,12 @@ try {
           assert.ok(frame.includes(theme.fg("muted", "Scope: ") + theme.fg("warning", "Global")));
           assert.ok(frame.includes(theme.fg("muted", "Secret TOKEN")));
           assert.ok(rendered.includes(theme.fg("muted", "Secret TOKEN")));
-          assert.doesNotMatch(frame, /HOST|adoptedRuntime|provenance|"before"|"after"/);
+          assert.doesNotMatch(frame, /adoptedRuntime|provenance|"before"|"after"/);
+          if (action !== "secret-rotation") assert.doesNotMatch(frame, /HOST/);
           if (action === "secret-rotation") {
-            assert.ok(frame.includes(theme.fg("toolDiffAdded", "<redacted> (changed)")));
+            assert.ok(frame.includes(theme.fg("toolDiffRemoved", "RUNTIME_HOST_ENV_SOURCE")));
+            assert.ok(frame.includes(theme.fg("toolDiffAdded", "printf %s ROTATED_PUBLIC_COMMAND")));
+            assert.match(tui.stripTerminalSequences(frame), /- Host variables: RUNTIME_HOST_ENV_SOURCE\n\+ Host command: printf %s ROTATED_PUBLIC_COMMAND/);
             assert.doesNotMatch(frame, /Hosts:/);
           }
         }
@@ -326,10 +346,12 @@ try {
         }
         const result = await pending;
         const modelText = result.content[0].text;
-        assert.doesNotMatch(modelText, /\x1b|PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+        assert.doesNotMatch(modelText, /\x1b|PRIVATE_SENTINEL/);
+        assert.doesNotMatch(JSON.stringify(result.details), /PRIVATE_SENTINEL/);
         const warnings = modelText.split("\n").filter((line) => line.startsWith("! "));
         for (const warning of warnings) assert.ok(!tui.stripTerminalSequences(frame).includes(warning));
-        assert.doesNotMatch(tui.stripTerminalSequences(frame), /! |Restart:|May start the sandbox|HOST|DNS\/IP|DNS exfiltration|Session settings are memory-only/);
+        assert.doesNotMatch(tui.stripTerminalSequences(frame), /! |Restart:|May start the sandbox|DNS\/IP|DNS exfiltration|Session settings are memory-only/);
+        if (action !== "secret-rotation") assert.doesNotMatch(frame, /HOST/);
         if (action === "long-warnings") {
           assert.match(modelText, /without per-call host approval/);
           assert.match(modelText, /Replaces this scope’s entire list/);
@@ -390,8 +412,9 @@ try {
     }
   }
   const policy = await readFile(join(canonicalAgent, "pi-microsandbox/default.toml"), "utf8");
-  assert.ok(policy.includes("$FILE:../../token"));
-  assert.doesNotMatch(policy, /RUNTIME_PRIVATE_SENTINEL/);
+  assert.match(policy, /^host_env = "RUNTIME_HOST_ENV_SOURCE"$/m);
+  assert.ok(policy.includes(`host_cmd = ${JSON.stringify('printf %s "$RUNTIME_COMMAND_TOKEN"')}`));
+  assert.doesNotMatch(policy, /^value\s*=/m);
   assert.match(policy, /^show_footer = false$/m);
   assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /^show_footer = true$/m);
   console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, native No/Yes config approval, complete masked warning-free titles/agent-text-warnings/quiet-human-results/saved-not-activated/default-No/Escape/abort/immediate-long-review-consent/provenance-collision-gate and focus teardown (fake SDK)`);

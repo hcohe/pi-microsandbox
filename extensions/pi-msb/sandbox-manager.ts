@@ -36,6 +36,10 @@ export interface SandboxManagerDeps {
   createOperations(transport: SandboxTransport): ToolOperations;
   prepareRuntime(runtime: RuntimeExecution, config: Config): Promise<RuntimePreparation>;
   persist(state: PersistedSandboxState): void;
+  /** Privately mask resolved credentials without resolving sources again. */
+  redactError?(message: string): string;
+  /** Called after cleanup errors have been sanitized and ownership released. */
+  disposed?(): void;
   /** Successful adoption, or conservative loss of VM-instance certainty after inspection. */
   adopted?(request: BootRequest, verification: "created" | "reconnected" | "live"): void;
   now?: () => number;
@@ -114,11 +118,13 @@ function infoFor(
   };
 }
 
-function redactMessage(error: unknown, config?: Config): string {
+function redactMessage(error: unknown, config?: Config, sanitize?: (message: string) => string): string {
   let message = error instanceof Error ? error.message : String(error);
-  for (const secret of config?.secrets ?? []) {
-    if (secret.value) message = message.split(secret.value).join("[REDACTED]");
-  }
+  if (sanitize) message = sanitize(message);
+  const sources = (config?.secrets ?? []).flatMap((secret) => [secret.textValue, secret.hostEnv, secret.hostCmd])
+    .filter((source): source is string => typeof source === "string" && !!source)
+    .flatMap((source) => [source, JSON.stringify(source).slice(1, -1)]);
+  for (const source of [...new Set(sources)].sort((a, b) => b.length - a.length)) message = message.split(source).join("[REDACTED]");
   return message || "unknown error";
 }
 
@@ -194,7 +200,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   }
 
   function setFailure(request: BootRequest | null, error: unknown): RuntimeState {
-    const reason = redactMessage(error, request?.config);
+    const reason = redactMessage(error, request?.config, deps.redactError);
     state = {
       status: request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
       info: null,
@@ -493,7 +499,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         try {
           await deps.stopAndRemove(failedName, lastRequest.config.stopTimeoutMs);
         } catch {
-          throw new Error(`${redactMessage(error, lastRequest.config)}; failed to clean up the restarted sandbox`);
+          throw new Error(`${redactMessage(error, lastRequest.config, deps.redactError)}; failed to clean up the restarted sandbox`);
         }
       }
       throw error;
@@ -573,13 +579,14 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       state = {
         status: "unavailable",
         info: null,
-        reason: redactMessage(cleanupError, request?.config),
+        reason: redactMessage(cleanupError, request?.config, deps.redactError),
       };
     } else if (persistDisabled) {
       state = { status: "off", info: null };
     } else {
       state = { status: "disabled", info: null };
     }
+    deps.disposed?.();
   }
 
   const manager: SandboxManager = {

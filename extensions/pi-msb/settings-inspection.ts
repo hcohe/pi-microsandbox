@@ -5,8 +5,8 @@ import { safeText } from "./control-panel.ts";
 import { effectiveNetworkPolicy, settingsCapabilities, settingsSchema } from "./settings-schema.ts";
 import { POLICY_VERIFICATION_GUIDANCE, RECONNECTED_POLICY_WARNING, SESSION_LIFETIME } from "./settings-safety.ts";
 
-export const SETTINGS_SCHEMA_VERSION = 2;
-export const INSPECTION_SECTIONS = ["summary", "desired", "layers", "origins", "runtime", "schema", "capabilities", "policy", "warnings"] as const;
+export const SETTINGS_SCHEMA_VERSION = 5;
+export const INSPECTION_SECTIONS = ["summary", "desired", "layers", "origins", "runtime", "schema", "capabilities", "policy", "warnings", "recovery"] as const;
 const pathNames = [...SETTINGS_PATHS, "network", "docker"];
 export const inspectionParameters = Type.Object({
   sections: Type.Optional(Type.Array(Type.String({ enum: [...INSPECTION_SECTIONS] }), { minItems: 1, maxItems: INSPECTION_SECTIONS.length,
@@ -53,6 +53,8 @@ export function inspectSettings(inspection: Record<string, any>, request: Inspec
   const adopted = effectiveNetworkPolicy(state?.adopted?.settings);
   const unknown = !adopted;
   const summary = {
+    configurationValid: inspection.recovery?.configurationValid ?? (inspection.desired ? true : null),
+    recoveryAvailable: inspection.recovery?.available ?? null,
     runtimeStatus: state?.status ?? "unknown", desiredNetworkMode: desired?.mode ?? "unknown",
     adoptedNetworkMode: adopted?.mode ?? "unknown", verification: state?.adopted?.verification ?? "unknown",
     adoptionNote: unknown ? state?.adopted?.verification === "reconnected" ? RECONNECTED_POLICY_WARNING
@@ -66,6 +68,8 @@ export function inspectSettings(inspection: Record<string, any>, request: Inspec
   const selected = new Set(request.sections);
   const paths = request.paths;
   if (inspection.reason) output.reason = inspection.reason;
+  // An invalid baseline is safety context, not a filtered desired-policy value.
+  if (inspection.recovery && (selected.has("recovery") || inspection.recovery.configurationValid === false)) output.recovery = inspection.recovery;
   if (selected.has("summary")) output.summary = summary;
   if (selected.has("desired") && inspection.desired) output.desired = paths ? pickLeaves(inspection.desired, paths) : inspection.desired;
   if (selected.has("layers") && inspection.layers) {
@@ -132,7 +136,7 @@ function report(details: Record<string, any>, compact: boolean): string {
     if (!details.summary) lines.push("Expand for the selected inspection sections.");
     return lines.join("\n");
   }
-  for (const [key, heading] of [["desired", "Desired settings (intent, not enforcement)"], ["layers", "Sparse scope layers"], ["origins", "Origins"], ["provenance", "Provenance"], ["runtime", "Runtime (known adoption only)"], ["effectivePolicy", "Network policy"], ["warnings", "Configuration warnings"]]) add(heading!, details[key!]);
+  for (const [key, heading] of [["desired", "Desired settings (intent, not enforcement)"], ["layers", "Sparse scope layers"], ["origins", "Origins"], ["provenance", "Provenance"], ["runtime", "Runtime (known adoption only)"], ["effectivePolicy", "Network policy"], ["warnings", "Configuration warnings"], ["recovery", "Configuration recovery"]]) add(heading!, details[key!]);
   if (details.settingsSchema) {
     lines.push("", "Setting schemas");
     for (const [path, field] of Object.entries(details.settingsSchema) as Array<[string, any]>) {
@@ -157,7 +161,7 @@ export function inspectionText(details: Record<string, any>, format: "text" | "j
   return Buffer.from(output, "utf8").subarray(0, 47000).toString("utf8") + `\n\n[${reason}]`;
 }
 export function inspectionResult(details: Record<string, any>, format: "text" | "json" = "text", overview = false) {
-  const presentation = overview && format === "text" ? Object.fromEntries(Object.entries(details).filter(([key]) => ["outcome", "schemaVersion", "schemaUnchanged", "reason", "summary", "desired"].includes(key))) : details;
+  const presentation = overview && format === "text" ? Object.fromEntries(Object.entries(details).filter(([key]) => ["outcome", "schemaVersion", "schemaUnchanged", "reason", "summary", "desired", "recovery"].includes(key))) : details;
   const hint = overview && format === "text" ? "\n\nOther selected sections remain in structured details. Request sections explicitly (or format=json) for their full report; expand the tool row to inspect them." : "";
   return { content: [{ type: "text" as const, text: inspectionText(presentation, format) + hint }], details };
 }

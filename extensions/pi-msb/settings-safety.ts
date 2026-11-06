@@ -1,4 +1,5 @@
 /** Public safety guidance: static text only, never configured values or credentials. */
+export const HOST_SECRET_COMMAND_WARNING = "This secret source executes a shell command on the HOST, outside the sandbox, when secrets are activated. Command text is agent-readable; resolved credentials remain private. Explicit human authorization is required.";
 export const SESSION_LIFETIME_WARNING = "Session overrides are memory-only. Pi /reload, session/workspace changes and shutdown clear them; inherited defaults return and may allow broader access. Settings reload does not clear them. Choose Project or Global explicitly to persist a change.";
 export const NETWORK_IDENTITY_WARNING = "Network allowlists use DNS/IP state, not per-request URL or TLS-hostname authorization. Shared IPs and DNS cache state matter; destination rules are not HTTPS-only.";
 export const DNS_EXCEPTION_WARNING = "DNS is a separate TCP/UDP port 53 exception to the runtime host, not a service-domain allowlist or a guarantee against DNS exfiltration.";

@@ -9,11 +9,14 @@ const scopes = ["session", "project", "global"];
 const nonempty = { type: "string", minLength: 1 };
 const strings = { type: "array", items: nonempty };
 const secretEntry = {
-  type: "object", additionalProperties: false, required: ["env", "allowHosts", "value"],
+  type: "object", additionalProperties: false, required: ["env", "allowHosts"],
+  oneOf: ["hostEnv", "hostCmd"].map((source) => ({ required: [source] })),
+  description: "Agent-writable sources are hostEnv (variable NAME only) and hostCmd (command text). Literal textValue credentials are forbidden, including masked placeholders; use host configuration or the native editor for literals.",
   properties: {
     env: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$", description: "Environment name; protected process-control names are forbidden." },
     allowHosts: { type: "array", items: SECRET_HOST_SCHEMA, minItems: 1, description: "Exact domains or wildcard subdomain scopes such as *.googleapis.com (single leading *. only). Credential injection destinations, NOT additional network grants. TLS identity is required." },
-    value: { type: "string", description: "Literal credential or ENV/FILE reference. Never submit a masked placeholder. Omit only on upsert to retain the selected credential/reference privately." },
+    hostEnv: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$", description: "Readable/writable host environment variable NAME only, never its resolved value. Never resolved by getters, previews or saves." },
+    hostCmd: { type: "string", pattern: "\\S", description: "Readable/writable command text: explicit human-authorized shell code on the HOST with Pi's privileges. Executed only when activating secrets, never by getters, previews or saves." },
   },
 };
 const mountEntry = {
@@ -45,14 +48,17 @@ export function settingsSchema(): Record<string, unknown> {
     } : Array.isArray(initial) ? strings : { type: typeof initial });
     const collection = !!COLLECTION_REMOVALS[field.path];
     return [field.path, {
-      description: field.description, valueSchema, scopes,
+      description: field.path === "secrets" ? "Destination-scoped secret injection. Agents may read/write hostEnv names and hostCmd text, never literal textValue credentials. Metadata-only upserts may retain an existing literal privately." : field.description, valueSchema, scopes,
       operations: collection ? ["set", "inherit", "upsert", "remove"] : ["set", "inherit"],
       effect: LIVE_SETTINGS_KEYS.includes(normalizeConfigPath(field.path)[0] as typeof LIVE_SETTINGS_KEYS[number]) ? "live" : "restart",
       ...(field.choiceHelp ? { choices: field.choiceHelp } : {}),
       ...(collection ? {
         collection: "set replaces the entire list; [] clears it. upsert/remove preserve unrelated scope siblings. Entries use camelCase keys.",
         identity: field.path === "secrets" ? "env" : field.path === "mounts" ? "normalized guestPath" : "exact list string",
-        upsertSchema: field.path === "secrets" ? { ...secretEntry, required: ["env", "allowHosts"] }
+        upsertSchema: field.path === "secrets" ? { ...secretEntry,
+          oneOf: [...secretEntry.oneOf, { not: { anyOf: secretEntry.oneOf } }],
+          description: "Supply at most one source: hostEnv or hostCmd. Omitting both retains the selected existing source privately, including a literal; a new entry requires a source. Never supply textValue, including placeholders.",
+        }
           : field.path === "mounts" ? mountEntry : valueSchema.items,
       } : {}),
       ...(field.path === "network.allow_hosts" ? { semantics: networkSemantics.hostMatching } : {}),
@@ -84,7 +90,7 @@ export const networkSemantics = {
 };
 
 export const settingsCapabilities = {
-  version: 2, scopes, sessionLifetime: SESSION_LIFETIME,
+  version: 5, scopes, sessionLifetime: SESSION_LIFETIME,
   inspection: { sections: ["summary", "desired", "layers", "origins", "runtime", "schema", "capabilities", "policy", "warnings"],
     paths: "Supported leaves or network/docker groups; filters apply to setting-shaped sections. Policy/summary retain complete safety context.",
     format: "Human-readable text by default; json is indented. Structured details contain the selected JSON. Use knownSchemaVersion to omit unchanged schemas/capabilities.",

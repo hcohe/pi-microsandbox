@@ -72,7 +72,7 @@ Relevant safety/impact warnings remain in review metadata and are returned in
 agent-visible text after completion (including saved-but-not-activated outcomes),
 so the agent can advise the user. Human setter result rows also omit warning
 blocks; getter inspection warnings are unchanged.
-No UI means no mutation. Secrets/references and arbitrary unknown raw values
+No UI means no mutation. Secret sources and arbitrary unknown raw values
 are not exposed. Changed files/session identity/Session settings invalidate approval;
 conflicts never silently retry. Only these two exact tool names bypass the
 third-party tool gate, not other host tools or `msb_*` prefixes. See
@@ -98,9 +98,14 @@ mode 0600 (new directories 0700). Portable filesystem checks cannot prevent ever
 host-process race; the policy directory must remain host-owned and inaccessible
 to guest writes. Save confirmation is a security decision: open networking,
 pass-through tools, host fallback and writable mounts widen the boundary.
-Secrets use masked entry and are never prefilled; unchanged raw references stay
-private. Configured secret bytes are redacted from recent log display, but guest
-application logs may contain other sensitive data. Do not share logs blindly.
+The human panel uses masked secret entry and never prefills source fields.
+Agent tools can read and configure host variable names and host commands, but
+cannot read or set literal `textValue` credentials. Do not embed credentials in
+host commands: their text is visible to the agent. A secret's host command runs
+with Pi's host privileges, not in the sandbox; approve only trusted commands.
+Inspection and settings saves never execute them.
+Configured secret bytes are redacted from recent log display, but guest application
+logs may contain other sensitive data. Do not share logs blindly.
 
 Unspecified settings are **not** locked. Missing overrides preserve the usual
 configuration behavior; unreadable or invalid overrides fail closed.

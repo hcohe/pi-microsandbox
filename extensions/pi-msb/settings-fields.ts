@@ -23,7 +23,7 @@ const descriptions: Record<string, string> = {
   "network.publish_ports": "Guest port mappings: PORT, HOST:PORT, or IP:HOST:PORT. Prefer loopback.",
   "docker.mode": "Docker inside the VM: auto best effort, require fail-closed, or disabled.",
   "docker.startup_timeout_ms": "Docker readiness timeout, integer milliseconds 1–300000.",
-  secrets: "Destination-scoped secret injection. Values stay masked; omit replacement to retain.",
+  secrets: "Destination-scoped secret injection. Choose one source: literal value, host environment variable or host shell command. Omit replacement to retain.",
   mounts: "Additional mounts; writable host data is exposed. No sockets, policy paths or guest system overlap.",
 };
 // Menu hints stay brief; editor help is static and never interpolates configured values.
@@ -57,7 +57,7 @@ const help: Record<string, FieldHelp> = {
   "network.publish_ports": { hint: "Guest ports available from the host", editorHelp: "Enter one mapping: PORT, HOST:PORT, or IP:HOST:PORT; ports must be 1–65535.\nExample: 127.0.0.1:8080:80\nUse loopback to avoid exposing the guest service to other machines." },
   "docker.mode": { hint: "Whether to run Docker in the guest", editorHelp: "Choose how Docker readiness affects sandbox startup.\nFor example, require fails closed if guest Docker is not ready.", choiceHelp: { auto: "Try guest Docker without requiring it to be available.", require: "Require guest Docker readiness; fail closed if unavailable.", disabled: "Do not start guest Docker." } },
   "docker.startup_timeout_ms": { hint: "Time to wait for guest Docker", editorHelp: "Enter an integer from 1 to 300000 milliseconds for Docker readiness.\nExample: 30000 (30 seconds)" },
-  secrets: { hint: "Secrets shared with selected services", editorHelp: "Add a secret with an environment name, allowed hosts and a masked value.\nExample environment name: SERVICE_TOKEN\nValues and references stay private; restrict each secret to the services that need it." },
+  secrets: { hint: "Secrets shared with selected services", editorHelp: "Add a secret with an environment name, allowed hosts and exactly one source: literal value, host environment variable or host shell command.\nExample environment name: SERVICE_TOKEN\nAll source fields stay private. Literal values are never expanded; restrict each secret to the services that need it." },
   mounts: { hint: "Extra storage for the sandbox", editorHelp: "Add a dir, file, named volume or tmpfs mount.\nExample guest path: /mnt/data\nWritable host mounts expose host data. Sockets, writable policy paths and protected guest paths are blocked." },
 };
 export const SECRET_HOST_HELP = {

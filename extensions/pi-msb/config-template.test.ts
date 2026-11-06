@@ -35,12 +35,13 @@ test("config-template is fully commented and covers current default settings", (
   assert.match(defaults, /sandbox_name defaults to null/);
 });
 
-test("config-template describes host-owned configuration without compatibility guidance", () => {
+test("config-template describes host-owned configuration and deprecated secret APIs", () => {
   const template = defaultConfigTemplate(DEFAULT_CONFIG);
   assert.match(template, /Precedence: built-ins < environment < Global \(this default\.toml\)\n## < Project \(host-owned override\) < Session \(memory only\)/);
   assert.match(template, /projects\/Code\/app\/config\.toml/);
   assert.match(template, /PI_MSB_\* environment settings and the \/msb control panel/);
-  assert.doesNotMatch(template, /legacy|deprecated|migrat|PI_MSB_CONFIG_FILE|CONFIG_DIR_NAME/i);
+  assert.doesNotMatch(template, /legacy|migrat|PI_MSB_CONFIG_FILE|CONFIG_DIR_NAME/i);
+  assert.match(template, /Deprecated API: value and \$ENV: references are not supported/);
 });
 
 test("config-template independent uncommented examples parse and validate without warnings", () => {
@@ -56,9 +57,10 @@ test("config-template independent uncommented examples parse and validate withou
   }));
   assert.equal(parsed.get("sandbox-name")?.sandboxName, "my-isolated-session");
   const secrets = parsed.get("secrets")!.secrets!;
-  assert.deepEqual(Object.keys(secrets[0]!).sort(), ["allowHosts", "env", "value"]);
-  assert.ok(secrets.some((secret) => secret.value!.startsWith("$ENV:")));
-  assert.ok(secrets.some((secret) => secret.value!.startsWith("$FILE:")));
+  assert.deepEqual(Object.keys(secrets[0]!).sort(), ["allowHosts", "env", "hostEnv"]);
+  assert.equal(secrets[0]!.hostEnv, "API_TOKEN");
+  assert.equal(secrets[1]!.hostCmd, "gcloud auth print-access-token --quiet");
+  assert.equal(secrets[2]!.textValue, "s3cre3t");
   const mounts = parsed.get("mounts")!.mounts!;
   assert.deepEqual(mounts.map((mount) => mount.type), ["dir", "file", "named", "tmpfs"]);
   assert.deepEqual(Object.keys(mounts[0]!).sort(), ["guestPath", "hostPath", "options", "readonly", "type"]);
@@ -67,7 +69,7 @@ test("config-template independent uncommented examples parse and validate withou
   const inPlace = parseTomlConfig(uncomment(template.replace(/^# (?:secrets|mounts) = \[\]\n/gm, "")), "host-default");
   assert.deepEqual(inPlace.warnings, []);
   assert.equal(inPlace.value.sandboxName, "my-isolated-session");
-  assert.equal(inPlace.value.secrets?.length, 2);
+  assert.equal(inPlace.value.secrets?.length, 3);
   assert.equal(inPlace.value.mounts?.length, 4);
   assert.doesNotThrow(() => validateConfig(inPlace.value));
 });

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, readRawConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
-import type { Config } from "./types.ts";
+import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, readRawConfig, resolveConfig, resolveSecretValue, type ResolveConfigInput } from "./config.ts";
+import type { Config, SecretConfig } from "./types.ts";
 
 import { classifySettingsEffect, COLLECTION_REMOVALS, SETTINGS_PATHS, SettingsEditor } from "./settings.ts";
 
@@ -28,7 +28,7 @@ test("settings schema leaf inventory covers every supported setting", () => {
 test("settings sparse saves preserve unrelated raw data/references; no-op does not write", async (t) => {
   const { editor, input, paths } = await fixture(t);
   await writeFile(join(dirname(paths.global), "token"), "not-materialized");
-  const raw = `# original\ncpus = 3\nunknown_setting = { originalKey = "keep" }\nsecrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["example.com"] }]\nnetwork.allow_dns = false\n`;
+  const raw = `# original\ncpus = 3\nunknown_setting = { originalKey = "keep" }\nsecrets = [{ env = "TOKEN", text_value = "$FILE:token", allow_hosts = ["example.com"] }]\nnetwork.allow_dns = false\n`;
   await writeFile(paths.global, raw);
   const noOp = await editor.open("global");
   noOp.set("cpus", 3);
@@ -61,7 +61,7 @@ for (const scope of ["global", "project"] as const) test(`${scope} saves format 
     'empty_entries = [{}]',
     'mixed_list = [1, { originalKey = "keep" }]',
     'network = { mode = "deny", allow_hosts = ["a.example", "b.example"] }',
-    'secrets = [{ env = "ONE", value = "$ENV:ONE", allow_hosts = ["a.example"] }, { env = "TWO", value = "$ENV:TWO", allow_hosts = ["b.example"] }]',
+    'secrets = [{ env = "ONE", host_env = "ONE", allow_hosts = ["a.example"] }, { env = "TWO", host_cmd = "printf TWO", allow_hosts = ["b.example"] }]',
     `mounts = [{ type = "dir", host_path = ${JSON.stringify(cache)}, guest_path = "/cache", readonly = true, options = [] }]`,
     '"custom.section" = { "key with spaces" = "keep", nested = { originalKey = "keep", "literal.key" = "keep" }, entries = [{ name = "one" }, { name = "two" }], empty = {} }',
   ].join("\n") + "\n";
@@ -73,7 +73,7 @@ for (const scope of ["global", "project"] as const) test(`${scope} saves format 
   assert.match(saved, /^cpus = 3\nroute_tools = \["read", "bash"\]/);
   assert.match(saved, /\n\n\[network\]\nmode = "deny"\nallow_hosts = \["a.example", "b.example"\]/);
   assert.equal(saved.match(/^\[\[secrets\]\]$/gm)?.length, 2);
-  assert.match(saved, /\[\[secrets\]\]\nenv = "ONE"\nvalue = "\$ENV:ONE"/);
+  assert.match(saved, /\[\[secrets\]\]\nenv = "ONE"\nhost_env = "ONE"/);
   assert.match(saved, /\n\n\[\[mounts\]\]\ntype = "dir"\nhost_path = /);
   assert.match(saved, /\["custom.section"\]\n"key with spaces" = "keep"/);
   assert.match(saved, /\["custom.section"\.nested\]\noriginalKey = "keep"\n"literal.key" = "keep"/);
@@ -118,44 +118,56 @@ test("inherit differs from empty authoritative arrays, deletion preserves unrela
   assert.equal(saved.network?.allowDns, false);
 });
 
-test("secret CRUD is masked, keeps own relative references, and never materializes ENV or FILE", async (t) => {
-  const { editor, paths } = await fixture(t);
-  await writeFile(join(dirname(paths.project), "token"), "file-credential-sentinel");
-  await writeFile(paths.project, `secrets = [{ env = "LITERAL", value = "literal-credential-sentinel", allow_hosts = ["a.example"] }, { env = "FILE", value = "$FILE:token", allow_hosts = ["a.example"] }]\n`);
+test("native secret CRUD accepts literals, exposes host metadata and never executes hostCmd during inspection/validation", async (t) => {
+  const { editor, paths, root } = await fixture(t);
+  const marker = join(root, "command-executed");
+  const secrets: SecretConfig[] = [
+    { env: "LITERAL", textValue: "literal-credential-sentinel", allowHosts: ["a.example"] },
+    { env: "ENV_LITERAL", textValue: "$ENV:literal-env-sentinel", allowHosts: ["a.example"] },
+    { env: "FILE_LITERAL", textValue: "$FILE:literal-file-sentinel", allowHosts: ["a.example"] },
+    { env: "ENV_TOKEN", hostEnv: "HOST_ENV_SENTINEL", allowHosts: ["a.example"] },
+    { env: "CMD_TOKEN", hostCmd: `touch ${JSON.stringify(marker)}`, allowHosts: ["a.example"] },
+  ];
   const draft = await editor.open("project");
-  draft.upsertSecret({ env: "LITERAL", allowHosts: ["b.example"] });
-  draft.upsertSecret({ env: "ENV_TOKEN", value: "$ENV:NOT_LOADED", allowHosts: ["c.example"] });
-  const display = JSON.stringify([draft.snapshot(), await draft.preview()]);
-  assert.ok(!display.includes("literal-credential-sentinel"));
-  assert.ok(!display.includes("file-credential-sentinel"));
+  draft.set("secrets", secrets);
+  for (const secret of secrets) draft.upsertSecret({ env: secret.env, allowHosts: ["b.example"] });
+  const display = JSON.stringify([draft.snapshot(), await draft.preview(), await draft.reviewForApproval("restart")]);
+  for (const secret of secrets) {
+    if (secret.textValue) assert.equal(display.includes(secret.textValue), false);
+    else assert.ok(display.includes(JSON.stringify(secret.hostEnv ?? secret.hostCmd).slice(1, -1)));
+  }
   await draft.apply();
-  const saved = await readFile(paths.project, "utf8");
-  assert.ok(saved.includes('"$FILE:token"'));
-  assert.ok(saved.includes("literal-credential-sentinel"));
-  assert.ok(saved.includes("$ENV:NOT_LOADED"));
+  await editor.inspect();
+  assert.deepEqual(parseTomlConfig(await readFile(paths.project, "utf8"), "project").value.secrets,
+    secrets.map((secret) => ({ ...secret, allowHosts: ["b.example"] })));
+  await assert.rejects(stat(marker), { code: "ENOENT" });
   const remove = await editor.open("project"); remove.removeSecret("LITERAL"); await remove.apply();
   assert.ok(!(await readFile(paths.project, "utf8")).includes("literal-credential-sentinel"));
 });
 
 test("unchanged literal secrets are not copied into sparse files", async (t) => {
   const { editor, paths } = await fixture(t);
-  await writeFile(paths.global, 'secrets = [{ env = "TOKEN", value = "literal-sentinel", allow_hosts = ["a.example"] }]\n');
+  await writeFile(paths.global, 'secrets = [{ env = "TOKEN", text_value = "literal-sentinel", allow_hosts = ["a.example"] }]\n');
   const draft = await editor.open("project"); draft.set("cpus", 2); await draft.apply();
   assert.ok(!(await readFile(paths.project, "utf8")).includes("literal-sentinel"));
 });
 
-test("cross-layer secret CRUD preserves FILE origin instead of rebasing to target", async (t) => {
-  const { editor, paths } = await fixture(t);
-  const token = join(dirname(paths.global), "token"); await writeFile(token, "secret");
-  await writeFile(paths.global, 'secrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["a.example"] }]');
-  const draft = await editor.open("project"); draft.upsertSecret({ env: "TOKEN", allowHosts: ["b.example"] }); await draft.apply();
-  assert.ok((await readFile(paths.project, "utf8")).includes(`$FILE:${token}`));
+test("cross-layer secret CRUD preserves literal prefixes without expansion or rebasing", async (t) => {
+  for (const value of ["$FILE:token", "$ENV:TOKEN"]) {
+    const { editor, paths, input } = await fixture(t);
+    await writeFile(paths.global, `secrets = [{ env = "TOKEN", text_value = ${JSON.stringify(value)}, allow_hosts = ["a.example"] }]`);
+    const draft = await editor.open("project"); draft.upsertSecret({ env: "TOKEN", allowHosts: ["b.example"] }); await draft.apply();
+    const secret = (await resolveConfig(input)).config.secrets[0]!;
+    assert.equal(secret.textValue, value);
+    assert.equal(await resolveSecretValue(secret, { TOKEN: "must-not-expand" }), value);
+    assert.equal(parseTomlConfig(await readFile(paths.project, "utf8"), "project").value.secrets![0]!.textValue, value);
+  }
 });
 
 test("invalid/schema/null/mount candidates fail before disk or temporary changes", async (t) => {
   const { editor, paths, input } = await fixture(t);
   await writeFile(paths.project, "cpus = 2\n");
-  for (const [key, value] of [["cpus", 0], ["lock_dir", 3], ["network.publish_ports", ["bad"]], ["sandbox_name", null], ["secrets", [{ env: "TOKEN", value: "secret", allowHosts: [] }]]] as const) {
+  for (const [key, value] of [["cpus", 0], ["lock_dir", 3], ["network.publish_ports", ["bad"]], ["sandbox_name", null], ["secrets", [{ env: "TOKEN", textValue: "secret", allowHosts: [] }]]] as const) {
     const draft = await editor.open("project"); draft.set(key, value);
     await assert.rejects(draft.apply());
     assert.equal(await readFile(paths.project, "utf8"), "cpus = 2\n");
@@ -222,13 +234,15 @@ test("drafts can retarget dirty edits to three scopes without copying effective 
   assert.deepEqual(editor.temporary(), {});
 });
 
-test("retargeting relative secret references preserves their source origin", async (t) => {
-  const { editor, paths } = await fixture(t);
-  const token = join(dirname(paths.project), "token"); await writeFile(token, "secret");
-  await writeFile(paths.project, 'secrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["a.example"] }]');
-  const draft = await editor.open("project"); draft.upsertSecret({ env: "TOKEN", allowHosts: ["b.example"] });
-  const global = await draft.forScope("global"); await global.apply();
-  assert.ok((await readFile(paths.global, "utf8")).includes(`$FILE:${token}`));
+test("retargeting literal prefix secrets never rewrites their spelling", async (t) => {
+  for (const value of ["$FILE:../token", "$ENV:TOKEN"]) {
+    const { editor, paths } = await fixture(t);
+    await writeFile(paths.project, `secrets = [{ env = "TOKEN", text_value = ${JSON.stringify(value)}, allow_hosts = ["a.example"] }]`);
+    const draft = await editor.open("project"); draft.upsertSecret({ env: "TOKEN", allowHosts: ["b.example"] });
+    const global = await draft.forScope("global"); await global.apply();
+    assert.deepEqual(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets,
+      [{ env: "TOKEN", textValue: value, allowHosts: ["b.example"] }]);
+  }
 });
 
 test("new missing host policy directories can be safely created after validation", async (t) => {
@@ -250,33 +264,79 @@ test("mount CRUD preserves valid collection semantics and rejects masked secret 
   draft.upsertMount({ type: "tmpfs", guestPath: "/cache", readonly: true, options: [] }, "/scratch");
   draft.removeMount("/cache");
   assert.equal((await draft.preview()).effect, "none");
-  assert.throws(() => draft.set("secrets", [{ env: "TOKEN", value: "<redacted>", allowHosts: ["a.example"] }]), /placeholders/);
+  assert.throws(() => draft.set("secrets", [{ env: "TOKEN", textValue: "<redacted>", allowHosts: ["a.example"] }]), /placeholders/);
   draft.discard();
   assert.throws(() => draft.set("cpus", 2), /closed/);
 });
 
-test("secret replacement survives repeated metadata-only edits in persistent and temporary drafts", async (t) => {
-  for (const scope of ["project", "temporary"] as const) {
+test("source switching replaces the old source and survives metadata edits, rename and refresh", async (t) => {
+  const sources = [{ textValue: "$ENV:literal-private" }, { hostEnv: "PRIVATE_ENV" }, { hostCmd: "printf PRIVATE_CMD" }];
+  for (const scope of ["global", "project", "temporary"] as const) for (const before of sources) for (const after of sources) {
     const { editor, paths } = await fixture(t);
-    if (scope === "project") await writeFile(paths.project, 'secrets = [{ env = "TOKEN", value = "$ENV:OLD", allow_hosts = ["old.example"] }]');
-    else { const initial = await editor.open(scope); initial.upsertSecret({ env: "TOKEN", value: "$ENV:OLD", allowHosts: ["old.example"] }); await initial.apply(); }
+    const initial = await editor.open(scope); initial.upsertSecret({ env: "TOKEN", ...before, allowHosts: ["old.example"] }); await initial.apply();
     const draft = await editor.open(scope);
-    draft.upsertSecret({ env: "TOKEN", value: "$ENV:NEW", allowHosts: ["first.example"] });
+    draft.upsertSecret({ env: "TOKEN", ...after, allowHosts: ["first.example"] });
     draft.upsertSecret({ env: "TOKEN", allowHosts: ["second.example"] });
     draft.upsertSecret({ env: "RENAMED", allowHosts: ["third.example"] }, "TOKEN");
-    assert.doesNotMatch(JSON.stringify(draft.snapshot().raw), /\$ENV:OLD|\$ENV:NEW/);
-    await draft.apply();
-    const saved = scope === "project" ? parseTomlConfig(await readFile(paths.project, "utf8"), "project").value.secrets : editor.temporary().secrets;
-    assert.deepEqual(saved, [{ env: "RENAMED", value: "$ENV:NEW", allowHosts: ["third.example"] }]);
+    const refreshed = await draft.refresh();
+    for (const source of [before, after]) if ("textValue" in source) {
+      assert.equal(JSON.stringify(refreshed.snapshot()).includes(source.textValue!), false);
+    }
+    await refreshed.apply();
+    const saved = scope === "temporary" ? editor.temporary().secrets : parseTomlConfig(await readFile(paths[scope], "utf8"), scope).value.secrets;
+    assert.deepEqual(saved, [{ env: "RENAMED", ...after, allowHosts: ["third.example"] }]);
+  }
+});
+
+test("secret edits require exactly one source and reject invalid source values atomically", async (t) => {
+  const { editor, paths } = await fixture(t);
+  await writeFile(paths.project, "cpus = 2\n");
+  const invalid = [{}, { textValue: "private", hostEnv: "PRIVATE_ENV" }, { textValue: "private", hostCmd: "printf PRIVATE_CMD" },
+    { hostEnv: "PRIVATE_ENV", hostCmd: "printf PRIVATE_CMD" }, { textValue: "private", hostEnv: "PRIVATE_ENV", hostCmd: "printf PRIVATE_CMD" },
+    { textValue: null }, { hostEnv: 1 }, { hostCmd: [] }, { hostEnv: "" }, { hostCmd: "" }];
+  for (const source of invalid) for (const operation of ["set", "upsert"] as const) {
+    await assert.rejects(async () => {
+      const draft = await editor.open("project");
+      const secret = { env: "TOKEN", ...source, allowHosts: ["a.example"] };
+      if (operation === "set") draft.set("secrets", [secret]); else draft.upsertSecret(secret as SecretConfig);
+      await draft.apply();
+    });
+    assert.equal(await readFile(paths.project, "utf8"), "cpus = 2\n");
+    assert.deepEqual(editor.temporary(), {});
+  }
+});
+
+test("deprecated secret value sources are rejected without retaining or expanding credentials", async (t) => {
+  for (const scope of ["global", "project", "temporary"] as const) {
+    const { editor, paths } = await fixture(t);
+    const initial = await editor.open(scope);
+    initial.upsertSecret({ env: "TOKEN", textValue: "original-private", allowHosts: ["a.example"] });
+    await initial.apply();
+    const before = scope === "temporary" ? editor.temporary() : await readFile(paths[scope], "utf8");
+    for (const source of [
+      { value: "deprecated-private" },
+      { value: "$ENV:TOKEN" },
+      { value: "deprecated-private", textValue: "replacement-private" },
+      { value: "deprecated-private", hostEnv: "TOKEN" },
+      { value: "deprecated-private", hostCmd: "printf replacement-private" },
+    ]) for (const operation of ["set", "upsert"] as const) {
+      await assert.rejects(async () => {
+        const draft = await editor.open(scope);
+        const secret = { env: "TOKEN", ...source, allowHosts: ["b.example"] };
+        if (operation === "set") draft.set("secrets", [secret]); else draft.upsertSecret(secret);
+        await draft.apply();
+      }, /secret value was removed/);
+      assert.deepEqual(scope === "temporary" ? editor.temporary() : await readFile(paths[scope], "utf8"), before);
+    }
   }
 });
 
 test("same-identity draft refresh preserves private edits but rejects switched, ended or changed cwd contexts", async (t) => {
   const { editor, input } = await fixture(t);
-  const draft = await editor.open("temporary"); draft.set("cpus", 2); draft.upsertSecret({ env: "TOKEN", value: "PRIVATE_SENTINEL", allowHosts: ["a.example"] });
+  const draft = await editor.open("temporary"); draft.set("cpus", 2); draft.upsertSecret({ env: "TOKEN", textValue: "PRIVATE_SENTINEL", allowHosts: ["a.example"] });
   editor.configureSession(input, "session-1"); await assert.rejects(draft.preview(), /stale/);
   const refreshed = await draft.refresh(); assert.doesNotMatch(JSON.stringify(refreshed.snapshot()), /PRIVATE_SENTINEL/);
-  await refreshed.apply(); assert.equal(editor.temporary().cpus, 2); assert.equal(editor.temporary().secrets![0]!.value, "PRIVATE_SENTINEL");
+  await refreshed.apply(); assert.equal(editor.temporary().cpus, 2); assert.equal(editor.temporary().secrets![0]!.textValue, "PRIVATE_SENTINEL");
   editor.configureSession(input, "session-2"); await assert.rejects(draft.refresh(), /context changed/);
   const ending = await editor.open("temporary"); editor.endSession(); await assert.rejects(ending.refresh(), /context changed/);
   const moving = await editor.open("temporary"); editor.configureSession({ ...input, cwd: join(input.cwd, "nested") }, "session-2"); await assert.rejects(moving.refresh(), /context changed/);
@@ -295,7 +355,7 @@ network.remove_publish_ports = ["8080", "9090"]
 `);
   const draft = await editor.open("project");
   draft.set("route_tools", ["read", "bash"]); draft.set("host_env", ["FORWARD_ME"]);
-  draft.upsertSecret({ env: "TOKEN", value: "$ENV:NEW", allowHosts: ["a.example"] });
+  draft.upsertSecret({ env: "TOKEN", hostEnv: "NEW", allowHosts: ["a.example"] });
   draft.upsertMount({ type: "tmpfs", guestPath: "/scratch", readonly: true, options: [] });
   draft.set("network.allow_hosts", ["add.example"]); draft.set("network.publish_ports", ["8080"]);
   const preview = await draft.preview();
@@ -322,11 +382,8 @@ test("collection reconciliation never clears higher-scope removals and scalar sa
 
 async function scopedSecrets(t: TestContext) {
   const f = await fixture(t);
-  await writeFile(join(dirname(f.paths.global), "global-token"), "GLOBAL_FILE_BYTES");
-  await writeFile(join(dirname(f.paths.project), "private-token"), "PRIVATE_FILE_BYTES");
-  await writeFile(join(dirname(f.paths.project), "edit-token"), "EDIT_FILE_BYTES");
-  await writeFile(f.paths.global, 'secrets = [{ env = "GLOBAL_ONLY", value = "$ENV:GLOBAL_REF", allow_hosts = ["global.example"] }, { env = "GLOBAL_FILE", value = "$FILE:global-token", allow_hosts = ["global.example"] }]\n');
-  await writeFile(f.paths.project, 'secrets = [{ env = "EDIT", value = "$ENV:EDIT_REF", allow_hosts = ["edit.example"] }, { env = "PRIVATE_LITERAL", value = "PRIVATE_LITERAL_BYTES", allow_hosts = ["private.example"] }, { env = "PRIVATE_FILE", value = "$FILE:private-token", allow_hosts = ["private.example"] }]\n');
+  await writeFile(f.paths.global, 'secrets = [{ env = "GLOBAL_ONLY", host_env = "GLOBAL_REF", allow_hosts = ["global.example"] }, { env = "GLOBAL_CMD", host_cmd = "printf GLOBAL_CMD_BYTES", allow_hosts = ["global.example"] }]\n');
+  await writeFile(f.paths.project, 'secrets = [{ env = "EDIT", host_env = "EDIT_REF", allow_hosts = ["edit.example"] }, { env = "PRIVATE_LITERAL", text_value = "PRIVATE_LITERAL_BYTES", allow_hosts = ["private.example"] }, { env = "PRIVATE_CMD", host_cmd = "printf PRIVATE_CMD_BYTES", allow_hosts = ["private.example"] }]\n');
   return f;
 }
 
@@ -334,11 +391,11 @@ test("entry-level global secret edits never promote unrelated project credential
   for (const action of ["edit", "add", "repeat"] as const) {
     const { editor, paths, input, root } = await scopedSecrets(t);
     const draft = await editor.open("temporary");
-    if (action === "add") draft.upsertSecret({ env: "ADDED", value: "$ENV:NEW_REF", allowHosts: ["new.example"] });
+    if (action === "add") draft.upsertSecret({ env: "ADDED", hostEnv: "NEW_REF", allowHosts: ["new.example"] });
     else {
       draft.upsertSecret({ env: "EDIT", allowHosts: ["edited.example"] });
       if (action === "repeat") {
-        draft.upsertSecret({ env: "EDIT", value: "$ENV:REPLACED_REF", allowHosts: ["second.example"] });
+        draft.upsertSecret({ env: "EDIT", hostEnv: "REPLACED_REF", allowHosts: ["second.example"] });
         draft.upsertSecret({ env: "EDIT", allowHosts: ["final.example"] });
       }
     }
@@ -347,10 +404,10 @@ test("entry-level global secret edits never promote unrelated project credential
     if (action !== "add") { assert.equal(preview.collections[0]!.promoted, true); assert.equal(preview.collections[0]!.source, "host-project"); assert.equal(preview.collections[0]!.sourcePath, paths.project); }
     await target.apply();
     const text = await readFile(paths.global, "utf8"); const secrets = parseTomlConfig(text, "global").value.secrets!;
-    assert.deepEqual(secrets.map((entry) => entry.env), ["GLOBAL_ONLY", "GLOBAL_FILE", action === "add" ? "ADDED" : "EDIT"]);
-    assert.equal(secrets[1]!.value, "$FILE:global-token");
-    assert.equal(secrets[2]!.value, action === "add" ? "$ENV:NEW_REF" : action === "repeat" ? "$ENV:REPLACED_REF" : "$ENV:EDIT_REF");
-    assert.doesNotMatch(text, /PRIVATE_|private-token|EDIT_FILE_BYTES|GLOBAL_FILE_BYTES/);
+    assert.deepEqual(secrets.map((entry) => entry.env), ["GLOBAL_ONLY", "GLOBAL_CMD", action === "add" ? "ADDED" : "EDIT"]);
+    assert.equal(secrets[1]!.hostCmd, "printf GLOBAL_CMD_BYTES");
+    assert.equal(secrets[2]!.hostEnv, action === "add" ? "NEW_REF" : action === "repeat" ? "REPLACED_REF" : "EDIT_REF");
+    assert.doesNotMatch(text, /PRIVATE_/);
     const other = join(root, "home/other"); await mkdir(other);
     const elsewhere = await resolveConfig({ ...input, cwd: other, repoRoot: other });
     assert.ok(elsewhere.config.secrets.every((secret) => !secret.env.startsWith("PRIVATE")));
@@ -365,43 +422,49 @@ test("secret deletion acts on the chosen scope and honestly reports a surviving 
   const absentGlobal = await absent.forScope("global"); const noOp = await absentGlobal.apply();
   assert.equal(noOp.saved, false); assert.ok(noOp.shadowed.includes("secrets[EDIT]")); assert.equal(noOp.collections[0]!.operation, "remove"); assert.equal(noOp.collections[0]!.shadowed, true);
   assert.equal(await readFile(paths.global, "utf8"), before);
-  const addTarget = await editor.open("global"); addTarget.upsertSecret({ env: "EDIT", value: "$ENV:GLOBAL_EDIT", allowHosts: ["global.example"] }); await addTarget.apply();
+  const addTarget = await editor.open("global"); addTarget.upsertSecret({ env: "EDIT", hostEnv: "GLOBAL_EDIT", allowHosts: ["global.example"] }); await addTarget.apply();
   const deleting = await editor.open("temporary"); deleting.removeSecret("EDIT"); const global = await deleting.forScope("global");
   const result = await global.apply(); assert.equal(result.saved, true); assert.ok(result.shadowed.includes("secrets[EDIT]"));
   const saved = parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets!;
-  assert.deepEqual(saved.map((entry) => entry.env), ["GLOBAL_ONLY", "GLOBAL_FILE"]);
+  assert.deepEqual(saved.map((entry) => entry.env), ["GLOBAL_ONLY", "GLOBAL_CMD"]);
   assert.match(await readFile(paths.project, "utf8"), /env = "EDIT"/);
 });
 
-test("a deliberately edited project FILE reference retains origin without resolving bytes or copying other entries", async (t) => {
-  const { editor, paths } = await scopedSecrets(t);
-  const projectText = (await readFile(paths.project, "utf8")).replace("$ENV:EDIT_REF", "$FILE:edit-token"); await writeFile(paths.project, projectText);
+test("a deliberately edited project hostCmd is preserved without execution or copying other entries", async (t) => {
+  const { editor, paths, root } = await scopedSecrets(t);
+  const marker = join(root, "must-not-execute");
+  const command = `touch ${JSON.stringify(marker)}`;
+  await writeFile(paths.project, `secrets = [{ env = "EDIT", host_cmd = ${JSON.stringify(command)}, allow_hosts = ["edit.example"] }, { env = "PRIVATE_LITERAL", text_value = "PRIVATE_BYTES", allow_hosts = ["private.example"] }]`);
   const draft = await editor.open("temporary"); draft.upsertSecret({ env: "EDIT", allowHosts: ["edited.example"] });
   const global = await draft.forScope("global"); await global.apply();
   const saved = await readFile(paths.global, "utf8");
-  assert.ok(saved.includes(`$FILE:${join(dirname(paths.project), "edit-token")}`));
-  assert.doesNotMatch(saved, /EDIT_FILE_BYTES|PRIVATE_|private-token/);
+  assert.equal(parseTomlConfig(saved, "global").value.secrets!.find((secret) => secret.env === "EDIT")!.hostCmd, command);
+  assert.doesNotMatch(saved, /PRIVATE_/);
+  await assert.rejects(stat(marker), { code: "ENOENT" });
 });
 
 test("temporary entries are excluded from project/global baselines unless that identity is deliberately edited", async (t) => {
   for (const scope of ["project", "global"] as const) {
     const { editor, paths } = await scopedSecrets(t);
-    const temp = await editor.open("temporary"); temp.upsertSecret({ env: "TEMP_ONLY", value: "TEMP_PRIVATE_BYTES", allowHosts: ["temp.example"] }); await temp.apply();
-    const draft = await editor.open("temporary"); draft.upsertSecret({ env: "NEW", value: "$ENV:NEW", allowHosts: ["new.example"] });
+    const temp = await editor.open("temporary"); temp.upsertSecret({ env: "TEMP_ONLY", textValue: "TEMP_PRIVATE_BYTES", allowHosts: ["temp.example"] }); await temp.apply();
+    const draft = await editor.open("temporary"); draft.upsertSecret({ env: "NEW", hostEnv: "NEW", allowHosts: ["new.example"] });
     const target = await draft.forScope(scope); await target.apply();
     const saved = await readFile(paths[scope], "utf8"); assert.doesNotMatch(saved, /TEMP_ONLY|TEMP_PRIVATE_BYTES/);
     const names = parseTomlConfig(saved, "global").value.secrets!.map((entry) => entry.env);
-    assert.deepEqual(names, scope === "global" ? ["GLOBAL_ONLY", "GLOBAL_FILE", "NEW"] : ["EDIT", "PRIVATE_LITERAL", "PRIVATE_FILE", "NEW"]);
+    assert.deepEqual(names, scope === "global" ? ["GLOBAL_ONLY", "GLOBAL_CMD", "NEW"] : ["EDIT", "PRIVATE_LITERAL", "PRIVATE_CMD", "NEW"]);
   }
 });
 
-test("new relative FILE replacements retain session origin across repeated metadata edits and scope conversion", async (t) => {
-  const { editor, input, paths } = await scopedSecrets(t); await writeFile(join(input.cwd, "replacement"), "NEVER_PERSIST_BYTES");
+test("new literal FILE-looking replacements stay literal across metadata edits and scope conversion", async (t) => {
+  const { editor, paths } = await scopedSecrets(t);
   const draft = await editor.open("temporary");
-  draft.upsertSecret({ env: "EDIT", value: "$FILE:replacement", allowHosts: ["a.example"] });
+  draft.upsertSecret({ env: "EDIT", textValue: "$FILE:replacement", allowHosts: ["a.example"] });
   draft.upsertSecret({ env: "EDIT", allowHosts: ["b.example"] });
   const target = await draft.forScope("global"); await target.apply();
-  const saved = await readFile(paths.global, "utf8"); assert.ok(saved.includes(`$FILE:${join(input.cwd, "replacement")}`)); assert.doesNotMatch(saved, /NEVER_PERSIST_BYTES|PRIVATE_/);
+  const saved = await readFile(paths.global, "utf8");
+  assert.deepEqual(parseTomlConfig(saved, "global").value.secrets!.find((secret) => secret.env === "EDIT"),
+    { env: "EDIT", textValue: "$FILE:replacement", allowHosts: ["b.example"] });
+  assert.doesNotMatch(saved, /PRIVATE_/);
 });
 
 test("mount entry conversion preserves global mounts and never exports unrelated project/temp mounts", async (t) => {
@@ -445,7 +508,7 @@ test("explicit secret clear/replacement never masquerades as entry CRUD", async 
   const draft = await editor.open("temporary"); draft.set("secrets", []); const clear = await draft.forScope("global");
   assert.equal((await clear.preview()).collections[0]!.operation, "clear"); await clear.apply();
   assert.deepEqual(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets, []);
-  const explicit = await editor.open("temporary"); explicit.set("secrets", [{ env: "ONLY", value: "$ENV:ONLY", allowHosts: ["a.example"] }]); const replace = await explicit.forScope("global");
+  const explicit = await editor.open("temporary"); explicit.set("secrets", [{ env: "ONLY", hostEnv: "ONLY", allowHosts: ["a.example"] }]); const replace = await explicit.forScope("global");
   assert.deepEqual((await replace.preview()).collections[0]!.identities, ["ONLY"]); assert.equal((await replace.preview()).collections[0]!.operation, "replace"); await replace.apply();
   assert.deepEqual(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets!.map((secret) => secret.env), ["ONLY"]);
 });
@@ -454,7 +517,7 @@ test("scope-safe intent replay retains masked-placeholder guards and does not bl
   const { editor, paths } = await fixture(t);
   await writeFile(paths.global, "cpus = 0\n"); await writeFile(paths.project, "cpus = 2\n");
   const draft = await editor.open("temporary");
-  assert.throws(() => draft.upsertSecret({ env: "TOKEN", value: "<redacted>", allowHosts: ["a.example"] }), /masked/);
+  assert.throws(() => draft.upsertSecret({ env: "TOKEN", textValue: "<redacted>", allowHosts: ["a.example"] }), /masked/);
   const repair = await editor.open("global"); repair.set("cpus", 3); await repair.apply();
   assert.equal(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.cpus, 3);
 });
@@ -498,25 +561,29 @@ test("removed host read-only option is not editable and unrelated saves preserve
   assert.match(resolved.warnings.join("\n"), /unknown config key hostRoAllowlist/);
 });
 
-test("allowed at-or-below-scope materialization anchors inherited environment FILE references to their actual origin", async (t) => {
-  const { editor, input, paths, root } = await fixture(t);
-  const token = join(root, "env-token"); await writeFile(token, "ENV_FILE_BYTES");
-  input.env = { PI_MSB_SECRETS: JSON.stringify([{ env: "ENV_FILE", value: `$FILE:${relative(process.cwd(), token)}`, allowHosts: ["env.example"] }]) };
+test("at-or-below-scope materialization preserves inherited environment secret source spelling", async (t) => {
+  const { editor, input, paths } = await fixture(t);
+  const inherited = [
+    { env: "ENV_LITERAL", textValue: "$FILE:../env-token", allowHosts: ["env.example"] },
+    { env: "ENV_CMD", hostCmd: "printf ENV_CMD_PRIVATE", allowHosts: ["env.example"] },
+  ];
+  input.env = { PI_MSB_SECRETS: JSON.stringify(inherited) };
   editor.configureSession(input, "session-1");
-  const draft = await editor.open("temporary"); draft.upsertSecret({ env: "NEW", value: "$ENV:RAW_ENV_REF", allowHosts: ["new.example"] });
+  const draft = await editor.open("temporary"); draft.upsertSecret({ env: "NEW", hostEnv: "RAW_ENV_REF", allowHosts: ["new.example"] });
   const global = await draft.forScope("global"); await global.apply();
-  const saved = await readFile(paths.global, "utf8"); assert.ok(saved.includes(`$FILE:${token}`)); assert.ok(saved.includes("$ENV:RAW_ENV_REF")); assert.doesNotMatch(saved, /ENV_FILE_BYTES/);
+  assert.deepEqual(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets,
+    [...inherited, { env: "NEW", hostEnv: "RAW_ENV_REF", allowHosts: ["new.example"] }]);
 });
 
 test("a specifically edited temporary entry may be promoted with an explicit origin warning, never its siblings", async (t) => {
   const { editor, paths } = await scopedSecrets(t);
   const temp = await editor.open("temporary");
-  temp.upsertSecret({ env: "TEMP_EDIT", value: "$ENV:TEMP_REF", allowHosts: ["temp.example"] });
-  temp.upsertSecret({ env: "TEMP_PRIVATE", value: "TEMP_PRIVATE_BYTES", allowHosts: ["private.example"] }); await temp.apply();
+  temp.upsertSecret({ env: "TEMP_EDIT", hostEnv: "TEMP_REF", allowHosts: ["temp.example"] });
+  temp.upsertSecret({ env: "TEMP_PRIVATE", textValue: "TEMP_PRIVATE_BYTES", allowHosts: ["private.example"] }); await temp.apply();
   const draft = await editor.open("temporary"); draft.upsertSecret({ env: "TEMP_EDIT", allowHosts: ["edited.example"] });
   const global = await draft.forScope("global");
   const intent = (await global.preview()).collections[0]!; assert.equal(intent.promoted, true); assert.equal(intent.source, "temporary"); assert.deepEqual(intent.identities, ["TEMP_EDIT"]);
-  await global.apply(); const text = await readFile(paths.global, "utf8"); assert.match(text, /TEMP_EDIT|\$ENV:TEMP_REF/); assert.doesNotMatch(text, /TEMP_PRIVATE|PRIVATE_LITERAL|PRIVATE_FILE/);
+  await global.apply(); const text = await readFile(paths.global, "utf8"); assert.match(text, /TEMP_EDIT|TEMP_REF/); assert.doesNotMatch(text, /TEMP_PRIVATE|PRIVATE_LITERAL|PRIVATE_CMD/);
 });
 
 test("mount/list per-entry deletions preserve target siblings and report higher-scope survivors", async (t) => {
@@ -614,106 +681,56 @@ test("canonical agent anchor does not allow descendant/file symlinks or dangling
   await assert.rejects(editor.open("project"), /could not be canonicalized/);
 });
 
-async function upwardReferenceFixture(t: TestContext, scope: "global" | "project" | "temporary") {
-  const { input, root } = await fixture(t);
-  const lexicalAgent = join(root, "home/.pi/agent");
-  const canonicalAgent = join(root, "srv/pi/agent");
-  await mkdir(dirname(lexicalAgent), { recursive: true }); await mkdir(canonicalAgent, { recursive: true });
-  await symlink(canonicalAgent, lexicalAgent);
-  const selected = { ...input, agentDir: lexicalAgent };
-  const paths = await hostConfigPaths(selected);
-  const lexicalPaths = {
-    global: join(lexicalAgent, "pi-microsandbox/default.toml"),
-    project: join(lexicalAgent, "pi-microsandbox/projects/work/config.toml"),
-  };
-  const token = join(root, "home/.pi/token"); const replacement = join(root, "home/.pi/replacement");
-  for (const [path, marker] of [[token, "ORIGINAL_TOKEN_MARKER"], [replacement, "ORIGINAL_REPLACEMENT_MARKER"], [join(root, "srv/pi/token"), "WRONG_TOKEN_MARKER"], [join(root, "srv/pi/replacement"), "WRONG_REPLACEMENT_MARKER"]]) await writeFile(path, marker);
-  const origin = scope === "temporary" ? input.cwd : dirname(lexicalPaths[scope]);
-  const reference = `$FILE:${relative(origin, token)}`;
-  const replacementReference = `$FILE:${relative(origin, replacement)}`;
-  const editor = new SettingsEditor(selected, "upward-reference");
-  if (scope === "temporary") {
-    const draft = await editor.open(scope); draft.upsertSecret({ env: "TOKEN", value: reference, allowHosts: ["original.example"] }); await draft.apply();
-  } else {
-    await mkdir(dirname(paths[scope]), { recursive: true });
-    await writeFile(paths[scope], `secrets = [{ env = "TOKEN", value = ${JSON.stringify(reference)}, allow_hosts = ["original.example"] }]\n`);
-  }
-  const resolved = () => resolveConfig({ ...selected, temporaryOverrides: editor.temporary() });
-  const rawSecrets = async (scope: "global" | "project" | "temporary") => scope === "temporary" ? editor.temporary().secrets! : parseTomlConfig(await readFile(paths[scope], "utf8"), "global").value.secrets!;
-  return { input: selected, root, editor, paths, lexicalPaths, token, replacement, reference, replacementReference, resolved, rawSecrets };
-}
-
-test("symlinked agent startup and sparse saves preserve lexical upward FILE origins and raw spelling", async (t) => {
-  const { resolveSecretValue } = await import("./config.ts");
-  for (const scope of ["global", "project"] as const) {
-    const f = await upwardReferenceFixture(t, scope);
-    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
-    assert.equal(await resolveSecretValue((await f.resolved()).config.secrets[0]!.value, {}), "ORIGINAL_TOKEN_MARKER");
-    const draft = await f.editor.open(scope); draft.set("show_footer", false); await draft.apply();
-    assert.equal((await f.rawSecrets(scope))[0]!.value, f.reference);
-    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
-    assert.equal(draft.path, f.paths[scope]); // I/O remains canonical, not the reference origin.
-    await rm(join(f.root, "srv/pi/token"));
-    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
+test("symlinked agent sparse saves preserve literal prefix values without reading credential files", async (t) => {
+  for (const scope of ["global", "project"] as const) for (const value of ["$FILE:../../token", "$ENV:PRIVATE_TOKEN"]) {
+    const { input, root } = await fixture(t);
+    const target = join(root, "canonical-agent"); await mkdir(target);
+    const alias = join(root, "agent-alias"); await symlink(target, alias);
+    const selected = { ...input, agentDir: alias };
+    const paths = await hostConfigPaths(selected); await mkdir(dirname(paths.project), { recursive: true });
+    await writeFile(paths[scope], `secrets = [{ env = "TOKEN", text_value = ${JSON.stringify(value)}, allow_hosts = ["a.example"] }]\n`);
+    const editor = new SettingsEditor(selected, "literal-prefix");
+    const draft = await editor.open(scope); draft.set("show_footer", false); await draft.apply();
+    assert.equal(draft.path, paths[scope]);
+    const secret = (await resolveConfig(selected)).config.secrets[0]!;
+    assert.equal(secret.textValue, value);
+    assert.equal(await resolveSecretValue(secret, { PRIVATE_TOKEN: "must-not-expand" }), value);
+    assert.equal(parseTomlConfig(await readFile(paths[scope], "utf8"), scope).value.secrets![0]!.textValue, value);
   }
 });
 
-test("symlinked agent secret metadata/replacement edits and refresh retain lexical raw reference origins", async (t) => {
-  for (const scope of ["global", "project", "temporary"] as const) {
-    const f = await upwardReferenceFixture(t, scope);
-    const draft = await f.editor.open(scope);
-    draft.upsertSecret({ env: "TOKEN", allowHosts: ["metadata.example"] });
-    const refreshed = await draft.refresh(); await refreshed.apply();
-    assert.equal((await f.rawSecrets(scope))[0]!.value, f.reference);
-    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
-    const replacement = await f.editor.open(scope);
-    replacement.upsertSecret({ env: "TOKEN", value: f.replacementReference, allowHosts: ["replacement.example"] });
-    replacement.upsertSecret({ env: "TOKEN", allowHosts: ["retained.example"] });
-    await replacement.apply();
-    assert.equal((await f.rawSecrets(scope))[0]!.value, f.replacementReference);
-    assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.replacement}`);
-  }
-});
-
-test("symlinked agent cross-scope entry and whole-list transfers anchor FILE origins without copying bytes", async (t) => {
+test("cross-scope metadata and whole-list transfers preserve all secret sources verbatim", async (t) => {
+  const sources = [{ textValue: "$FILE:../token" }, { textValue: "$ENV:TOKEN" }, { hostEnv: "PRIVATE_ENV" }, { hostCmd: "printf PRIVATE_CMD" }];
   for (const source of ["global", "project", "temporary"] as const) for (const destination of ["global", "project", "temporary"] as const) {
     if (source === destination) continue;
-    for (const mode of ["metadata", "replacement", "whole-list"] as const) {
-      const f = await upwardReferenceFixture(t, source);
-      const draft = await f.editor.open(source);
-      if (mode === "whole-list") draft.set("secrets", [{ env: "TOKEN", value: f.reference, allowHosts: ["whole.example"] }]);
-      else draft.upsertSecret({ env: "TOKEN", ...(mode === "replacement" ? { value: f.replacementReference } : {}), allowHosts: ["transferred.example"] });
+    for (const mode of ["metadata", "replacement", "whole-list"] as const) for (const credential of sources) {
+      const { editor, paths } = await fixture(t);
+      const original = { env: "TOKEN", ...credential, allowHosts: ["original.example"] };
+      const initial = await editor.open(source); initial.upsertSecret(original); await initial.apply();
+      const draft = await editor.open(source);
+      const expectedSource = mode === "replacement" ? { hostCmd: "printf REPLACEMENT_PRIVATE" } : credential;
+      if (mode === "whole-list") draft.set("secrets", [{ env: "TOKEN", ...expectedSource, allowHosts: ["transferred.example"] }]);
+      else draft.upsertSecret({ env: "TOKEN", ...(mode === "replacement" ? expectedSource : {}), allowHosts: ["transferred.example"] });
       const transferred = await draft.forScope(destination);
-      if (mode !== "whole-list" && source !== "temporary") assert.equal((await transferred.preview()).collections[0]!.sourcePath, f.lexicalPaths[source]);
-      await transferred.apply();
-      const expected = mode === "replacement" ? f.replacement : f.token;
-      assert.equal((await f.rawSecrets(destination))[0]!.value, `$FILE:${expected}`, `${source} -> ${destination}: ${mode}`);
-      if (source !== "temporary") assert.equal((await f.rawSecrets(source))[0]!.value, f.reference);
-      assert.doesNotMatch(JSON.stringify(await f.rawSecrets(destination)), /ORIGINAL_.*MARKER|WRONG_.*MARKER/);
-      // A promoted global entry may be shadowed here; inspect that target without the higher project layer.
-      const elsewhere = join(f.root, "home/elsewhere"); await mkdir(elsewhere);
-      const targetResolved = destination === "global" ? await resolveConfig({ ...f.input, cwd: elsewhere, repoRoot: elsewhere }) : destination === "project" ? await resolveConfig(f.input) : await f.resolved();
-      assert.equal(targetResolved.config.secrets[0]!.value, `$FILE:${expected}`, `${source} -> ${destination}: ${mode}`);
+      const refreshed = await transferred.refresh(); await refreshed.apply();
+      const saved = destination === "temporary" ? editor.temporary().secrets : parseTomlConfig(await readFile(paths[destination], "utf8"), destination).value.secrets;
+      assert.deepEqual(saved, [{ env: "TOKEN", ...expectedSource, allowHosts: ["transferred.example"] }], `${source} -> ${destination}: ${mode}`);
+      if (source !== "temporary") assert.deepEqual(parseTomlConfig(await readFile(paths[source], "utf8"), source).value.secrets, [original]);
     }
   }
 });
 
-test("symlinked agent inherited secret materialization keeps lexical FILE identity and absolute-only mount sources", async (t) => {
-  const f = await upwardReferenceFixture(t, "global");
-  const draft = await f.editor.open("temporary"); draft.upsertSecret({ env: "NEW", value: "$ENV:NEW_TOKEN", allowHosts: ["new.example"] });
-  const global = await draft.forScope("global"); await global.apply();
-  assert.equal((await f.rawSecrets("global"))[0]!.value, f.reference);
-  assert.equal((await f.resolved()).config.secrets[0]!.value, `$FILE:${f.token}`);
-  const inherited = await f.editor.open("project"); inherited.upsertSecret({ env: "TOKEN", allowHosts: ["project.example"] }); await inherited.apply();
-  assert.equal((await f.rawSecrets("project"))[0]!.value, `$FILE:${f.token}`);
-  const mount = await f.editor.open("global");
+test("mount sources remain absolute-only independently of literal secret values", async (t) => {
+  const { editor, input, paths, root } = await fixture(t);
+  const token = join(root, "token"); await writeFile(token, "MOUNT_BYTES");
+  const mount = await editor.open("global");
   mount.set("mounts", [{ type: "file", hostPath: "../../token", guestPath: "/mnt/token", readonly: true, options: [] }]);
   await assert.rejects(mount.apply(), /hostPath must be absolute/);
-  const validMount = await f.editor.open("global");
-  validMount.upsertMount({ type: "file", hostPath: f.token, guestPath: "/mnt/token", readonly: true, options: [] }); await validMount.apply();
-  assert.equal((await f.resolved()).config.mounts[0]!.hostPath, f.token);
-  await writeFile(f.paths.global, 'mounts = [{ type = "file", host_path = "../../token", guest_path = "/mnt/token", readonly = true }]\n');
-  await assert.rejects(resolveConfig(f.input), /hostPath must be absolute/);
+  const validMount = await editor.open("global");
+  validMount.upsertMount({ type: "file", hostPath: token, guestPath: "/mnt/token", readonly: true, options: [] }); await validMount.apply();
+  assert.equal((await resolveConfig(input)).config.mounts[0]!.hostPath, token);
+  await writeFile(paths.global, 'mounts = [{ type = "file", host_path = "../../token", guest_path = "/mnt/token", readonly = true }]\n');
+  await assert.rejects(resolveConfig(input), /hostPath must be absolute/);
 });
 
 async function nestedAgentAliasFixture(t: TestContext, chain: false | "absolute" | "relative" = false, missingSuffix = false) {
@@ -845,32 +862,37 @@ test("agent alias raw components support dots, leading parents, absolute/relativ
 });
 
 for (const scope of ["global", "project"] as const) {
-  test(`hidden ${scope} secret metadata retains only target-owned literal/ENV/relative FILE credentials and origins`, async (t) => {
+  test(`hidden ${scope} secret metadata retains only target-owned literal/hostEnv/hostCmd sources`, async (t) => {
     const { editor, paths } = await fixture(t);
-    await writeFile(join(dirname(paths[scope]), "private-token"), "HIDDEN_BYTES_SENTINEL");
-    const raw = 'secrets = [{ env="LITERAL",value="HIDDEN_LITERAL_SENTINEL",allow_hosts=["a.example"] }, { env="ENV_TOKEN",value="$ENV:PRIVATE_ENV",allow_hosts=["a.example"] }, { env="FILE",value="$FILE:private-token",allow_hosts=["a.example"] }]\n';
+    const raw = 'secrets = [{ env="LITERAL",text_value="HIDDEN_LITERAL_SENTINEL",allow_hosts=["a.example"] }, { env="ENV_TOKEN",host_env="PRIVATE_ENV",allow_hosts=["a.example"] }, { env="CMD_TOKEN",host_cmd="printf PRIVATE_CMD",allow_hosts=["a.example"] }]\n';
     await writeFile(paths[scope], raw);
     if (scope === "global") await writeFile(paths.project, 'secrets = []\n');
     const temp = await editor.open("temporary"); temp.set("secrets", []); await temp.apply();
-    for (const env of ["LITERAL", "ENV_TOKEN", "FILE"]) {
+    for (const env of ["LITERAL", "ENV_TOKEN", "CMD_TOKEN"]) {
       const draft = await editor.open(scope); draft.upsertSecret({ env, allowHosts: ["b.example"] });
       const preview = await draft.preview();
       assert.equal(preview.collections[0]!.source, scope === "global" ? "host-default" : "host-project");
       assert.equal(preview.collections[0]!.sourcePath, paths[scope]);
       assert.equal(preview.collections[0]!.promoted, false); assert.equal(preview.collections[0]!.shadowed, true);
       const review = await draft.reviewForApproval(preview.effect);
-      assert.doesNotMatch(JSON.stringify(review), /HIDDEN_LITERAL_SENTINEL|HIDDEN_BYTES_SENTINEL|\$FILE:|\$ENV:/);
+      assert.doesNotMatch(JSON.stringify(review), /HIDDEN_LITERAL_SENTINEL/);
+      const storage = review.storage as { before: { secrets: Record<string, unknown>[] } };
+      assert.equal(storage.before.secrets[1]!.host_env, "PRIVATE_ENV");
+      assert.equal(storage.before.secrets[2]!.host_cmd, "printf PRIVATE_CMD");
       await draft.apply();
     }
     const saved = parseTomlConfig(await readFile(paths[scope], "utf8"), "global").value;
-    assert.deepEqual(saved.secrets!.map((secret) => secret.value), ["HIDDEN_LITERAL_SENTINEL", "$ENV:PRIVATE_ENV", "$FILE:private-token"]);
-    assert.deepEqual(saved.secrets!.map((secret) => secret.env), ["LITERAL", "ENV_TOKEN", "FILE"]);
+    assert.deepEqual(saved.secrets, [
+      { env: "LITERAL", textValue: "HIDDEN_LITERAL_SENTINEL", allowHosts: ["b.example"] },
+      { env: "ENV_TOKEN", hostEnv: "PRIVATE_ENV", allowHosts: ["b.example"] },
+      { env: "CMD_TOKEN", hostCmd: "printf PRIVATE_CMD", allowHosts: ["b.example"] },
+    ]);
     for (const action of ["remove", "clear", "replace", "inherit"] as const) {
       const draft = await editor.open(scope);
-      if (action === "remove") draft.removeSecret("FILE");
+      if (action === "remove") draft.removeSecret("CMD_TOKEN");
       else if (action === "inherit") draft.inherit("secrets");
-      else draft.set("secrets", action === "clear" ? [] : [{ env: "OTHER", value: "new", allowHosts: ["a.example"] }]);
-      assert.throws(() => draft.upsertSecret({ env: "FILE", allowHosts: ["b.example"] }), /new secrets require/);
+      else draft.set("secrets", action === "clear" ? [] : [{ env: "OTHER", textValue: "new", allowHosts: ["a.example"] }]);
+      assert.throws(() => draft.upsertSecret({ env: "CMD_TOKEN", allowHosts: ["b.example"] }), /new secrets require/);
       draft.discard();
     }
   });
@@ -878,9 +900,9 @@ for (const scope of ["global", "project"] as const) {
 
 test("same-name visible higher-scope secret still takes precedence over hidden target-owned fallback", async (t) => {
   const { editor, paths } = await fixture(t);
-  await writeFile(paths.global, 'secrets = [{env="TOKEN",value="target-private",allow_hosts=["a.example"]}]\n');
-  await writeFile(paths.project, 'secrets = [{env="TOKEN",value="$ENV:VISIBLE_PRIVATE",allow_hosts=["a.example"]}]\n');
+  await writeFile(paths.global, 'secrets = [{env="TOKEN",text_value="target-private",allow_hosts=["a.example"]}]\n');
+  await writeFile(paths.project, 'secrets = [{env="TOKEN",host_env="VISIBLE_PRIVATE",allow_hosts=["a.example"]}]\n');
   const draft = await editor.open("global"); draft.upsertSecret({ env: "TOKEN", allowHosts: ["b.example"] });
   const preview = await draft.preview(); assert.equal(preview.collections[0]!.promoted, true); assert.equal(preview.collections[0]!.source, "host-project");
-  await draft.apply(); assert.equal(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets![0]!.value, "$ENV:VISIBLE_PRIVATE");
+  await draft.apply(); assert.equal(parseTomlConfig(await readFile(paths.global, "utf8"), "global").value.secrets![0]!.hostEnv, "VISIBLE_PRIVATE");
 });

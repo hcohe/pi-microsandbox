@@ -411,13 +411,12 @@ test("reconnect with missing or conflicting actual image never guesses disk VM p
   }
 });
 
-test("runtime API excludes literal secrets and raw FILE/ENV references and resets session identity", async (t) => {
+test("runtime API excludes all secret source payloads and resets session identity", async (t) => {
   const f = await fixture(t, plainTheme, true); await mkdir(dirname(f.paths.global!), { recursive: true });
-  await writeFile(join(dirname(f.paths.global!), "private-token"), "FILE_PRIVATE_BYTES");
-  await writeFile(f.paths.global!, 'secrets = [{ env = "LITERAL", value = "LITERAL_PRIVATE_BYTES", allow_hosts = ["a.example"] }, { env = "FILE", value = "$FILE:private-token", allow_hosts = ["a.example"] }, { env = "ENV_REF", value = "$ENV:PI_MSB_FALLBACK_MODE", allow_hosts = ["a.example"] }]\n');
+  await writeFile(f.paths.global!, 'secrets = [{ env = "LITERAL", text_value = "LITERAL_PRIVATE_BYTES", allow_hosts = ["a.example"] }, { env = "COMMAND", host_cmd = "printf COMMAND_PRIVATE_BYTES", allow_hosts = ["a.example"] }, { env = "HOST_VARIABLE", host_env = "PI_MSB_FALLBACK_MODE", allow_hosts = ["a.example"] }]\n');
   await f.action("Reload settings"); await f.choose("Confirm"); await f.tree(); const snapshot = f.control.getRuntimePolicy!()!;
   assert.doesNotMatch(f.full(), /Desired changes pending/);
-  assert.doesNotMatch(JSON.stringify(snapshot), /LITERAL_PRIVATE_BYTES|FILE_PRIVATE_BYTES|\$FILE:|private-token|\$ENV:/);
+  assert.doesNotMatch(JSON.stringify(snapshot), /LITERAL_PRIVATE_BYTES|COMMAND_PRIVATE_BYTES|PI_MSB_FALLBACK_MODE|printf/);
   await f.integration!.configureSession({ sessionId: "different-session", cwd: f.input.cwd, projectTrusted: true, config: { config: { ...structuredClone(DEFAULT_CONFIG), autoStart: false }, provenance: {}, warnings: [] } as any });
   assert.equal(f.control.getRuntimePolicy!(), undefined); assert.equal(f.control.getState().status, "off");
 });
@@ -427,7 +426,7 @@ async function addSecret(f: Awaited<ReturnType<typeof fixture>>, name = "TOKEN",
   await f.list("Secrets", "Secrets:"); await f.key("a");
   await f.choose("Environment name:"); await f.key(name); await f.key("\r");
   await f.choose("Allowed hosts:"); await f.key("api.example.com"); await f.key("\r");
-  await f.choose("Replace value"); await f.key(`\x1b[200~${value}\x1b[201~`);
+  await f.choose("Source value:"); await f.key(`\x1b[200~${value}\x1b[201~`);
   assert.doesNotMatch(f.text(), /SECRET_SENTINEL/); await f.key("\r");
 }
 async function mount(f: Awaited<ReturnType<typeof fixture>>) {
@@ -462,10 +461,10 @@ for (const scope of [0, 1, 2]) {
   test(`secret form scope buttons, masked retention, rename and remove: ${scope}`, async (t) => {
     const f = await fixture(t); await addSecret(f); assert.doesNotMatch(f.full(), /Keep draft|Save|Delete entry/);
     for (const label of APPLY) assert.ok(f.full().includes(label)); await f.apply(scope);
-    assert.equal((await storage(f, scope)).secrets![0]!.value, "SECRET_SENTINEL_123");
+    assert.equal((await storage(f, scope)).secrets![0]!.textValue, "SECRET_SENTINEL_123");
     await f.list("Secrets", "Secrets:"); await f.expand("TOKEN:"); await f.key("l"); assert.match(f.selected(), /Environment name:/);
     await f.key("e"); await f.choose("Environment name:"); await f.key("\x15"); await f.key("RENAMED"); await f.key("\r"); await f.apply(scope);
-    const secrets = (await storage(f, scope)).secrets!; assert.equal(secrets.length, 1); assert.equal(secrets[0]!.env, "RENAMED"); assert.equal(secrets[0]!.value, "SECRET_SENTINEL_123");
+    const secrets = (await storage(f, scope)).secrets!; assert.equal(secrets.length, 1); assert.equal(secrets[0]!.env, "RENAMED"); assert.equal(secrets[0]!.textValue, "SECRET_SENTINEL_123");
     await f.list("Secrets", "Secrets:"); await f.seek("RENAMED:"); await f.key("d"); await f.apply(scope); assert.deepEqual((await storage(f, scope)).secrets, []);
     assert.doesNotMatch(f.full(), /SECRET_SENTINEL/);
   });
@@ -477,6 +476,82 @@ for (const scope of [0, 1, 2]) {
     await f.key("d"); await f.apply(scope); assert.deepEqual((await storage(f, scope)).mounts, []); assert.match(f.selected(), /Mounts:/);
   });
 }
+
+for (const scope of [0, 1, 2]) test(`secret sources add, retain, replace and switch without stale fields: ${scope}`, async (t) => {
+  const f = await fixture(t);
+  const sources = [
+    { label: "Literal value", key: "textValue", payload: "LITERAL_SOURCE_SENTINEL" },
+    { label: "Host environment variable", key: "hostEnv", payload: "HOST_VARIABLE_SENTINEL" },
+    { label: "Host shell command", key: "hostCmd", payload: "printf COMMAND_SOURCE_SENTINEL" },
+  ] as const;
+  for (const source of sources) {
+    let name = `TOKEN_${source.key}`;
+    await addSecret(f, name);
+    await f.choose("Source:"); await f.choose(source.label);
+    await f.choose("Source value:");
+    if (source.key === "hostCmd") assert.match(f.full().replace(/\s+/g, " "), /executes on the HOST.*outside the sandbox/);
+    if (source.key === "hostEnv") assert.match(f.full().replace(/\s+/g, " "), /host environment, not the guest/);
+    assert.doesNotMatch(f.full(), /\$ENV:|\$FILE:/);
+    await f.key(source.payload); assert.doesNotMatch(f.full(), /LITERAL_SOURCE_SENTINEL|HOST_VARIABLE_SENTINEL|COMMAND_SOURCE_SENTINEL/);
+    await f.key("\r");
+    if (source.key === "hostCmd") {
+      await f.save(scope);
+      assert.match(f.full().replace(/\s+/g, " "), /executes a shell command on the HOST, outside the sandbox/);
+      assert.doesNotMatch(f.full(), /COMMAND_SOURCE_SENTINEL/);
+      await f.choose("Confirm"); await f.tree();
+    } else await f.apply(scope);
+    const saved = async () => (await storage(f, scope)).secrets!.find((entry) => entry.env === name)!;
+    assert.deepEqual(await saved(), { env: name, allowHosts: ["api.example.com"], [source.key]: source.payload });
+    await f.list("Secrets", "Secrets:"); await f.expand(`${name}:`);
+    assert.match(f.full(), new RegExp(`Source: ${source.label}`));
+    assert.doesNotMatch(f.full(), /LITERAL_SOURCE_SENTINEL|HOST_VARIABLE_SENTINEL|COMMAND_SOURCE_SENTINEL/);
+    await f.seek("Source value:"); await f.key("e"); assert.match(f.selected(), /^Source value:/);
+    assert.match(f.full(), new RegExp(`Source: ${source.label}`));
+    await panelSecretHostEdit(f, "metadata.example"); await f.apply(scope);
+    assert.deepEqual(await saved(), { env: name, allowHosts: ["metadata.example"], [source.key]: source.payload });
+    await openSecret(f, name); await f.choose("Source:"); assert.equal(f.selected(), source.label); await f.choose(source.label);
+    await f.choose("Environment name:"); await f.key("\x15"); await f.key(`${name}_RENAMED`); await f.key("\r"); await f.apply(scope); name += "_RENAMED";
+    assert.deepEqual(await saved(), { env: name, allowHosts: ["metadata.example"], [source.key]: source.payload });
+    assert.equal((await storage(f, scope)).secrets!.some((entry) => entry.env === `TOKEN_${source.key}`), false);
+    await openSecret(f, name); await f.choose("Source value:"); await f.key(`${source.payload}_ROTATED`); await f.key("\r"); await f.apply(scope);
+    assert.equal((await saved())[source.key], `${source.payload}_ROTATED`);
+    const next = sources[(sources.indexOf(source) + 1) % sources.length]!;
+    await openSecret(f, name); await f.choose("Source:"); await f.choose(next.label);
+    assert.match(f.full(), /Source value: not replaced/);
+    await f.choose("Source value:"); await f.key(next.payload); await f.key("\r"); await f.apply(scope);
+    assert.deepEqual(await saved(), { env: name, allowHosts: ["metadata.example"], [next.key]: next.payload });
+  }
+});
+
+test("deprecated secret value is rejected rather than retained as a metadata edit", async (t) => {
+  const f = await fixture(t); await addSecret(f); await f.apply(1);
+  const before = await readFile(f.paths.project!, "utf8");
+  const draft = await f.settings.open("project"); const snapshot = draft.snapshot();
+  try {
+    assert.throws(() => draft.upsertSecret({ env: "TOKEN", allowHosts: ["changed.example"], value: "DEPRECATED_PRIVATE_BYTES" } as any), /value/);
+    assert.deepEqual(draft.snapshot(), snapshot);
+  } finally { draft.discard(); }
+  assert.throws(() => parseTomlConfig('secrets = [{ env = "TOKEN", value = "DEPRECATED_PRIVATE_BYTES", allow_hosts = ["api.example"] }]\n', "global"), /value/);
+  assert.equal(await readFile(f.paths.project!, "utf8"), before);
+  await openSecret(f, "TOKEN"); assert.match(f.full(), /Source: Literal value/);
+  assert.doesNotMatch(f.full(), /DEPRECATED_PRIVATE_BYTES|SECRET_SENTINEL_123/);
+});
+
+test("secret source changes clear pending input and reject blank replacements without changing storage", async (t) => {
+  const f = await fixture(t); await addSecret(f); await f.apply(1);
+  const before = await readFile(f.paths.project!, "utf8");
+  await openSecret(f, "TOKEN"); await f.choose("Source value:"); await f.key("DISCARDED_SOURCE_SENTINEL"); await f.key("\r");
+  await f.choose("Source:"); await f.choose("Literal value"); assert.match(f.full(), /Source value: \*+ \(replacement\)/);
+  await f.choose("Source:"); await f.choose("Host shell command");
+  assert.match(f.full(), /Source value: not replaced/); assert.doesNotMatch(f.full(), /DISCARDED_SOURCE_SENTINEL/);
+  await f.save(1); assert.match(f.full(), /Invalid entry/); assert.equal(await readFile(f.paths.project!, "utf8"), before); await f.choose("Cancel");
+  await openSecret(f, "TOKEN"); assert.match(f.full(), /Source: Literal value/);
+  await f.choose("Source:"); await f.choose("Host environment variable"); await f.choose("Source value:"); await f.key("CANCELED_HOST_SOURCE"); await f.key("\r"); await f.choose("Cancel");
+  assert.equal(await readFile(f.paths.project!, "utf8"), before);
+  await openSecret(f, "TOKEN"); await f.choose("Source:"); await f.choose("Host shell command"); await f.choose("Source:"); await f.choose("Literal value");
+  await panelSecretHostEdit(f, "retained.example"); await f.apply(1);
+  assert.deepEqual((await storage(f, 1)).secrets![0], { env: "TOKEN", textValue: "SECRET_SENTINEL_123", allowHosts: ["retained.example"] });
+});
 
 test("cancel scalar/add/list/secret/mount/delete/inherit proposals never leaks into the next scope", async (t) => {
   const f = await fixture(t);
@@ -537,7 +612,7 @@ test("removed save keys do nothing in normal/Kitty/modifyOtherKeys; letters stay
     assert.equal(f.selected(), "Resources"); assert.deepEqual(f.calls, []);
     const type = async () => { if (protocol === "paste") { await f.key(`\x1b[200~${commands.slice(0, 5)}`); await f.key(`${commands.slice(5)}\x1b[201~`); } else for (const char of commands) await f.key(protocol === "kitty" ? `\x1b[${char.codePointAt(0)}u` : char); };
     await f.list("Network", "Allowed hosts:"); await f.key("a"); await type(); await f.key("\r"); assert.match(f.full(), /Apply change/); assert.equal(f.closed(), false); await f.choose("Cancel");
-    await addSecret(f, "TOKEN", "$ENV:PLACEHOLDER"); await f.choose("Replace value"); await type(); assert.doesNotMatch(f.text(), new RegExp(commands)); await f.key("\r"); await f.apply(); assert.equal(f.settings.temporary().secrets![0]!.value, commands);
+    await addSecret(f, "TOKEN", "PLACEHOLDER"); await f.choose("Source value:"); await type(); assert.doesNotMatch(f.text(), new RegExp(commands)); await f.key("\r"); await f.apply(); assert.equal(f.settings.temporary().secrets![0]!.textValue, commands);
     await f.number("2"); for (const key of ["w", "P", "G"]) await f.key(key); assert.deepEqual(f.calls, ["idle", "reload"]); await f.choose("Cancel");
   }
 });
@@ -584,29 +659,32 @@ test("automatic session name remains Session-only; scalar inheritance previews l
   await f.node("Resources", "Virtual CPUs:"); await f.key("d"); await f.save(2); assert.match(f.full(), /inherit\s+→/); await f.choose("Confirm"); assert.doesNotMatch(await readFile(f.paths.global!, "utf8"), /cpus/);
 });
 
-async function seedScopedPanelSecrets(f: Awaited<ReturnType<typeof fixture>>, editFile = false) {
+async function seedScopedPanelSecrets(f: Awaited<ReturnType<typeof fixture>>, command = false) {
   await mkdir(dirname(f.paths.project!), { recursive: true });
-  await writeFile(join(dirname(f.paths.project!), "private-token"), "PRIVATE_FILE_BYTES"); await writeFile(join(dirname(f.paths.project!), "edit-token"), "EDIT_FILE_BYTES"); await writeFile(join(dirname(f.paths.global!), "global-token"), "GLOBAL_FILE_BYTES");
-  await writeFile(f.paths.global!, 'secrets = [{ env = "TARGET_ONLY", value = "$ENV:GLOBAL_REF", allow_hosts = ["global.example"] }, { env = "TARGET_FILE", value = "$FILE:global-token", allow_hosts = ["global.example"] }]\n');
-  await writeFile(f.paths.project!, `secrets = [{ env = "EDIT", value = "${editFile ? "$FILE:edit-token" : "$ENV:EDIT_REF"}", allow_hosts = ["edit.example"] }, { env = "PRIVATE_LITERAL", value = "PRIVATE_LITERAL_BYTES", allow_hosts = ["private.example"] }, { env = "PRIVATE_FILE", value = "$FILE:private-token", allow_hosts = ["private.example"] }]\n`);
+  await writeFile(f.paths.global!, 'secrets = [{ env = "TARGET_ONLY", host_env = "GLOBAL_SOURCE", allow_hosts = ["global.example"] }, { env = "TARGET_COMMAND", host_cmd = "printf GLOBAL_COMMAND_BYTES", allow_hosts = ["global.example"] }]\n');
+  await writeFile(f.paths.project!, `secrets = [{ env = "EDIT", ${command ? 'host_cmd = "printf EDIT_COMMAND_BYTES"' : 'host_env = "EDIT_SOURCE"'}, allow_hosts = ["edit.example"] }, { env = "PRIVATE_LITERAL", text_value = "PRIVATE_LITERAL_BYTES", allow_hosts = ["private.example"] }, { env = "PRIVATE_COMMAND", host_cmd = "printf PRIVATE_COMMAND_BYTES", allow_hosts = ["private.example"] }]\n`);
   await f.action("Reload settings"); await f.choose("Confirm"); f.terminal.columns = 120; f.terminal.rows = 40;
 }
 async function panelSecretHostEdit(f: Awaited<ReturnType<typeof fixture>>, host: string) { await f.choose("Allowed hosts"); await f.key("\x15"); await f.key(host); await f.key("\r"); }
 async function openSecret(f: Awaited<ReturnType<typeof fixture>>, name = "EDIT") { await f.list("Secrets", "Secrets:"); await f.seek(`${name}:`); await f.key("e"); }
 
-for (const file of [false, true]) test(`global secret metadata/value edits retain raw credential/origin, never project siblings: FILE=${file}`, async (t) => {
-  const f = await fixture(t); await seedScopedPanelSecrets(f, file); await openSecret(f); await panelSecretHostEdit(f, "edited.example"); await f.save(2);
-  const preview = f.full().replace(/\s+/g, " "); assert.match(preview, /UPSERT secrets\[EDIT\]/); assert.match(preview, /from Project/); assert.match(preview, /DELIBERATE higher-scope import/); assert.doesNotMatch(preview, /PRIVATE_LITERAL_BYTES|PRIVATE_FILE_BYTES|EDIT_FILE_BYTES|EDIT_REF/);
+for (const command of [false, true]) test(`global secret metadata/source edits retain credentials, never project siblings: command=${command}`, async (t) => {
+  const f = await fixture(t); await seedScopedPanelSecrets(f, command); await openSecret(f);
+  assert.match(f.full(), command ? /Source: Host shell command/ : /Source: Host environment variable/);
+  assert.doesNotMatch(f.full(), /EDIT_SOURCE|EDIT_COMMAND_BYTES/);
+  await panelSecretHostEdit(f, "edited.example"); await f.save(2);
+  const preview = f.full().replace(/\s+/g, " "); assert.match(preview, /UPSERT secrets\[EDIT\]/); assert.match(preview, /from Project/); assert.match(preview, /DELIBERATE higher-scope import/); assert.doesNotMatch(preview, /PRIVATE_LITERAL_BYTES|PRIVATE_COMMAND_BYTES|EDIT_COMMAND_BYTES|EDIT_SOURCE/);
   await f.choose("Confirm"); const text = await readFile(f.paths.global!, "utf8"); const secrets = parseTomlConfig(text, "global").value.secrets!;
-  assert.deepEqual(secrets.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_FILE", "EDIT"]); assert.equal(secrets[1]!.value, "$FILE:global-token"); assert.equal(secrets[2]!.value, file ? `$FILE:${join(dirname(f.paths.project!), "edit-token")}` : "$ENV:EDIT_REF"); assert.deepEqual(secrets[2]!.allowHosts, ["edited.example"]); assert.doesNotMatch(text, /PRIVATE_|private-token|GLOBAL_FILE_BYTES/);
-  await openSecret(f); await f.choose("Replace value"); await f.key("$ENV:NEW_REF"); await f.key("\r"); await f.apply(2); assert.equal((await storage(f, 2)).secrets![2]!.value, "$ENV:NEW_REF");
+  assert.deepEqual(secrets.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_COMMAND", "EDIT"]); assert.equal(secrets[1]!.hostCmd, "printf GLOBAL_COMMAND_BYTES"); assert.equal(command ? secrets[2]!.hostCmd : secrets[2]!.hostEnv, command ? "printf EDIT_COMMAND_BYTES" : "EDIT_SOURCE"); assert.deepEqual(secrets[2]!.allowHosts, ["edited.example"]); assert.doesNotMatch(text, /PRIVATE_/);
+  await openSecret(f); await f.choose("Source:"); await f.choose("Literal value"); await f.choose("Source value:"); await f.key("ROTATED_LITERAL"); await f.key("\r"); await f.apply(2);
+  assert.deepEqual((await storage(f, 2)).secrets![2], { env: "EDIT", allowHosts: ["edit.example"], textValue: "ROTATED_LITERAL" });
 });
 
 test("add/delete global secret intents exclude siblings, report shadowing and no-op; Session never exported", async (t) => {
   for (const scope of [1, 2]) {
-    const f = await fixture(t); await seedScopedPanelSecrets(f); const session = await f.settings.open("temporary"); session.upsertSecret({ env: "TEMP_PRIVATE", value: "TEMP_PRIVATE_BYTES", allowHosts: ["temp.example"] }); await session.apply(); session.discard();
-    await f.action("Reload settings"); await f.choose("Confirm"); await addSecret(f, "NEW", "$ENV:NEW"); await f.apply(scope);
-    const text = await readFile(scope === 1 ? f.paths.project! : f.paths.global!, "utf8"); assert.doesNotMatch(text, /TEMP_PRIVATE/); assert.match(text, /NEW/); if (scope === 2) assert.doesNotMatch(text, /PRIVATE_LITERAL|PRIVATE_FILE/);
+    const f = await fixture(t); await seedScopedPanelSecrets(f); const session = await f.settings.open("temporary"); session.upsertSecret({ env: "TEMP_PRIVATE", textValue: "TEMP_PRIVATE_BYTES", allowHosts: ["temp.example"] }); await session.apply(); session.discard();
+    await f.action("Reload settings"); await f.choose("Confirm"); await addSecret(f, "NEW", "NEW_LITERAL"); await f.apply(scope);
+    const text = await readFile(scope === 1 ? f.paths.project! : f.paths.global!, "utf8"); assert.doesNotMatch(text, /TEMP_PRIVATE/); assert.match(text, /NEW/); if (scope === 2) assert.doesNotMatch(text, /PRIVATE_LITERAL|PRIVATE_COMMAND/);
   }
   const f = await fixture(t); await seedScopedPanelSecrets(f); const before = await readFile(f.paths.global!, "utf8");
   await f.list("Secrets", "Secrets:"); await f.seek("EDIT:"); await f.key("d"); await f.save(2); assert.match(f.full().replace(/\s+/g, " "), /REMOVE secrets\[EDIT\].*shadowed; not effective here/); await f.choose("Confirm"); assert.match(f.full(), /No changes.*secrets\[EDIT\]/); assert.equal(await readFile(f.paths.global!, "utf8"), before);
@@ -617,7 +695,7 @@ test("nested secret host and mount options CRUD is identity-scoped, cancel resto
   await f.list("Secrets", "Secrets:"); await f.expand("EDIT:"); await f.expand("Allowed hosts:"); await f.key("a"); await f.key("*.googleapis.com"); await f.key("\r"); await f.apply(1); assert.match(f.selected(), /\*\.googleapis\.com/);
   assert.deepEqual((await storage(f, 1)).secrets!.find((entry) => entry.env === "EDIT")!.allowHosts, ["edit.example", "*.googleapis.com"]);
   await f.key("e"); await f.key("\x15"); await f.key("chosen.example"); await f.key("\r"); await f.choose("Cancel"); await f.seek("*.googleapis.com"); await f.key("d"); await f.apply(2);
-  const entries = (await storage(f, 2)).secrets!; assert.deepEqual(entries.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_FILE", "EDIT"]); assert.deepEqual(entries[2]!.allowHosts, ["edit.example"]); assert.equal(entries[2]!.value, `$FILE:${join(dirname(f.paths.project!), "edit-token")}`);
+  const entries = (await storage(f, 2)).secrets!; assert.deepEqual(entries.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_COMMAND", "EDIT"]); assert.deepEqual(entries[2]!.allowHosts, ["edit.example"]); assert.equal(entries[2]!.hostCmd, "printf EDIT_COMMAND_BYTES");
   await mount(f); await f.apply(1); await f.seek("/scratch:"); await f.expand("/scratch:"); await f.expand("Options:"); await f.key("a"); await f.key("noexec"); await f.key("\r"); await f.apply(1); assert.match(f.selected(), /noexec/); await f.key("d"); await f.apply(1); assert.deepEqual((await storage(f, 1)).mounts![0]!.options, []);
 });
 
@@ -865,26 +943,26 @@ test("Secret forms separate friendly hints from multiline Allowed hosts editor h
     assert.ok(colors.some(([role, text]) => role === "muted" && text === line));
     assert.ok(!colors.some(([role, text]) => role === "text" && text === line));
   }
-  // Saved review frames contain no credentials, references or configured secret values.
+  // Saved review frames contain no configured secret source payloads.
   await writeFile("/tmp/pi-msb-two-level-helpers.frames.txt", frames.join("\n\n") + "\n");
   await f.key("\x1b"); await f.seek("Environment name:"); await f.key("\r");
   assert.match(f.text(), /SERVICE_TOKEN/); assert.match(f.text(), /Process-control/);
   await f.key("\x1b"); await f.key("\x1b");
   const source = await f.settings.open("project");
-  source.upsertSecret({ env: "EDIT_HELP", value: "private-help-sentinel", allowHosts: ["first.example"] }); await source.apply(); source.discard();
+  source.upsertSecret({ env: "EDIT_HELP", textValue: "private-help-sentinel", allowHosts: ["first.example"] }); await source.apply(); source.discard();
   await f.action("Reload"); await f.choose("Confirm"); await f.list("Secrets", "Secrets:"); await f.seek("EDIT_HELP:"); await f.key("e");
   await f.seek("Allowed hosts:"); assert.match(f.full(), /Which services are allowed to use this secret/);
   assert.doesNotMatch(f.full(), /comma-separated|api\.typesafe|private-help-sentinel/);
   await f.key("\r"); assert.match(f.text().replace(/\s+/g, " "), /at least one host is required/);
-  await f.key("\x1b"); await f.choose("Replace value / reference:");
-  assert.match(f.text().replace(/\s+/g, " "), /Leave blank to keep the existing secret and its original reference/);
+  await f.key("\x1b"); await f.choose("Source value:");
+  assert.match(f.text().replace(/\s+/g, " "), /Leave blank to keep the existing secret source/);
   assert.doesNotMatch(f.text(), /private-help-sentinel/);
 });
 
 test("nested secret hosts, network hosts and mount options explain one-item inputs", async (t) => {
   const f = await fixture(t);
   const source = await f.settings.open("project");
-  source.upsertSecret({ env: "ONE_HOST", value: "one-item-private", allowHosts: ["first.example"] });
+  source.upsertSecret({ env: "ONE_HOST", textValue: "one-item-private", allowHosts: ["first.example"] });
   source.upsertMount({ type: "tmpfs", guestPath: "/mnt/help", readonly: true, options: ["nodev"] });
   source.upsertListEntry("network.allow_hosts", "network.example");
   await source.apply(); source.discard(); await f.action("Reload"); await f.choose("Confirm");
@@ -951,7 +1029,7 @@ test("every scalar/list editor and choice has specific guidance, with static exa
 
 test("long instructions preserve paragraphs safely and never displace masked input or editor keys", async (t) => {
   const f = await fixture(t);
-  await f.list("Secrets", "Secrets:"); await f.key("a"); await f.choose("Replace value / reference:");
+  await f.list("Secrets", "Secrets:"); await f.key("a"); await f.choose("Source value:");
   await f.key("\x1b[200~masked-guidance-sentinel\x1b[201~");
   for (const width of [24, 32, 80]) for (const height of [1, 2, 3, 12, 20]) {
     f.terminal.columns = width; f.terminal.rows = height;

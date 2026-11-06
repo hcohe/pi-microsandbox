@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
@@ -14,13 +15,19 @@ import type {
   MergeResult,
   ParsedConfigLayer,
   ResolvedConfig,
+  SecretConfig,
 } from "./types.ts";
 
 const ROUTED_TOOLS = ["read", "write", "edit", "ls", "find", "grep", "bash"];
 const PASS_THROUGH_TOOLS = ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"];
 const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "network.allowHosts"]);
 const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeAllowHosts", "removePublishPorts"]);
-const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
+const SECRET_FIELDS = new Set(["env", "textValue", "hostEnv", "hostCmd", "allowHosts"]);
+const SECRET_SOURCES = ["textValue", "hostEnv", "hostCmd"] as const;
+const REMOVED_SECRET_VALUE_MESSAGE = "secret value was removed; use textValue for literal text or hostEnv for a host environment variable; $ENV: expansion is not supported";
+const HOST_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HOST_CMD_TIMEOUT_MS = 10_000;
+const HOST_CMD_MAX_BYTES = 64 * 1024;
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const REMOVED_WORKSPACE_KEYS = new Set(["mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB"]);
@@ -196,8 +203,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
-function withoutSecret(value: unknown): string {
-  return typeof value === "string" && /^\$(?:ENV|FILE):[^\s]+$/.test(value) ? value : "<redacted>";
+function assertNoDeprecatedSecretSources(value: Record<string, unknown>): void {
+  if (Array.isArray(value.secrets) && value.secrets.some((secret) => isPlainObject(secret) && Object.hasOwn(secret, "value"))) {
+    throw new ConfigError([REMOVED_SECRET_VALUE_MESSAGE]);
+  }
+}
+function secretSourceIssues(secret: unknown): string[] {
+  if (!isPlainObject(secret)) return ["must specify exactly one of textValue, hostEnv, or hostCmd"];
+  if (Object.hasOwn(secret, "value")) return [REMOVED_SECRET_VALUE_MESSAGE];
+  const sources = SECRET_SOURCES.filter((key) => Object.hasOwn(secret, key));
+  const issues: string[] = [];
+  if (sources.length !== 1) issues.push("must specify exactly one of textValue, hostEnv, or hostCmd");
+  for (const key of sources) {
+    const value = secret[key];
+    if (typeof value !== "string") issues.push(`${key} must be a string`);
+    else if (key === "hostEnv" && !HOST_ENV_NAME.test(value)) issues.push("hostEnv must be a valid host environment name");
+    else if (key === "hostCmd" && !value.trim()) issues.push("hostCmd must be a non-empty shell command");
+  }
+  return issues;
 }
 function warning(text: string): string { return text.replace(/(secret|password|token|value)\s*=\s*[^,; ]+/gi, "$1=<redacted>"); }
 
@@ -438,6 +461,7 @@ function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, sou
   assertSafeConfigValue(raw);
   const normalized = normalizeValue(raw) as Record<string, unknown>;
   assertNoRemovedWorkspaceKeys(normalized);
+  assertNoDeprecatedSecretSources(normalized);
   const value = withMountDefaults(normalized as LayerValue);
   const warnings: string[] = [];
   collectUnknown(value, [], warnings);
@@ -561,6 +585,7 @@ export function mergeConfigLayers(layers: readonly ConfigLayerInput[]): MergeRes
   for (const layer of layers) {
     assertSafeConfigValue(layer.value);
     assertNoRemovedWorkspaceKeys(layer.value as Record<string, unknown>);
+    assertNoDeprecatedSecretSources(layer.value as Record<string, unknown>);
     warnings.push(...layer.warnings.map(warning));
     const source = withMountDefaults(clone(layer.value) as LayerValue);
     applyRemovals(result, source, layer.name, provenance);
@@ -633,7 +658,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   for (const [index, secret] of (Array.isArray(config.secrets) ? config.secrets : []).entries()) {
     if (!secret || typeof secret.env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.env)) issues.push(issueForPath(`secrets[${index}]`, "env must be a valid host environment name"));
     else if (PROTECTED_GUEST_ENV.has(secret.env)) issues.push(issueForPath(`secrets[${index}].env`, `must not set protected process environment variable ${secret.env}`));
-    if (typeof secret?.value !== "string") issues.push(issueForPath(`secrets[${index}].value`, "must be a string"));
+    for (const issue of secretSourceIssues(secret)) issues.push(issueForPath(`secrets[${index}]`, issue));
     if (!Array.isArray(secret?.allowHosts) || !secret.allowHosts.length || secret.allowHosts.some((host: unknown) => typeof host !== "string" || !host)) issues.push(issueForPath(`secrets[${index}]`, "allowHosts must be a non-empty string array"));
     else if (secret.allowHosts.some((host: unknown) => !isSecretHost(host))) issues.push(issueForPath(`secrets[${index}].allowHosts`, "must contain exact DNS names or wildcard subdomain scopes such as *.googleapis.com; only a single leading *. is supported, not URLs, ports or IP/CIDR rules"));
   }
@@ -871,13 +896,6 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     }
     const policy = layerFromText(name, text, lexicalFile);
     if (captureSanitizer) privateSources.push(readRawConfig(text));
-    // Normalize relative references against the original lexical policy path,
-    // before realpath: an upward reference must not jump to the agent link target.
-    if (Array.isArray(policy.value.secrets)) {
-      for (const secret of policy.value.secrets) if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) {
-        secret.value = `$FILE:${await canonicalPath(resolve(dirname(lexicalFile), secret.value.slice(6)), true)}`;
-      }
-    }
     hostLayers.push(policy);
   }
   hostPolicyPaths.push(...await hostPolicyAncestorLocations(Object.values(targets.lexicalPaths), realpath));
@@ -901,11 +919,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   layers.push(...hostLayers);
   if (input.temporaryOverrides) {
     if (captureSanitizer) privateSources.push(clone(input.temporaryOverrides));
-    const temporary = clone(input.temporaryOverrides);
-    if (Array.isArray(temporary.secrets)) for (const secret of temporary.secrets) {
-      if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) secret.value = `$FILE:${await canonicalPath(resolve(input.cwd, secret.value.slice(6)), true)}`;
-    }
-    layers.push({ name: "temporary", value: temporary, warnings: [] });
+    layers.push({ name: "temporary", value: clone(input.temporaryOverrides), warnings: [] });
   }
   const merged = mergeConfigLayers(layers);
   warnings.push(...merged.warnings);
@@ -1016,24 +1030,79 @@ function serializeToml(value: Record<string, unknown>, prefix: string[] = []): s
 }
 export function overridesToToml(value: DeepPartial<Config>): string {
   assertSafeConfigValue(value);
+  assertNoDeprecatedSecretSources(value as Record<string, unknown>);
   return serializeToml(clone(value) as Record<string, unknown>).join("\n").replace(/^\n+/, "") + "\n";
 }
 export function toEffectiveToml(value: ResolvedConfig): string {
   const config = clone(value.config) as any;
-  if (Array.isArray(config.secrets)) config.secrets = config.secrets.map((secret: any) => ({ ...secret, value: withoutSecret(secret.value) }));
+  if (Array.isArray(config.secrets)) config.secrets = config.secrets.map((secret: any) => {
+    for (const key of SECRET_SOURCES) if (Object.hasOwn(secret, key)) secret[key] = "<redacted>";
+    return secret;
+  });
   return overridesToToml(config);
 }
 
-export async function resolveSecretValue(value: string, env: NodeJS.ProcessEnv, readFile: (p: string) => Promise<string> = async (p) => fs.readFile(p, "utf8")): Promise<string> {
-  if (value.startsWith("$ENV:")) {
-    const name = value.slice(5);
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || env[name] === undefined) throw new ConfigError(["secret environment reference is missing or invalid"]);
-    return env[name]!;
+/** Runs only on the host; no SDK or guest shell is involved. */
+function runHostSecretCommand(command: string, env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, { shell: true, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Kill the shell and its descendants so inherited pipes cannot defeat the deadline.
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch { /* already exited */ }
+      child.stdout.destroy();
+      child.stderr.destroy();
+      reject(new ConfigError(["host secret command failed"]));
+    };
+    const timer = setTimeout(fail, HOST_CMD_TIMEOUT_MS);
+    const collect = (chunk: Buffer, stdout: boolean) => {
+      if (settled) return;
+      bytes += chunk.length;
+      if (bytes > HOST_CMD_MAX_BYTES) { fail(); return; }
+      if (stdout) chunks.push(chunk);
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(chunk, true));
+    child.stderr.on("data", (chunk: Buffer) => collect(chunk, false));
+    child.stdout.on("error", fail);
+    child.stderr.on("error", fail);
+    child.on("error", fail);
+    child.on("close", (code) => {
+      if (settled) return;
+      if (code !== 0) { fail(); return; }
+      settled = true;
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+}
+
+export async function resolveSecretValue(
+  secret: SecretConfig,
+  env: NodeJS.ProcessEnv,
+  runCommand: (command: string, env: NodeJS.ProcessEnv) => Promise<string> = runHostSecretCommand,
+): Promise<string> {
+  const issues = secretSourceIssues(secret);
+  if (issues.length) throw new ConfigError(issues);
+  if (secret.textValue !== undefined) return secret.textValue;
+  if (secret.hostEnv !== undefined) {
+    if (!Object.hasOwn(env, secret.hostEnv) || typeof env[secret.hostEnv] !== "string") throw new ConfigError(["host secret environment variable is missing or invalid"]);
+    return env[secret.hostEnv]!;
   }
-  if (value.startsWith("$FILE:")) {
-    try { return await readFile(value.slice(6)); } catch { throw new ConfigError(["secret file reference could not be read"]); }
-  }
-  return value;
+  try {
+    const output = await runCommand(secret.hostCmd!, env);
+    if (typeof output !== "string" || Buffer.byteLength(output, "utf8") > HOST_CMD_MAX_BYTES) throw new Error();
+    const token = output.replace(/(?:\r?\n)+$/, "");
+    if (!token) throw new Error();
+    return token;
+  } catch { throw new ConfigError(["host secret command failed"]); }
 }
 export function isDisabledByEnv(env: NodeJS.ProcessEnv): boolean {
   const value = env.PI_MSB_DISABLE;

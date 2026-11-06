@@ -44,7 +44,10 @@ export interface NetworkConfig {
 }
 export interface SecretConfig {
   env: string;
-  value: string;
+  /** Exactly one source is required; textValue is always a literal string. */
+  textValue?: string;
+  hostEnv?: string;
+  hostCmd?: string;
   allowHosts: string[];
 }
 export interface MountConfig {
@@ -377,6 +380,11 @@ export interface AgentRuntimePolicySnapshot {
   adoptedAt: number;
 }
 export interface MsbControl {
+  /** Passive allowlisted snapshot from held state only. No settings.inspect,
+   * source/environment reads, commands, SDK, logs, lifecycle or writes.
+   * Cached desired/adoption is last-known, not live; raw errors are withheld.
+   * Optional for adapters: callers must not fall back to other methods. */
+  getDiagnostics?(): Promise<Record<string, unknown>>;
   getAgentRuntimePolicy?(): AgentRuntimePolicySnapshot | undefined;
   getRuntimePolicy?(): RuntimePolicySnapshot | undefined;
   /** Present on the native integration; optional for third-party control adapters. */

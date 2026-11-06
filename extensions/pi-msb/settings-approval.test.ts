@@ -27,6 +27,21 @@ for (const mode of ["tui", "rpc"]) {
     assert.equal(calls, 5);
   });
 
+  test(`settings approval: ${mode} retains the private human authorization appendix for executable host commands`, async () => {
+    const command = 'printf "PRIVATE_COMMAND";\n# \x1b[31m\u202e\u{e0001}';
+    const original = JSON.stringify(review);
+    const ctx = context(mode, async (question, choices) => {
+      assert.match(question, /HOST secret commands.*host privileges/);
+      assert.deepEqual(choices, ["No", "Yes"]);
+      assert.equal(JSON.parse(question.split("\n").at(-1)), command);
+      assert.doesNotMatch(question, /\x1b|[\p{Cf}]/u);
+      return "No";
+    });
+    assert.equal(await approveSettings(ctx, review, new AbortController().signal, [command]), false);
+    assert.equal(JSON.stringify(review), original);
+    assert.doesNotMatch(JSON.stringify(review), /PRIVATE_COMMAND/);
+  });
+
   test(`settings approval: ${mode} pre-abort, no UI and unsupported modes never open a selector`, async () => {
     const select = async () => assert.fail("must not request approval");
     const abort = new AbortController(); abort.abort();

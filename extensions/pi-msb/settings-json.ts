@@ -18,11 +18,11 @@ export function projectSettingsJson(value: unknown): Record<string, unknown> {
     const path = prefix ? `${prefix}.${normalized}` : normalized;
     if (paths.includes(path)) {
       if (["secrets", "mounts", "remove_secrets", "remove_mounts"].includes(path) && Array.isArray(child)) {
-        const allowed = path.includes("secret") ? ["env", "allow_hosts", "value"] : ["type", "host_path", "guest_path", "readonly", "options"];
+        const allowed = path.includes("secret") ? ["env", "allow_hosts", "text_value", "value", "host_env", "host_cmd"] : ["type", "host_path", "guest_path", "readonly", "options"];
         return [[normalized, child.map((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
           ? Object.fromEntries(Object.entries(entry).flatMap(([k, v]) => {
             const name = normalizeConfigPath(k).map(snake).join(".");
-            return allowed.includes(name) ? [[name, name === "value" ? REDACTED : scalar(v, name === "readonly" ? true : ["allow_hosts", "options"].includes(name) ? [] : "")]] : [];
+            return allowed.includes(name) ? [[name, ["text_value", "value"].includes(name) ? REDACTED : scalar(v, name === "readonly" ? true : ["allow_hosts", "options"].includes(name) ? [] : "")]] : [];
           })) : typeof entry === "string" && path.startsWith("remove_") ? entry : "<invalid>")]];
       }
       const expected = normalizeConfigPath(path).reduce((obj: any, key) => obj?.[key], DEFAULT_CONFIG);

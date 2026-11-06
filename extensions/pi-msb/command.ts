@@ -43,7 +43,7 @@ export function systemPromptNote(state: RuntimeState): string {
     case "host-fallback":
       return "MSB could not start and is using the configured host fallback. This is different from explicitly turning MSB off.";
     case "unavailable":
-      return "MSB is unavailable and routed tools are blocked. Open /msb and choose Enable sandbox after fixing the reported problem. Turning off in Actions explicitly permits host execution.";
+      return "MSB is unavailable and routed tools are blocked. Use msb_diagnostics for read-only diagnostics, msb_config_get for settings, and msb_config_set for an explicitly approved repair; these host management tools do not require a running sandbox. Do not bypass the failure by disabling sandbox protection. Malformed host configuration or workspace discovery errors may require human repair; /msb → Actions → Reload settings retries after repair.";
     case "booting":
       return "MSB is booting; wait for it to become active before using routed tools.";
     case "stopping":

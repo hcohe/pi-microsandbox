@@ -150,7 +150,7 @@ function createHarness(options: {
   const pi = {
     registerTool(tool: any) { tools.set(tool.name, tool); },
     getAllTools() {
-      return [...tools.values(), ...["msb_config_get", "msb_config_set"].map((name) => ({ name, configTool: true }))].map((tool) => ({
+      return [...tools.values(), ...["msb_config_get", "msb_config_set", "msb_diagnostics"].map((name) => ({ name, configTool: true }))].map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
@@ -332,11 +332,13 @@ test("fails closed without UI and clears denied approvals", async () => {
 });
 
 test("blocks routed tools when unavailable and supports configured host fallback", async () => {
-  const blocked = createHarness({ runtimeState: state("unavailable") });
+  const blocked = createHarness({ runtimeState: { ...state("unavailable"), reason: "PRIVATE_STARTUP_REASON" } });
   const input = { path: "extensions/pi-msb/tools.ts" };
   const [gate] = await blocked.emit("tool_call", { toolName: "read", toolCallId: "blocked", input });
   assert.equal(gate.block, true);
-  await assert.rejects(blocked.tools.get("read").execute("blocked", input, undefined, undefined, blocked.ctx), /unavailable/);
+  assert.doesNotMatch(gate.reason, /PRIVATE_STARTUP_REASON/);
+  assert.match(gate.reason, /msb_diagnostics/);
+  await assert.rejects(blocked.tools.get("read").execute("blocked", input, undefined, undefined, blocked.ctx), (error: Error) => /unavailable/.test(error.message) && !error.message.includes("PRIVATE_STARTUP_REASON"));
 
   const disabled = createHarness({ runtimeState: state("disabled"), config: { fallbackMode: "host" } });
   const [disabledGate] = await disabled.emit("tool_call", { toolName: "read", toolCallId: "disabled", input });
@@ -375,15 +377,15 @@ test("updates skill access, tracks Bash output, and proxies user_bash", async ()
   assert.deepEqual(harness.allowedReads, []);
 });
 
-test("third-party gate exempts only the two exact owned configuration tools", async () => {
-  for (const status of ["active", "unavailable", "off", "host-fallback"] as const) {
+test("third-party gate exempts only the exact owned configuration and diagnostics tools", async () => {
+  for (const status of ["active", "unavailable", "off", "host-fallback", "booting", "stopping", "disabled"] as const) {
     const f = createHarness({ runtimeState: state(status) });
-    for (const toolName of ["msb_config_get", "msb_config_set"]) {
+    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics"]) {
       const outcomes = await f.emit("tool_call", { toolName, toolCallId: "config", input: {} });
       assert.ok(outcomes.every((outcome) => !outcome?.block));
     }
-    if (status === "active" || status === "unavailable") {
-      for (const toolName of ["msb_config_get_extra", "msb_config_set_extra", "msb_other", "external_tool"]) {
+    if (status !== "off" && status !== "host-fallback") {
+      for (const toolName of ["msb_config_get_extra", "msb_config_set_extra", "msb_diagnostics_extra", "msb_other", "external_tool"]) {
         const outcomes = await f.emit("tool_call", { toolName, toolCallId: "external", input: {} });
         assert.ok(outcomes.some((outcome) => outcome?.block), toolName);
       }
@@ -393,10 +395,10 @@ test("third-party gate exempts only the two exact owned configuration tools", as
 });
 
 
-test("configuration tools with missing or mismatched registration provenance receive no exemption", async () => {
+test("management tools with missing or mismatched registration provenance receive no exemption", async () => {
   for (const configToolSource of [null, fileURLToPath(new URL("./settings-tools.ts", import.meta.url)), "/tmp/nonexistent/index.ts"]) {
     const f = createHarness({ configToolSource });
-    for (const toolName of ["msb_config_get", "msb_config_set"]) {
+    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics"]) {
       const outcomes = await f.emit("tool_call", { toolName, toolCallId: "spoof", input: {} });
       assert.ok(outcomes.some((outcome) => outcome?.block));
     }

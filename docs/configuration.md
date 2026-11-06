@@ -12,7 +12,10 @@ read-only runtime metadata, not duplicate settings.
 
 The model can inspect settings headlessly with `msb_config_get` or propose one
 Session/Project/Global change with `msb_config_set`. Changes always require
-fresh explicit user approval; secrets and credential references are masked.
+fresh explicit user approval. Agent tools can read and set `hostEnv` variable
+names and `hostCmd` command text, but cannot read or set literal `textValue`
+credentials. Host commands are also shown to the human in the approval dialog,
+because approving hidden executable host code would be unsafe.
 The confirmation shows the focused diff without warning lines; relevant warnings
 are returned as text to the agent after completion so it can explain them to you.
 See the [tool schemas and scope lifetimes](tools.md).
@@ -25,7 +28,8 @@ they are cleared when switching sessions/workspaces or shutting down.
 Keep configuration and credential files outside the mounted workspace and all
 writable mounts.
 
-TOML uses snake_case; environment variables use `PI_MSB_` with `__` for nesting.
+TOML uses snake_case (camelCase aliases such as `allowHosts`, `hostEnv`, `hostCmd`,
+and `textValue` also work); environment variables use `PI_MSB_` with `__` for nesting.
 The following is a small **host-owned** configuration example:
 
 ```toml
@@ -47,10 +51,10 @@ allow_dns = true
 mode = "auto" # auto | require | disabled
 startup_timeout_ms = 15000
 
-# Project secrets should use references, not literals.
+# Prefer host sources over literal credentials.
 [[secrets]]
 env = "NPM_TOKEN"
-value = "$ENV:NPM_TOKEN"
+host_env = "NPM_TOKEN"
 allow_hosts = ["registry.npmjs.org"]
 ```
 
@@ -117,7 +121,7 @@ collections only support individual entry removal. Actions → **Reset Session
 overrides** clears only committed memory overrides, leaves Project/Global
 defaults unchanged, and reconfigures automatically after confirmation.
 Project/Global apply persists only the intended operation, preserving unedited
-references without copying inherited credentials. Apply reloads this sandbox
+secret sources without copying inherited credentials. Apply reloads this sandbox
 automatically; others pick up defaults on next start/reload. Higher overrides can
 shadow persisted defaults. See [apply scopes](commands.md#apply-scopes).
 Origins label committed settings. Status is read-only; its adoption timestamp
@@ -151,25 +155,58 @@ publish_ports = []
 
 [[secrets]]
 env = "NPM_TOKEN"
-value = "$ENV:MY_PROJECT_NPM_TOKEN"
+host_env = "MY_PROJECT_NPM_TOKEN"
 allow_hosts = ["registry.npmjs.org"]
 ```
 
 Make `MY_PROJECT_NPM_TOKEN` available to the host Pi process before launch.
-Alternatively, `$FILE:token` reads a host file beside the file declaring it
-(`default.toml` or the project override); absolute file references are also
-supported. Relative references are normalized against the original **lexical**
-policy path before resolving symlinks. A symlinked agent directory therefore does
-not redirect upward references such as `$FILE:../../token` into the link target's
-parent directories. Save targets remain canonical; unchanged raw reference
-spelling is retained, and deliberate cross-scope transfers anchor the reference
-to its original file without copying credential bytes. Neither the policy nor the secret
-file needs to be mounted into the guest. `/msb` → Actions shows effective redacted
-configuration and re-reads policy with Reload settings.
+Each secret requires **exactly one** of these sources:
+
+- `host_env` / `hostEnv`: the name of a host environment variable.
+- `text_value` / `textValue`: a literal string, used exactly as written. No
+  reference expansion occurs.
+- `host_cmd` / `hostCmd`: a trusted shell command run on the host; its stdout is
+  the secret, with trailing newlines removed.
+
+**Deprecated API:** secret `value` and `$ENV:NAME` references are no longer
+supported. Use `textValue` for literal text and `hostEnv` for host variables.
+A `textValue` starting with `$ENV:` is literal text, not an environment lookup.
+
+`msb_config_get` exposes host variable names and command text, never the resolved
+credentials. `msb_config_set` can configure either host source; literal `textValue`
+input is rejected. Configure literals from a host-owned file or the human `/msb`
+panel instead. Metadata-only agent edits may retain an existing literal without
+seeing it. Do not embed credentials in `hostCmd`: its command text is visible to
+the agent. Getters, previews, and saves do not resolve or execute these sources.
+
+For example, literal and command-backed secrets:
+
+```toml
+[[secrets]]
+env = "MY_HOST_SECRET"
+allowHosts = ["api.target.com"]
+textValue = "s3cre3t"
+
+[[secrets]]
+env = "GOOGLE_CLOUD_ACCESS_TOKEN"
+allowHosts = ["*.googleapis.com"]
+hostCmd = "gcloud auth print-access-token --quiet"
+```
+
+Host commands run with Pi's host privileges and environment, **not inside the
+sandbox**. Use only trusted commands and ensure the command prints only the
+credential on stdout. Commands have a 10-second deadline and a 64 KiB combined
+stdout/stderr limit; nonzero exits, empty output, timeout or excessive output
+block sandbox creation without echoing command output. Configure host-specific
+paths explicitly; do not rely on the policy file's directory as the command's
+working directory. Missing host variables also block sandbox creation. Sources are resolved on
+sandbox creation/recreation, not during inspection, validation or saving; tokens
+are not refreshed automatically in a running sandbox. `/msb` → Actions shows
+redacted configuration and re-reads policy with Reload settings.
 
 On the first enabled session (and on reload), setup creates `default.toml`
 **exclusively if missing**, with a comprehensive fully commented reference:
-setting defaults, valid values/ranges, secret references, mount examples, merge
+setting defaults, valid values/ranges, secret sources, mount examples, merge
 behavior, and per-project creation instructions. It does not activate any
 settings. Existing files, including empty files, are never overwritten or
 chmodded. Newly created directories use mode `0700` and the file uses `0600`
@@ -243,9 +280,11 @@ from host code you independently choose to load or execute.
 - Secrets require a non-empty `allow_hosts` list. These destinations constrain
   TLS-verified credential substitution, **not network access**: they do not add
   exceptions to the network allowlist. Restricting networking does not require
-  clearing unrelated secrets. `$ENV:NAME` and `$FILE:path`
-  references are resolved only while constructing the SDK builder. Effective
-  config, warnings, errors, and the control panel redact literal values. Process
+  clearing unrelated secrets. Secret sources are resolved only while constructing
+  the SDK builder. Effective config, warnings, errors, and the control panel
+  redact secret literals and resolved credential bytes. Agent tools expose
+  `hostEnv` names and `hostCmd` text as configuration metadata, while the human
+  effective-TOML diagnostic keeps source fields masked. Process
   control variables such as `DOCKER_HOST`, `DOCKER_CONTEXT`, `PATH`,
   `BASH_ENV`, and `LD_PRELOAD` cannot be forwarded with `host_env` or injected
   as secrets.

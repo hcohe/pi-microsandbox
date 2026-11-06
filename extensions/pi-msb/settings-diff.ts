@@ -1,7 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { safeText, settingsSourceLabel } from "./control-panel.ts";
 import type { SettingsCollectionIntent, SettingsReviewDelta, SettingsReviewFocus } from "./settings.ts";
-import { DNS_EXCEPTION_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
+import { DNS_EXCEPTION_WARNING, HOST_SECRET_COMMAND_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 
 export interface SettingsDiffLine {
   kind: "scope" | "context" | "added" | "removed" | "warning";
@@ -14,7 +14,7 @@ const display = (value: unknown): string => value === undefined ? "inherit" : ty
 
 const fieldLabel = (field: string): string => ({
   allow_hosts: "Hosts", "network.allow_hosts": "Hosts", credential: "Credential", env: "Name", readonly: "Read only",
-  host_path: "Host path", guest_path: "Guest path", host_env: "Host variables", cpus: "CPUs", memory_mib: "Memory (MiB)",
+  host_path: "Host path", guest_path: "Guest path", host_env: "Host variables", host_cmd: "Host command", cpus: "CPUs", memory_mib: "Memory (MiB)",
   remove_secrets: "Secret exclusions", "entry order": "Entry order", block_third_party: "Block third-party tools",
 }[field] ?? field.replace(/[_.]/g, " ").replace(/^./, (letter) => letter.toUpperCase()));
 const HOST_CONSEQUENCES: Readonly<Record<string, string>> = {
@@ -71,7 +71,27 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
     if (focus.shadowed || collection.some((item) => item.shadowed) || shadowed.length) warning("Higher-priority settings still apply.");
     if (focus.replacesEntry && focus.changed) warning("Replaces the entry with this name.");
     if (focus.writableMount) warning("This mount allows changes to HOST files.");
+    // Keep this execution consequence in the approval body, where generic advisory warnings are omitted.
+    if (focus.hostCommand) context(HOST_SECRET_COMMAND_WARNING);
     for (const path of focus.hostBypass) if (HOST_CONSEQUENCES[path]) warning(HOST_CONSEQUENCES[path]);
+  }
+  const activation = (review.recovery as { activationPolicy?: Record<string, unknown> } | undefined)?.activationPolicy;
+  if (activation) {
+    context("Recovery activation: the original configuration was invalid. Approval authorizes this COMPLETE final safety policy, including settings not edited by this repair.");
+    context("Activation policy only — not additional storage changes or whole-list replacement.");
+    for (const path of ["auto_start", "image", "network", "host_env", "fallback_mode", "pass_through_tools", "block_third_party", "allow_host_execution", "allow_skill_reads"]) {
+      context(`${fieldLabel(path)}: ${display(activation[path])}`);
+      const value = activation[path];
+      const dangerous = path === "fallback_mode" ? value === "host" : path === "pass_through_tools" ? Array.isArray(value) && value.length > 0 : path === "block_third_party" ? value === false : value === true;
+      if (dangerous && HOST_CONSEQUENCES[path]) context(HOST_CONSEQUENCES[path]!);
+    }
+    if (activation.auto_start === false) context("Auto-start disabled: on the next session this configuration explicitly permits HOST mode.");
+    context(`All additional mounts (including read-only HOST exposure): ${display(activation.mounts)}`);
+    context(`Secret injection destinations and source kinds (no literal values): ${display(activation.secrets)}`);
+    context(`Writable mounts: ${display(activation.writable_mounts)}`);
+    if (Array.isArray(activation.writable_mounts) && activation.writable_mounts.some((mount) => ["dir", "file"].includes(mount.type))) warning("These mounts allow changes to HOST files.");
+    context(`Final host commands: ${display(activation.host_command_count)}. All command source code must be authorized in the human-only appendix.`);
+    if (activation.host_command_count) context(HOST_SECRET_COMMAND_WARNING);
   }
   const changed = (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed);
   if (review.scope === "session" && changed) warning(SESSION_LIFETIME_WARNING);
