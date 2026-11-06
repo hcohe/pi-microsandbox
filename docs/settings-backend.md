@@ -68,9 +68,11 @@ Entry CRUD may materialize the selected scope's baseline collection because host
 arrays remain authoritative, but **never materializes unrelated higher-scope
 entries**. No array-union or raw configuration precedence semantics were changed.
 A specifically selected higher-scope secret/mount/list entry may be intentionally
-saved globally: confirmation must name its identity and policy origin and warn
-that this broadens its scope. Metadata-only secret editing retains that selected
-entry's private credential, not a different same-name target credential.
+saved globally: the sanitized review must name its identity and policy origin and
+retain a warning that this broadens its scope. The panel displays warnings in its
+review; configuration tools return relevant warnings to the agent after completion
+rather than showing warning lines in their confirmation dialog. Metadata-only
+secret editing retains that selected entry's private credential, not a different same-name target credential.
 
 Unedited target-owned references retain their raw spelling. References inherited
 from lower policies or deliberately imported from another scope are anchored to
@@ -147,6 +149,29 @@ before retrying. Runtime is not mutated by the settings editor in that case.
 
 ## Agent-safe inspection and approval-bound commits
 
+The model-facing getter adds static `settings-schema.ts` discovery (value schemas,
+constraints, operations/scopes, batch capabilities and network semantics) and
+network policy summaries computed **only from agent-safe inspection/adoption
+projections**. Desired and last-known adopted policy remain separate; unknown
+adopted network state stays null. No SDK is imported or credential resolved for
+this metadata. `network-domains.ts` defines the common exact-domain format,
+secret-only leading `*.` wildcard scopes, and network-only IP/CIDR inputs.
+`settings-inspection.ts` applies section/path filters after that boundary and
+renders readable text/indented JSON while keeping selected structured details.
+Filters never authorize new reads, field/index paths or mutations. Static schema
+caching uses the caller's version, not transcript state. Safe validation diagnostics
+use whitelisted issue prefixes, static expected schemas and operation indices;
+unattributable source/dynamic failures remain generic, with no raw error echo.
+
+The setter accepts a single operation or 1–64 ordered operations in one explicit
+scope. Each request owns one draft and modal lease: apply every operation, validate
+and review the final candidate once, bind one approval to all changes, commit once,
+then reload at most once. No intermediate candidate is persisted/adopted. Batch
+requests retain the same stale-source/session/runtime guards, masked review,
+sparse persistence, native collection intent and save-versus-activation outcomes.
+This does not make persistence and VM activation a distributed transaction or
+remove the bounded filesystem guarantees above.
+
 `editor.inspect(runtime?, privateSources?)` reads each contributing policy once,
 returns all supported effective settings, sparse Global/Project/Session layers (`layers.global`, `.project`, `.session`),
 origins and warnings as JSON, and does not bootstrap/write/reload. `settings-json.ts`
@@ -172,8 +197,16 @@ while its exact expected content and all other source metadata remain guarded.
 
 `editor.acquireInteraction()` is the shared integration-local panel/tool modal
 lease. Competing callers fail busy; release it in finally. Session lifecycle
-invalidates its AbortSignal. `settings-approval.ts` uses only public custom-overlay
-APIs for a scrollable TUI review; RPC uses the documented No-first selector.
+invalidates its AbortSignal. `settings-approval.ts` uses Pi's public native
+No/Yes selector in TUI and RPC, with No selected by default. There is no custom
+pagination or read-to-end gate; Pi controls presentation of the complete masked
+diff and nonwarning context, and long questions may exceed the visible terminal.
+Only semantic warning lines are filtered from tool approval and human setter
+results; the orange scope name is retained. Warning generation and sanitized
+review metadata are unchanged. Setter model-visible plain text includes relevant
+warnings for applied/no-op and saved-but-reload-failed outcomes, with saved versus
+activated status explicit. The agent is instructed to explain these warnings to
+the user after completion. Getter inspection diagnostics are unchanged.
 No ordinary panel conditional-confirmation path authorizes tool mutations.
 
 Secret upsert with omitted value prefers the selected effective identity as

@@ -13,6 +13,8 @@ read-only runtime metadata, not duplicate settings.
 The model can inspect settings headlessly with `msb_config_get` or propose one
 Session/Project/Global change with `msb_config_set`. Changes always require
 fresh explicit user approval; secrets and credential references are masked.
+The confirmation shows the focused diff without warning lines; relevant warnings
+are returned as text to the agent after completion so it can explain them to you.
 See the [tool schemas and scope lifetimes](tools.md).
 
 Settings take precedence in this order: built-ins < environment
@@ -227,7 +229,21 @@ from host code you independently choose to load or execute.
   `publish_ports = ["127.0.0.1:8080:8080"]` together with `docker run -p
   0.0.0.0:8080:8080 ...`. Docker's random host-port form cannot create that
   outer mapping.
-- Secrets require a non-empty `allow_hosts` list. `$ENV:NAME` and `$FILE:path`
+- Network `allow_hosts` accepts **exact ASCII DNS names**, e.g. `api.example.com`,
+  and IPv4/IPv6 addresses or CIDRs. Secret `allow_hosts` accepts exact DNS names
+  and wildcard subdomain scopes such as `*.googleapis.com` (a single leading
+  `*.` only), not IP/CIDR rules. Wildcards are passed to the SDK's secret host
+  pattern matcher; add the apex domain separately if needed. Neither list
+  accepts URLs, ports, whitespace or trailing dots; use punycode for international
+  domains. Exact names do not implicitly grant subdomains, and invalid scopes
+  fail closed at validation.
+  Domain network rules match cached hostnames for remote IPs, not HTTP URLs, and
+  do not restrict protocols/ports to HTTPS. With allowlist mode, `allow_dns = true`
+  adds a separate TCP/UDP port 53 rule to the SDK Host destination.
+- Secrets require a non-empty `allow_hosts` list. These destinations constrain
+  TLS-verified credential substitution, **not network access**: they do not add
+  exceptions to the network allowlist. Restricting networking does not require
+  clearing unrelated secrets. `$ENV:NAME` and `$FILE:path`
   references are resolved only while constructing the SDK builder. Effective
   config, warnings, errors, and the control panel redact literal values. Process
   control variables such as `DOCKER_HOST`, `DOCKER_CONTEXT`, `PATH`,

@@ -67,6 +67,11 @@ with KVM; Windows, Intel macOS, and musl Linux are not supported.
 `msb_config_get` is read-only, including headless use. `msb_config_set` can edit
 one explicit Session/Project/Global setting only after a fresh sanitized
 Cancel-first review; host-execution permission never substitutes for approval.
+The tool confirmation shows the masked diff without semantic warning lines.
+Relevant safety/impact warnings remain in review metadata and are returned in
+agent-visible text after completion (including saved-but-not-activated outcomes),
+so the agent can advise the user. Human setter result rows also omit warning
+blocks; getter inspection warnings are unchanged.
 No UI means no mutation. Secrets/references and arbitrary unknown raw values
 are not exposed. Changed files/session identity/Session settings invalidate approval;
 conflicts never silently retry. Only these two exact tool names bypass the

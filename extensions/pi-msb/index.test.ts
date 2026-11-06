@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { footerStatus, styleFooterStatus } from "./index.ts";
@@ -30,6 +30,40 @@ test("index bare import and factory registration do not create host configuratio
     register({ registerTool() {}, registerCommand() {}, on() {} });
   `], { cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, stdio: "pipe" });
   await assert.rejects(stat(agentDir), { code: "ENOENT" });
+});
+
+for (const event of ["session_shutdown", "session_info_changed"]) for (const throws of [false, true]) test(`${event} warns before clearing overrides, including Pi reload; notification failure=${throws}`, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-session-warning-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    const { default: register } = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const tools = new Map(); const hooks = new Map(); const notices = [];
+    register({ registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
+      on(event, handler) { hooks.set(event, [...(hooks.get(event) ?? []), handler]); } });
+    const ctx = { cwd: process.cwd(), mode: 'rpc', hasUI: true, isProjectTrusted: () => true,
+      sessionManager: { getSessionId: () => 'warning-test', getEntries: () => [] },
+      ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, select: async () => 'Yes',
+        notify(message, level) { notices.push([message, level]); if (${throws} && message.includes('Session sandbox overrides are being cleared')) throw Error('synthetic-notification-failure'); } } };
+    await hooks.get('session_start').at(-1)({}, ctx);
+    const result = await tools.get('msb_config_set').execute('set', {scope:'session',path:'show_footer',operation:'set',value:false}, undefined, undefined, ctx);
+    assert.equal(result.details.outcome, 'applied', JSON.stringify(result.details));
+    assert.equal((await tools.get('msb_config_get').execute('get', {}, undefined, undefined, ctx)).details.layers.session.show_footer, false);
+    if ('${event}' === 'session_info_changed') ctx.sessionManager.getSessionId = () => 'warning-next';
+    await hooks.get('${event}').at(-1)({reason:'reload'}, ctx);
+    const warning = notices.find(([message]) => message.includes('Session sandbox overrides are being cleared'));
+    assert.ok(warning); assert.equal(warning[1], 'warning'); assert.match(warning[0], /Pi \\/reload/); assert.match(warning[0], /broader access/);
+    if ('${event}' === 'session_shutdown') {
+      ctx.sessionManager.getSessionId = () => 'warning-next';
+      await hooks.get('session_start').at(-1)({}, ctx);
+    }
+    assert.deepEqual((await tools.get('msb_config_get').execute('get', {}, undefined, undefined, ctx)).details.layers.session, {});
+    await hooks.get('session_shutdown').at(-1)({reason:'quit'}, ctx);
+    assert.equal(notices.filter(([message]) => message.includes('Session sandbox overrides are being cleared')).length, 1);
+    console.log('PASS session-warning');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS session-warning/);
 });
 
 test("footer status follows the visibility setting", () => {

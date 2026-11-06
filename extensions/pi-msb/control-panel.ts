@@ -6,6 +6,7 @@ import { MaskedInput } from "./masked-input.ts";
 import { SECTIONS, SETTINGS_FIELDS, valueAt, SECRET_HOST_HELP, MOUNT_OPTION_HELP, type FieldHelp, type SettingsField } from "./settings-fields.ts";
 import type { SettingsDraft, SettingsScope } from "./settings.ts";
 import type { MsbControl, Config } from "./types.ts";
+import { DNS_EXCEPTION_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
 type Row = { id: string; label: string; detail?: string; instructions?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
@@ -111,7 +112,7 @@ export class ControlPanel implements Component, Focusable {
   #scopeRows(apply: (scope: SettingsScope) => void | Promise<void>): Row[] {
     const active = this.#control.getState().status === "active";
     return [
-      { id: "apply-temporary", label: "Session", button: true, disabled: !active, detail: active ? "Memory only; no disk writes." : "Unavailable: no running sandbox. Enable a sandbox first, or choose Project or Global.", action: active ? () => apply("temporary") : undefined },
+      { id: "apply-temporary", label: "Session", button: true, disabled: !active, detail: active ? "Memory only; Pi /reload, identity changes and shutdown clear overrides. Inherited defaults may allow broader access. Choose Project/Global to persist." : "Unavailable: no running sandbox. Enable a sandbox first, or choose Project or Global.", action: active ? () => apply("temporary") : undefined },
       { id: "apply-project", label: "Project", button: true, detail: "Persist Project defaults and reload this sandbox.", action: () => apply("project") },
       { id: "apply-global", label: "Global", button: true, detail: "Persist Global defaults and reload this sandbox.", action: () => apply("global") },
     ];
@@ -333,7 +334,8 @@ export class ControlPanel implements Component, Focusable {
       const summary = [
         `Scope: ${settingsSourceLabel(scope)}`,
         ...hostBoundaryWarnings,
-        ...(scope === "temporary" ? ["Memory only; no disk writes."] : [
+        ...([...intentPaths].some((path) => path.startsWith("network.")) ? [NETWORK_IDENTITY_WARNING, ...(effective.network?.mode === "allowlist" && effective.network.allowDns ? [DNS_EXCEPTION_WARNING] : [])] : []),
+        ...(scope === "temporary" ? ["Memory only; no disk writes.", SESSION_LIFETIME_WARNING] : [
           `Settings file: ${target.path}`,
           "Persist defaults; reload this sandbox only.",
           "Others pick up on next start/reload.",

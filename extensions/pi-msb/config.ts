@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolv
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { defaultConfigTemplate } from "./config-template.ts";
+import { isSecretHost, networkDestinationKind } from "./network-domains.ts";
 import type {
   Config,
   ConfigLayerInput,
@@ -621,7 +622,9 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (stringArray("hostEnv", config.hostEnv)) for (const name of config.hostEnv) if (PROTECTED_GUEST_ENV.has(name)) issues.push(issueForPath("hostEnv", `must not forward protected process environment variable ${name}`));
   const network = isPlainObject(config.network) ? config.network : null;
   if (!network || !["default", "open", "allowlist", "deny"].includes(network.mode as string)) issues.push(issueForPath("network.mode", "unknown network mode"));
-  if (network && stringArray("network.allowHosts", network.allowHosts)) { /* checked above */ }
+  if (network && stringArray("network.allowHosts", network.allowHosts)) {
+    for (const host of network.allowHosts) if (!networkDestinationKind(host)) issues.push(issueForPath("network.allowHosts", "must contain exact DNS names or valid IP/CIDR rules; wildcards, URLs and ports are not supported"));
+  }
   if (network && stringArray("network.publishPorts", network.publishPorts)) { /* checked above */ }
   if (network && typeof network.allowDns !== "boolean") issues.push(issueForPath("network.allowDns", "must be boolean"));
   if (network?.mode === "allowlist" && Array.isArray(network.allowHosts) && !network.allowHosts.length && !network.allowDns) issues.push(issueForPath("network", "allowlist needs a host or DNS permission"));
@@ -632,6 +635,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
     else if (PROTECTED_GUEST_ENV.has(secret.env)) issues.push(issueForPath(`secrets[${index}].env`, `must not set protected process environment variable ${secret.env}`));
     if (typeof secret?.value !== "string") issues.push(issueForPath(`secrets[${index}].value`, "must be a string"));
     if (!Array.isArray(secret?.allowHosts) || !secret.allowHosts.length || secret.allowHosts.some((host: unknown) => typeof host !== "string" || !host)) issues.push(issueForPath(`secrets[${index}]`, "allowHosts must be a non-empty string array"));
+    else if (secret.allowHosts.some((host: unknown) => !isSecretHost(host))) issues.push(issueForPath(`secrets[${index}].allowHosts`, "must contain exact DNS names or wildcard subdomain scopes such as *.googleapis.com; only a single leading *. is supported, not URLs, ports or IP/CIDR rules"));
   }
   const seenGuests: { path: string; index: number }[] = [];
   if (!Array.isArray(config.mounts)) issues.push(issueForPath("mounts", "must be an array"));

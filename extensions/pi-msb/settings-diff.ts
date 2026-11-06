@@ -1,6 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { safeText, settingsSourceLabel } from "./control-panel.ts";
 import type { SettingsCollectionIntent, SettingsReviewDelta, SettingsReviewFocus } from "./settings.ts";
+import { DNS_EXCEPTION_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 
 export interface SettingsDiffLine {
   kind: "scope" | "context" | "added" | "removed" | "warning";
@@ -72,7 +73,14 @@ export function settingsDiff(review: Record<string, unknown>): SettingsDiffLine[
     if (focus.writableMount) warning("This mount allows changes to HOST files.");
     for (const path of focus.hostBypass) if (HOST_CONSEQUENCES[path]) warning(HOST_CONSEQUENCES[path]);
   }
-  if (review.effect === "restart" && (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed)) warning("Restart: temporary guest data and nested containers may be lost.");
+  const changed = (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed);
+  if (review.scope === "session" && changed) warning(SESSION_LIFETIME_WARNING);
+  if ((review.focus as SettingsReviewFocus[]).some((focus) => focus.changed && focus.path.startsWith("network."))) {
+    warning(NETWORK_IDENTITY_WARNING);
+    const network = (review.desired as { after?: { network?: { mode?: string; allow_dns?: boolean } } } | undefined)?.after?.network;
+    if (network?.mode === "allowlist" && network.allow_dns) warning(DNS_EXCEPTION_WARNING);
+  }
+  if (review.effect === "restart" && changed) warning("Restart: temporary guest data and nested containers may be lost.");
   if (review.mayStart && (review.focus as SettingsReviewFocus[]).some((focus) => focus.changed)) warning("May start the sandbox because auto-start is enabled.");
   return lines;
 }

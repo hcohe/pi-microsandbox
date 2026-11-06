@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { formatSettingsDiff, settingsDiff } from "./settings-diff.ts";
 import type { SettingsReviewFocus } from "./settings.ts";
+import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 
 function review(overrides: Partial<SettingsReviewFocus> = {}) {
   const focus: SettingsReviewFocus = {
@@ -61,7 +62,7 @@ test("settings diff: routine same-scope edits omit repeated identity, source, op
 for (const [scope, label] of [["session", "Session"], ["project", "Project"], ["global", "Global"], ["ephemeral", "Session"], ["temporary", "Session"]]) {
   test(`settings diff: canonical scope line for ${scope}, including historical display aliases`, () => {
     const text = formatSettingsDiff(settingsDiff({ ...review(), scope })).join("\n");
-    assert.equal(text, `Scope: ${label}\nSecret TOKEN\n- Hosts: old.example\n+ Hosts: new.example`);
+    assert.equal(text, `Scope: ${label}\nSecret TOKEN\n- Hosts: old.example\n+ Hosts: new.example${scope === "session" ? `\n! ${SESSION_LIFETIME_WARNING}` : ""}`);
     const theme = { fg: (role: string, text: string) => `<${role}>${text}</${role}>`, bold: (text: string) => text };
     const styled = formatSettingsDiff(settingsDiff({ ...review(), scope }), theme);
     assert.equal(styled[0], `<muted>Scope: </muted><warning>${label}</warning>`);

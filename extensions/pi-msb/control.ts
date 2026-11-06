@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { isIP } from "node:net";
 import { join } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -193,7 +194,8 @@ function applyNetwork(builder: AnyRecord, config: Config, sdk: MicrosandboxModul
       const policy = policyApi.builder().defaultDeny().defaultIngress("deny");
       for (const host of network.allowHosts) {
         policy.egress((rule: AnyRecord) => rule.allow((destination: AnyRecord) => {
-          if (host.includes("/") || /^\d+(?:\.\d+){3}$/.test(host)) return destination.cidr(host);
+          if (host.includes("/")) return destination.cidr(host);
+          if (isIP(host)) return destination.ip(host);
           return destination.domain(host);
         }));
       }
@@ -342,7 +344,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           builder.secret((entry: AnyRecord) => {
             entry.env(secret.env).value(value).requireTlsIdentity(true);
             for (const host of secret.allowHosts) {
-              if (host.includes("*") || host.includes("?")) entry.allowHostPattern(host);
+              if (host.startsWith("*.")) entry.allowHostPattern(host);
               else entry.allowHost(host);
             }
             return entry;

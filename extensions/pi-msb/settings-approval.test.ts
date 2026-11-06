@@ -1,141 +1,108 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { approveSettings, SettingsApproval } from "./settings-approval.ts";
-import { settingsDiff, type SettingsDiffLine } from "./settings-diff.ts";
+import { approveSettings } from "./settings-approval.ts";
+import { formatSettingsDiff, settingsDiff, type SettingsDiffLine } from "./settings-diff.ts";
 
-const reviewLines = (review: string): SettingsDiffLine[] => review.split("\n").map((text) => ({ kind: "context", text }));
-const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
-const keys = new KeybindingsManager(TUI_KEYBINDINGS);
-function view(review: SettingsDiffLine[] = reviewLines("short review")) {
-  const terminal = { rows: 24, columns: 80 };
-  const results: boolean[] = [];
-  const component = new SettingsApproval(review, { terminal, requestRender() {} } as any, theme, keys, (value) => results.push(value));
-  return { component, terminal, results };
+const theme = { fg: (role: string, text: string) => `<${role}>${text}</${role}>`, bold: (text: string) => text };
+const review: SettingsDiffLine[] = [{ kind: "context", text: "review" }];
+function context(mode: string, select: (...args: any[]) => Promise<string | undefined>, hasUI = true): ExtensionContext {
+  return { hasUI, mode, ui: { theme, select, custom: () => assert.fail("settings approval must not open an extension overlay") } } as unknown as ExtensionContext;
 }
 
-test("settings approval: native-style compact question, padded vertical No/Yes, no dashboard or short-review status", () => {
-  const f = view([
-    { kind: "context", text: "Scope: Project" },
-    { kind: "context", text: "Secret TOKEN" },
-    { kind: "removed", label: "allow_hosts", text: "old.example" },
-    { kind: "added", label: "allow_hosts", text: "new.example" },
-  ]);
-  const rows = f.component.render(80);
-  assert.ok(rows.length < f.terminal.rows);
-  assert.equal(rows[0], "─".repeat(80)); assert.equal(rows.at(-1), rows[0]);
-  assert.match(rows.join("\n"), /\n Allow configuration change\? *\n\n Scope: Project *\n Secret TOKEN/);
-  assert.match(rows.join("\n"), /\n → No\n   Yes\n/);
-  assert.doesNotMatch(rows.join("\n"), /MICROSANDBOX|End seen|Read to end|PgUp|Cancel|Approve|\[ No \]/);
-});
+for (const mode of ["tui", "rpc"]) {
+  test(`settings approval: ${mode} native No/Yes options, signal, explicit consent only on every invocation`, async () => {
+    const abort = new AbortController();
+    let calls = 0;
+    for (const answer of [undefined, "No", "Approve", "Yes", "Yes"]) {
+      const ctx = context(mode, async (title, choices, options) => {
+        calls++;
+        assert.equal(title, `Allow configuration change?\n\n${mode === "tui" ? "<muted>review</muted>" : "review"}`);
+        assert.deepEqual(choices, ["No", "Yes"]);
+        assert.deepEqual(options, { signal: abort.signal });
+        return answer;
+      });
+      assert.equal(await approveSettings(ctx, review, abort.signal), answer === "Yes");
+    }
+    assert.equal(calls, 5);
+  });
 
-test("settings approval: default Enter, Escape and Ctrl+C reject and settle once", () => {
-  for (const key of ["\r", "\x1b", "\x03"]) {
-    const f = view(); f.component.render(80); f.component.handleInput(key); f.component.dispose(); f.component.handleInput("\r");
-    assert.deepEqual(f.results, [false]);
-  }
-});
+  test(`settings approval: ${mode} pre-abort, no UI and unsupported modes never open a selector`, async () => {
+    const select = async () => assert.fail("must not request approval");
+    const abort = new AbortController(); abort.abort();
+    assert.equal(await approveSettings(context(mode, select), review, abort.signal), false);
+    assert.equal(await approveSettings(context(mode, select, false), review, new AbortController().signal), false);
+    for (const unsupported of ["print", "json", "unknown"]) {
+      assert.equal(await approveSettings(context(unsupported, select), review, new AbortController().signal), false);
+    }
+  });
 
-test("settings approval: native arrow/j/k choices clamp instead of wrapping; only explicit Yes authorizes", () => {
-  const f = view(); f.component.render(80);
-  f.component.handleInput("\x1b[A"); assert.match(f.component.render(80).join("\n"), /→ No/);
-  f.component.handleInput("\x1b[B"); f.component.handleInput("\x1b[B");
-  assert.match(f.component.render(80).join("\n"), /→ Yes/);
-  f.component.handleInput("k"); assert.match(f.component.render(80).join("\n"), /→ No/);
-  f.component.handleInput("j"); f.component.handleInput("\r"); assert.deepEqual(f.results, [true]);
-});
+  test(`settings approval: ${mode} abort while selecting rejects even a late Yes; selector errors propagate`, async () => {
+    const abort = new AbortController();
+    const ctx = context(mode, async (_title, _choices, { signal }) => {
+      assert.equal(signal, abort.signal); abort.abort(); return "Yes";
+    });
+    assert.equal(await approveSettings(ctx, review, abort.signal), false);
+    await assert.rejects(approveSettings(context(mode, async () => { throw new Error("selector failure"); }), review, new AbortController().signal), /selector failure/);
+  });
 
-test("settings approval: long/wrapped review gates Yes until its end is visible, without preselecting Yes", () => {
-  const f = view(reviewLines(Array.from({ length: 80 }, (_, n) => `line ${n}: ${"long wrapped review ".repeat(10)}`).join("\n")));
-  assert.match(f.component.render(80).join("\n"), /Read to end for Yes/);
-  f.component.handleInput("j"); assert.match(f.component.render(80).join("\n"), /→ No/);
-  f.component.handleInput("G"); assert.doesNotMatch(f.component.render(80).join("\n"), /Read to end/);
-  f.component.handleInput("\r"); assert.deepEqual(f.results, [false]);
-  const approved = view(fixtureLongReview()); approved.component.render(80); approved.component.handleInput("G"); approved.component.render(80);
-  approved.component.handleInput("j"); approved.component.handleInput("\r"); assert.deepEqual(approved.results, [true]);
-});
-
-function fixtureLongReview(): SettingsDiffLine[] {
-  return Array.from({ length: 60 }, (_, n) => ({ kind: n % 2 ? "warning" : "added", label: n % 2 ? undefined : "allow_hosts", text: n % 2 ? `warning-${n}: relevant consequence` : `host-${n}.example` }));
+  test(`settings approval: ${mode} passes the complete long diff without warning kinds; Yes needs no paging`, async () => {
+    const long: SettingsDiffLine[] = [
+      { kind: "scope", label: "Scope", text: "Global" },
+      { kind: "context", text: "Secret TOKEN" },
+      { kind: "context", text: "! Keep this nonwarning context" },
+      ...[
+        "Restart: temporary guest data and nested containers may be lost.",
+        "May start the sandbox because auto-start is enabled.",
+        "This mount allows changes to HOST files.",
+        "When listed: These tools run on the HOST without per-call host approval.",
+        "Removes this override; inherited settings may take effect.",
+        "Higher-priority settings still apply.",
+        "Copies this entry from Project into Global; the higher scope still wins.",
+        "Session settings clear on Pi /reload.",
+        "DNS/IP matching is not per-request URL/TLS-hostname authorization.",
+        "DNS exfiltration remains possible.",
+      ].map((text): SettingsDiffLine => ({ kind: "warning", text })),
+      { kind: "removed", label: "Credential", text: "<redacted>" },
+      { kind: "added", label: "Credential", text: "<redacted> (changed)" },
+      ...Array.from({ length: 200 }, (_, n): SettingsDiffLine => n % 2
+        ? { kind: "warning", text: `warning-${n}: relevant consequence` }
+        : { kind: "added", label: "Hosts", text: `host-${n}.example ${"long value ".repeat(20)}` }),
+    ];
+    let calls = 0;
+    const ctx = context(mode, async (title, choices, options) => {
+      calls++;
+      assert.equal(title, ["Allow configuration change?", "", ...formatSettingsDiff(long.filter((line) => line.kind !== "warning"), mode === "tui" ? theme : undefined)].join("\n"));
+      assert.deepEqual(choices, ["No", "Yes"]); assert.ok(options.signal);
+      assert.doesNotMatch(title, /warning-\d+: relevant consequence/);
+      assert.match(title, /host-198\.example/);
+      assert.match(title, /! Keep this nonwarning context/);
+      for (const warning of long.filter((line) => line.kind === "warning")) assert.ok(!title.includes(warning.text));
+      assert.doesNotMatch(title, /Read to end|PgUp|PgDn|32×10/);
+      if (mode === "rpc") assert.doesNotMatch(title, /\x1b|<warning>|<muted>/);
+      else {
+        assert.ok(title.includes("<muted>Scope: </muted><warning>Global</warning>"));
+        assert.ok(title.includes("<muted>Secret TOKEN</muted>"));
+        assert.ok(title.includes("<toolDiffRemoved><redacted></toolDiffRemoved>"));
+        assert.ok(title.includes("<toolDiffAdded><redacted> (changed)</toolDiffAdded>"));
+        assert.doesNotMatch(title, /<warning>!/);
+      }
+      return "Yes";
+    });
+    assert.equal(await approveSettings(ctx, long, new AbortController().signal), true);
+    assert.equal(calls, 1);
+  });
 }
-
-test("settings approval: all long values and warnings remain reachable across wrapping/resize; unusable views reject", () => {
-  const f = view(fixtureLongReview());
-  for (const [width, height] of [[1, 1], [24, 2], [32, 10], [80, 24], [120, 40]]) {
-    f.terminal.rows = height!;
-    const lines = f.component.render(width!);
-    assert.ok(lines.length <= height!); assert.ok(lines.every((line) => visibleWidth(line) <= width!));
-  }
-  f.terminal.rows = 10; f.component.handleInput("g");
-  let observed = "";
-  for (let n = 0; n < 200; n++) { observed += f.component.render(32).join("\n") + "\n"; f.component.handleInput("\x1b[6;5~"); }
-  for (let n = 0; n < 60; n++) assert.ok(observed.includes(n % 2 ? `warning-${n}` : `host-${n}.example`), String(n));
-  f.component.handleInput("j"); f.terminal.rows = 2; f.component.render(24); f.component.handleInput("\r"); assert.deepEqual(f.results, [false]);
-});
-
-test("settings approval: uses injected selector keybindings and keeps custom navigation hints", () => {
-  const custom = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "ctrl+n", "tui.select.confirm": "ctrl+y" });
-  const results: boolean[] = [];
-  const component = new SettingsApproval(reviewLines("review"), { terminal: { rows: 24, columns: 80 }, requestRender() {} } as any, theme, custom, (value) => results.push(value));
-  assert.match(component.render(80).join("\n"), /ctrl\+y select/);
-  component.handleInput("\x0e"); component.handleInput("\x19"); assert.deepEqual(results, [true]);
-});
-
-test("settings approval: abort closes compact custom overlay, cleans listener; errors never downgrade to native title", async () => {
-  const abort = new AbortController(); let finished = 0; let selected = 0; let component: SettingsApproval | undefined;
-  let ready!: () => void; const opened = new Promise<void>((resolve) => { ready = resolve; });
-  const ctx = { hasUI: true, mode: "tui", ui: {
-    custom: async (factory: any, options: any) => new Promise<boolean>((resolve) => {
-      component = factory({ terminal: { rows: 24, columns: 80 }, requestRender() {} }, theme, keys, (value: boolean) => { finished++; resolve(value); });
-      assert.equal(options.overlay, true); assert.deepEqual(options.overlayOptions(), { anchor: "bottom-center", width: "100%", maxHeight: 20, margin: 0 }); ready();
-    }),
-    select: async () => { selected++; return "Yes"; },
-  } } as unknown as ExtensionContext;
-  const pending = approveSettings(ctx, reviewLines("review"), abort.signal); await opened; abort.abort();
-  assert.equal(await pending, false); component!.dispose(); abort.abort(); assert.equal(finished, 1); assert.equal(selected, 0);
-  ctx.ui.custom = async () => { throw new Error("custom failure"); };
-  await assert.rejects(approveSettings(ctx, reviewLines("review"), new AbortController().signal), /custom failure/); assert.equal(selected, 0);
-});
-
-test("settings approval: only interactive RPC/TUI supports mutation approval", async () => {
-  let calls = 0;
-  for (const mode of ["print", "json"] as const) {
-    const ctx = { hasUI: true, mode, ui: { select: async () => { calls++; return "Yes"; } } } as unknown as ExtensionContext;
-    assert.equal(await approveSettings(ctx, reviewLines("review"), new AbortController().signal), false);
-  }
-  assert.equal(calls, 0);
-});
-
-test("settings approval: RPC question uses compact plain diff, No first and explicit Yes only", async () => {
-  for (const answer of [undefined, "No", "Approve", "Yes"]) {
-    let text = "";
-    const ctx = { hasUI: true, mode: "rpc", ui: { select: async (title: string, choices: string[]) => {
-      text = title; assert.deepEqual(choices, ["No", "Yes"]); return answer;
-    } } } as unknown as ExtensionContext;
-    assert.equal(await approveSettings(ctx, [{ kind: "removed", label: "cpus", text: "2" }, { kind: "added", label: "cpus", text: "4" }], new AbortController().signal), answer === "Yes");
-    assert.match(text, /Allow configuration change\?\n\n- cpus: 2\n\+ cpus: 4/); assert.doesNotMatch(text, /\x1b|"before"|"after"/);
-  }
-});
-
-
-test("settings approval: shrinking below the usable size rejects even before the resize repaint", () => {
-  const f = view(); f.component.render(80); f.component.handleInput("j");
-  f.terminal.rows = 2; f.terminal.columns = 24;
-  f.component.handleInput("\r"); assert.deepEqual(f.results, [false]);
-});
 
 for (const [scope, label] of [["session", "Session"], ["project", "Project"], ["global", "Global"]]) {
-  test(`settings approval: exact Scope: ${label} line in compact TUI and RPC`, async () => {
-    const review = settingsDiff({ scope, focus: [{ path: "cpus", deltas: [{ field: "cpus", before: 2, after: 4 }], inheritedDeltas: [], reconciledDeltas: [], hostBypass: [], changed: true, effectiveChanged: true }], collections: [], shadowed: [] });
-    const f = view(review);
-    const rows = f.component.render(80).map((line) => line.trim());
-    assert.ok(rows.includes(`Scope: ${label}`));
-    assert.ok(rows.includes("CPUs"));
-    f.component.handleInput("\r"); assert.deepEqual(f.results, [false]);
-    const ctx = { hasUI: true, mode: "rpc", ui: { select: async (title: string, choices: string[]) => {
-      assert.ok(title.split("\n").includes(`Scope: ${label}`)); assert.deepEqual(choices, ["No", "Yes"]); return "No";
-    } } } as unknown as ExtensionContext;
-    assert.equal(await approveSettings(ctx, review, new AbortController().signal), false);
+  test(`settings approval: standalone Scope: ${label} in native TUI and RPC question`, async () => {
+    const lines = settingsDiff({ scope, focus: [{ path: "cpus", deltas: [{ field: "cpus", before: 2, after: 4 }], inheritedDeltas: [], reconciledDeltas: [], hostBypass: [], changed: true, effectiveChanged: true }], collections: [], shadowed: [] });
+    for (const mode of ["tui", "rpc"]) {
+      const ctx = context(mode, async (title) => {
+        assert.ok(title.split("\n").includes(mode === "tui" ? `<muted>Scope: </muted><warning>${label}</warning>` : `Scope: ${label}`));
+        assert.match(title, /CPUs/); return "No";
+      });
+      assert.equal(await approveSettings(ctx, lines, new AbortController().signal), false);
+    }
   });
 }

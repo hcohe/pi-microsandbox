@@ -16,6 +16,7 @@ import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
 import { registerConfigTools } from "./settings-tools.ts";
+import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 import { registerSandboxTools } from "./tools.ts";
 import { displayId, type ResolvedConfig, type RuntimeState } from "./types.ts";
 
@@ -156,8 +157,14 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     }
   });
 
+  const warnSessionReset = (ctx: ExtensionContext): void => {
+    if (ctx.hasUI && Object.keys(integration.control.settings?.temporary() ?? {}).length) {
+      try { ctx.ui.notify(`Session sandbox overrides are being cleared. ${SESSION_LIFETIME_WARNING}`, "warning"); } catch { /* Notification failure must not prevent teardown. */ }
+    }
+  };
   pi.on("session_shutdown", async (_event, ctx) => {
     await closeControlPanel();
+    warnSessionReset(ctx);
     integration.endSession();
     stopBootAnimation();
     await integration.manager.shutdown();
@@ -174,6 +181,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     if (!currentContext) return;
     if (ctx.sessionManager.getSessionId() !== currentSessionId || ctx.cwd !== currentCwd) {
       await closeControlPanel();
+      warnSessionReset(ctx);
       integration.endSession();
       currentContext = ctx;
       currentSessionId = ctx.sessionManager.getSessionId();

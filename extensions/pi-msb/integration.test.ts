@@ -315,6 +315,52 @@ test("network and port behavior remains independent of workspace storage", async
   await integration.manager.shutdown();
 });
 
+test("network uses exact domains; wildcard secret destinations stay separate from network rules", async (t) => {
+  const root = await temp(t, "exact-domains"); const calls: string[] = [];
+  const sdk = fakeSdk(calls);
+  const policy: any = {
+    defaultDeny() { calls.push("default-deny"); return policy; }, defaultIngress: () => policy,
+    egress(configure: (rule: any) => void) {
+      const rule: any = { allow(configure: (destination: any) => void) {
+        const destination: any = {
+          domain(host: string) { calls.push(`domain:${host}`); return destination; },
+          ip(host: string) { calls.push(`ip:${host}`); return destination; },
+          cidr(host: string) { calls.push(`cidr:${host}`); return destination; },
+        };
+        configure(destination); return rule;
+      } };
+      configure(rule); return policy;
+    },
+  };
+  sdk.NetworkPolicy = { builder: () => policy };
+  const builder = sdk.Sandbox.builder;
+  sdk.Sandbox.builder = (...args: any[]) => {
+    const value = builder(...args);
+    value.secret = (configure: (entry: any) => void) => {
+      const entry: any = { env: () => entry, value: () => entry, requireTlsIdentity(required: boolean) { assert.equal(required, true); return entry; },
+        allowHost(host: string) { calls.push(`secret-host:${host}`); return entry; },
+        allowHostPattern(host: string) { calls.push(`secret-pattern:${host}`); return entry; },
+      };
+      configure(entry); return value;
+    };
+    return value;
+  };
+  const integration = createMsbIntegration({ sessionId: "exact", cwd: root, configDirName: ".pi", sdkLoader: async () => sdk,
+    acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => {} }) });
+  t.after(() => integration.manager.shutdown());
+  const state = await integration.configureSession({ sessionId: "exact", cwd: root, projectTrusted: true, config: resolved(config({
+    network: { mode: "allowlist", allowHosts: ["github.com", "api.github.com", "127.0.0.1", "2001:db8::/32"], allowDns: false, publishPorts: [] },
+    secrets: [{ env: "TOKEN", value: "synthetic-private", allowHosts: ["github.com", "other.example", "*.googleapis.com"] }],
+  })) });
+  assert.equal(state.status, "active");
+  assert.ok(calls.includes("default-deny"));
+  assert.deepEqual(calls.filter((call) => /^(domain|ip|cidr):/.test(call)), ["domain:github.com", "domain:api.github.com", "ip:127.0.0.1", "cidr:2001:db8::/32"]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("secret-host:")), ["secret-host:github.com", "secret-host:other.example"]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("secret-pattern:")), ["secret-pattern:*.googleapis.com"]);
+  assert.ok(!calls.includes("domain:other.example"));
+  assert.ok(!calls.includes("domain:*.googleapis.com"));
+});
+
 test("temporary control edits are memory-only, validated atomically, and reset at session boundaries", async (t) => {
   const root = await temp(t, "temporary-control");
   const cwd = join(root, "workspace"); await mkdir(cwd);

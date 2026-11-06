@@ -58,17 +58,35 @@ Run `just dev-image` by itself when you only need to refresh the local image.
 
 `settings-tools.ts` registers `msb_config_get` and `msb_config_set`; the latter
 revalidates runtime arguments inside execute and always requests explicit
-approval. `settings-json.ts` is the strict JSON/redaction boundary, and
-`settings-approval.ts` uses public DynamicBorder/Text/SelectList components for a
-compact HOST-question-style No-first prompt (native No/Yes selector in RPC).
-A bottom overlay with explicit bounds prevents custom docks from clipping consent;
-short reviews use natural height and long ones scroll without hiding controls. `settings-diff.ts`
+approval. Single operations and ordered same-scope batches share one draft,
+combined approval, atomic commit and at most one reload. `settings-schema.ts`
+provides static leaf schemas/capabilities and safe desired/adopted network policy
+summaries; `network-domains.ts` centralizes exact DNS names, secret-only leading
+`*.` wildcard scopes, and network-only IP/CIDR rules. `settings-json.ts` is the strict JSON/redaction boundary, and
+`settings-approval.ts` uses the public `ctx.ui.select(question, ["No", "Yes"], {signal})`
+API in TUI and RPC, like HOST-command approval. It passes the complete masked diff
+and nonwarning context, filtering only semantic `kind === "warning"` lines, using
+public `ctx.ui.theme` in TUI and plain text in RPC. Scope names retain the theme's
+warning color with a muted `Scope:` label; color is not the warning filter.
+There is no extension overlay, pagination or read-to-end gate; Pi owns native
+layout, which does not guarantee all long-question lines are visible. `settings-diff.ts`
 shares semantic added/removed/context/warning lines across TUI, plain-text RPC,
-and setter results. Build display data only from the sanitized approval-bound
-review: private comparisons in SettingsDraft emit changed-field metadata before
-credential masking, not raw arguments or credential/reference text. The setter's
-public tool renderers never echo arguments or dump review JSON; getter output
-remains full JSON. Print/JSON/no-UI modes cannot mutate. The panel and tool share one editor modal lease. Tools use
+and setter results. Generation and review metadata retain all warnings. Model-facing
+setter text includes them for applied/no-op and saved-but-reload-failed outcomes;
+the latter retains the approved sanitized review and clearly denies full activation.
+The tool description asks the agent to explain relevant returned warnings after
+completion. Human setter result renderers filter warning kinds too. Build display
+data only from the sanitized approval-bound review: private comparisons in
+SettingsDraft emit changed-field metadata before credential masking, not raw arguments or credential/reference text. The setter's
+public tool renderers never echo arguments or dump review JSON.
+`settings-inspection.ts` validates section/path filters inside execute, filters
+only agent-safe projections, keeps selected structured JSON and produces bounded
+readable text (optional indented JSON). Schema caching is caller-controlled via
+`knownSchemaVersion`; update the discovery version when its contract changes.
+`settings-validation.ts` maps only known error prefixes to static schemas and
+zero-based operation indices; never forward ConfigError messages or inputs.
+`settings-safety.ts` shares Session-reset, reconnection and DNS/IP guidance across
+reports, approval and the panel; shutdown warnings must not prevent cleanup. Print/JSON/no-UI modes cannot mutate. The panel and tool share one editor modal lease. Tools use
 the same SettingsDraft CRUD, validation, atomic persistence and controller reload
 rather than their own writer. Read/proposal construction must never bootstrap.
 
@@ -83,8 +101,10 @@ Real-loader tests include a symlinked package entry and duplicate-winning foreig
 registrations under both selected runtimes. `control-panel-runtime.test.ts` also executes both actual
 loaded config tools using the native context and both terminal renderers,
 including actual theme diff colors, compact masked secret edits/rotations,
-quiet setter call/result rendering, scrollable review, No default, Escape,
-abort, deliberate approval, wrapped/narrow/tall/resize composition, live/restart fake-SDK reconciliation and
+quiet setter call/result rendering, complete warning-free native-selector diff payloads,
+plain agent-text warnings (including no-op and saved-but-reload-failed outcomes),
+No default, Escape, abort, immediate long-review approval, native layout on resize,
+live/restart fake-SDK reconciliation and
 focus restoration. SDK/terminals are
 doubled; none of these tests executes a live VM. Set `PI_PACKAGE_DIR` to this
 checkout's pinned coding-agent package when running direct Node tests so an

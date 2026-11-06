@@ -64,6 +64,11 @@ extensions/pi-msb/settings-json.ts required
 extensions/pi-msb/settings-redaction.ts required
 extensions/pi-msb/settings-approval.ts required
 extensions/pi-msb/settings-tools.ts required
+extensions/pi-msb/settings-schema.ts required
+extensions/pi-msb/settings-inspection.ts required
+extensions/pi-msb/settings-validation.ts required
+extensions/pi-msb/settings-safety.ts required
+extensions/pi-msb/network-domains.ts required
 extensions/pi-msb/settings-fields.ts required
 extensions/pi-msb/settings-input.ts required
 extensions/pi-msb/masked-input.ts required

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Check } from "typebox/value";
 import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
 import { openControlPanel } from "./control-panel.ts";
 import { createMsbIntegration } from "./control.ts";
@@ -41,13 +42,330 @@ async function fixture(t: TestContext, missing = false) {
   const ctx = { hasUI: true, mode: "rpc", cwd, sessionManager: { getSessionId: () => id }, ui: { select: async (title: string, options: string[], opts: { signal?: AbortSignal }) => {
     reviews.push(title); assert.deepEqual(options, ["No", "Yes"]); return select(title, options, opts.signal);
   } } } as unknown as ExtensionContext;
-  const call = async (params: unknown, signal?: AbortSignal) => tools.get("msb_config_set")!.execute("id", params as any, signal, undefined, ctx) as Promise<{ details: any; content: any[] }>;
-  const get = async () => tools.get("msb_config_get")!.execute("get", {}, undefined, undefined, ctx) as Promise<{ details: any; content: any[] }>;
-  return { root, cwd, input, paths, editor, control, tools, ctx, reviews, call, get, reloads: () => reloads, failReload: () => { failReload = true; },
+  const resultTexts: string[] = [];
+  const call = async (params: unknown, signal?: AbortSignal) => {
+    const tool = tools.get("msb_config_set")!;
+    const result = await tool.execute("id", params as any, signal, undefined, ctx) as { details: any; content: any[] };
+    resultTexts.push(result.content[0].text);
+    if (result.details.review) {
+      const lines = settingsDiff(result.details.review);
+      assert.equal(reviews.at(-1), ["Allow configuration change?", "", ...formatSettingsDiff(lines.filter((line) => line.kind !== "warning"))].join("\n"));
+      assert.equal(result.content[0].text.split("\n").slice(1).join("\n"), formatSettingsDiff(lines).join("\n"));
+      assert.doesNotMatch(result.content[0].text, /\x1b/);
+      const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as any;
+      for (const expanded of [false, true]) {
+        const human = tool.renderResult!(result, { expanded, isPartial: false }, theme, {} as any).render(10000).join("\n");
+        for (const warning of lines.filter((line) => line.kind === "warning")) {
+          assert.ok(result.content[0].text.includes(warning.text));
+          assert.ok(!reviews.at(-1)!.includes(warning.text));
+          assert.ok(!human.includes(warning.text));
+        }
+      }
+    }
+    return result;
+  };
+  const get = async (params: unknown = {}) => tools.get("msb_config_get")!.execute("get", params as any, undefined, undefined, ctx) as Promise<{ details: any; content: any[] }>;
+  return { root, cwd, input, paths, editor, control, tools, ctx, reviews, resultTexts, call, get, reloads: () => reloads, failReload: () => { failReload = true; },
     choose: (callback: typeof select) => { select = callback; }, switchContext: () => { id = "two"; }, adopt: (policy: RuntimePolicySnapshot) => { adopted = policy; } };
 }
 const set = (scope = "session", path = "show_footer", value: unknown = false) => ({ scope, path, operation: "set", value });
 const noPrivate = (value: unknown) => assert.doesNotMatch(JSON.stringify(value), /PRIVATE_SENTINEL|\$ENV:|\$FILE:|\/private\/reference|UNRECOGNIZED_RAW_VALUE/);
+const batch = (scope = "session", operations: unknown[] = [
+  { path: "network.allow_hosts", operation: "set", value: ["registry.npmjs.org", "github.com"] },
+  { path: "network.mode", operation: "set", value: "allowlist" },
+]) => ({ scope, operations });
+
+test("inspection filters select sections and leaves after redaction; default text and optional JSON are readable", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nnetwork.mode = "allowlist"\nnetwork.allow_hosts = ["github.com"]\nnetwork.remove_allow_hosts = ["old.example"]\nsecrets = [{env="TOKEN",value="PRIVATE_SENTINEL",allow_hosts=["api.example"]}]\n');
+  const got = await f.get({ sections: ["desired", "layers", "origins", "schema"], paths: ["network"] });
+  assert.equal(got.details.outcome, "inspected"); noPrivate(got);
+  assert.deepEqual(Object.keys(got.details.desired), ["network"]);
+  assert.equal(got.details.runtime, undefined); assert.equal(got.details.summary, undefined); assert.equal(got.details.capabilities, undefined);
+  assert.deepEqual(got.details.layers.global.network.remove_allow_hosts, ["old.example"]);
+  assert.ok(Object.keys(got.details.origins).every((path) => path.startsWith("network.")));
+  assert.ok(Object.keys(got.details.provenance).every((path) => path.startsWith("network.")));
+  assert.ok(got.details.supportedPaths.every((path: string) => path.startsWith("network.")));
+  assert.ok(Object.keys(got.details.settingsSchema).every((path) => path.startsWith("network.")));
+  assert.match(got.content[0].text, /Desired settings \(intent, not enforcement\)/);
+  assert.match(got.content[0].text, /mode: allowlist/); assert.doesNotMatch(got.content[0].text, /^\{"outcome"/);
+  const json = await f.get({ sections: ["desired"], paths: ["cpus"], format: "json" });
+  assert.deepEqual(json.details.desired, { cpus: 3 });
+  assert.deepEqual(JSON.parse(json.content[0].text), json.details); assert.match(json.content[0].text, /\n  "desired"/);
+  assert.equal(f.reloads(), 0); assert.equal(f.reviews.length, 0);
+});
+
+test("inspection schema cache is caller-controlled, versioned and supports an explicit schema-only query", async (t) => {
+  const f = await fixture(t, true); f.ctx.hasUI = false;
+  const discovered = await f.get({ sections: ["schema", "capabilities"], paths: ["cpus"] });
+  assert.equal(discovered.details.schemaVersion, discovered.details.capabilities.version);
+  assert.deepEqual(Object.keys(discovered.details.settingsSchema), ["cpus"]);
+  const cached = await f.get({ knownSchemaVersion: discovered.details.schemaVersion });
+  assert.equal(cached.details.schemaUnchanged, true); assert.equal(cached.details.settingsSchema, undefined); assert.equal(cached.details.capabilities, undefined);
+  assert.ok(cached.details.desired); assert.match(cached.content[0].text, /cached discovery omitted/);
+  const stale = await f.get({ sections: ["schema"], knownSchemaVersion: discovered.details.schemaVersion - 1 });
+  assert.ok(stale.details.settingsSchema); assert.equal(stale.details.schemaUnchanged, undefined);
+  await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+});
+
+test("inspection rejects mutated/unknown filters without echoing input or reading settings", async (t) => {
+  const f = await fixture(t, true); let reads = 0;
+  f.control.settings!.inspect = async () => { reads++; throw new Error("PRIVATE_SENTINEL"); };
+  for (const value of [null, { sections: [] }, { sections: ["PRIVATE_SENTINEL"] }, { paths: [] }, { paths: ["secrets[PRIVATE_SENTINEL]"] }, { paths: ["network", "constructor"] }, { format: "PRIVATE_SENTINEL" }, { knownSchemaVersion: 0 }, { knownSchemaVersion: 1.5 }, { unknown: "PRIVATE_SENTINEL" }]) {
+    const got = await f.get(value); assert.equal(got.details.outcome, "rejected"); noPrivate(got);
+  }
+  assert.equal(reads, 0); assert.equal(f.reloads(), 0);
+});
+
+test("filtered JSON/text and getter renderers preserve credential/reference redaction and reject foreign errors", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="TOKEN",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["api.example"]}]\n');
+  const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as any;
+  const tool = f.tools.get("msb_config_get")!;
+  noPrivate(tool.renderCall!({ paths: ["PRIVATE_SENTINEL"] } as any, theme, {} as any).render(100));
+  for (const format of ["text", "json"]) {
+    const got = await f.get({ sections: ["desired", "layers", "runtime", "policy"], paths: ["secrets"], format }); noPrivate(got);
+    for (const expanded of [false, true]) noPrivate(tool.renderResult!(got, { expanded, isPartial: false }, theme, {} as any).render(100));
+    assert.equal(got.details.desired.secrets[0].value, "<redacted>");
+  }
+  const failed = tool.renderResult!({ content: [{ type: "text", text: "PRIVATE_SENTINEL" }], details: {} } as any, { expanded: true } as any, theme, { isError: true } as any).render(100).join("\n");
+  noPrivate(failed); assert.match(failed, /inspection failed/);
+});
+
+test("runtime path filtering cannot turn partial/reconnected fields into proof of network enforcement", async (t) => {
+  const f = await fixture(t);
+  f.control.getAgentRuntimePolicy = () => ({ settings: { network: { mode: "allowlist", allow_hosts: ["github.com"], allow_dns: true, publish_ports: [] } }, knownFields: ["network"], provenance: { "network.mode": "temporary" }, verification: "created", adoptedAt: 1 });
+  const filtered = await f.get({ sections: ["runtime"], paths: ["network.mode"] });
+  assert.deepEqual(filtered.details.runtime.adopted.settings, { network: { mode: "allowlist" } });
+  assert.equal(filtered.details.runtime.networkVerification.known, true);
+  f.control.getAgentRuntimePolicy = () => ({ settings: { cpus: 2 }, knownFields: ["cpus"], provenance: {}, verification: "reconnected", adoptedAt: 2 });
+  const got = await f.get({ sections: ["summary", "policy", "runtime"] });
+  assert.equal(got.details.effectivePolicy.adopted, null);
+  assert.equal(got.details.runtime.networkVerification.known, false);
+  assert.match(got.content[0].text, /not read back/); assert.match(got.content[0].text, /Inspection never restarts/);
+  assert.match(got.content[0].text, /no-op edits/); assert.equal(f.reloads(), 0);
+});
+
+test("precise batch validation returns zero-based operation index, safe path and expected schema without values", async (t) => {
+  const f = await fixture(t);
+  const got = await f.call(batch("session", [{ path: "show_footer", operation: "set", value: false }, { path: "cpus", operation: "set", value: 0 }]));
+  assert.equal(got.details.outcome, "rejected");
+  assert.equal(got.details.validation[0].operationIndex, 1); assert.equal(got.details.validation[0].path, "cpus");
+  assert.equal(got.details.validation[0].code, "invalid_value"); assert.equal(got.details.validation[0].expectedSchema.minimum, 1);
+  assert.match(got.content[0].text, /Operation 2 \(cpus\)/);
+  const bad = await f.call(batch("session", [{ path: "cpus", operation: "set" }, { path: "PRIVATE_SENTINEL", operation: "set", value: "PRIVATE_SENTINEL" }]));
+  assert.equal(bad.details.validation[0].operationIndex, 0); assert.equal(bad.details.validation[0].code, "invalid_value_argument"); noPrivate(bad);
+  const unknown = await f.call({ scope: "session", path: "PRIVATE_SENTINEL", operation: "set", value: "PRIVATE_SENTINEL" });
+  assert.equal(unknown.details.validation[0].path, undefined); noPrivate(unknown);
+  const secret = await f.call(batch("session", [{ path: "show_footer", operation: "set", value: false }, { path: "secrets", operation: "upsert", value: { env: "TOKEN", value: "$ENV:PRIVATE_SENTINEL", allowHosts: ["*.*.example.com"] } }]));
+  assert.equal(secret.details.validation[0].operationIndex, 1); assert.equal(secret.details.validation[0].path, "secrets");
+  assert.equal(secret.details.validation[0].code, "invalid_domain"); assert.match(secret.content[0].text, /No URLs, ports/); noPrivate(secret);
+  assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
+});
+
+test("secret wildcard destinations can be set and upserted without granting network access", async (t) => {
+  const f = await fixture(t);
+  const secret = { env: "TOKEN", value: "$ENV:PRIVATE_SENTINEL", allowHosts: ["*.googleapis.com"] };
+  const initial = await f.call(set("session", "secrets", [secret]));
+  assert.equal(initial.details.outcome, "applied"); noPrivate(initial);
+  const update = await f.call({ scope: "session", path: "secrets", operation: "upsert",
+    value: { env: "TOKEN", allowHosts: ["*.googleapis.com", "googleapis.com"] } });
+  assert.equal(update.details.outcome, "applied"); noPrivate(update);
+  assert.deepEqual(f.editor.temporary().secrets![0]!.allowHosts, ["*.googleapis.com", "googleapis.com"]);
+  assert.equal(f.editor.temporary().secrets![0]!.value, "$ENV:PRIVATE_SENTINEL");
+  const policy = (await f.get({ sections: ["policy"] })).details.effectivePolicy.desired;
+  assert.equal(policy.secretInjection.grantsNetworkAccess, false);
+  assert.deepEqual(policy.secretInjection.destinations, [{ env: "TOKEN", allowHosts: ["*.googleapis.com", "googleapis.com"] }]);
+  assert.deepEqual(policy.allowedDestinations, []);
+});
+
+test("cross-field validation identifies related operations instead of falsely blaming one entry", async (t) => {
+  const f = await fixture(t);
+  const got = await f.call(batch("session", [{ path: "network.mode", operation: "set", value: "allowlist" }, { path: "network.allow_dns", operation: "set", value: false }]));
+  assert.equal(got.details.validation[0].code, "cross_field_constraint");
+  assert.equal(got.details.validation[0].operationIndex, null); assert.deepEqual(got.details.validation[0].relatedOperations, [0, 1]);
+  assert.match(got.content[0].text, /Final candidate \(network\)/); assert.equal(f.reviews.length, 0);
+});
+
+test("Session setter text and getter summaries warn about Pi reload/reset without implying settings reload clears overrides", async (t) => {
+  const f = await fixture(t); await f.call(batch());
+  assert.match(f.resultTexts[0]!, /Pi \/reload/); assert.match(f.resultTexts[0]!, /inherited defaults return/i);
+  assert.match(f.resultTexts[0]!, /Settings reload does not clear/); assert.match(f.resultTexts[0]!, /Choose Project or Global explicitly/);
+  assert.match(f.resultTexts[0]!, /DNS\/IP/); assert.match(f.resultTexts[0]!, /DNS exfiltration/);
+  const got = await f.get({ sections: ["summary"] });
+  assert.equal(got.details.summary.sessionLifetime.overridesPresent, true);
+  assert.deepEqual(got.details.summary.sessionLifetime.persistentScopes, ["project", "global"]);
+  assert.equal(got.details.layers, undefined); assert.match(got.content[0].text, /Pi \/reload/);
+  const temporary = f.editor.temporary(); await f.control.reload(); assert.deepEqual(f.editor.temporary(), temporary);
+});
+
+test("discovery: every leaf has value schema, constraints, operations, scopes and impact without source reads", async (t) => {
+  const f = await fixture(t, true); f.ctx.hasUI = false;
+  const got = await f.get(); const schema = got.details.settingsSchema;
+  assert.deepEqual(Object.keys(schema), [...SETTINGS_PATHS]);
+  for (const field of Object.values(schema) as any[]) {
+    assert.ok(field.description); assert.ok(field.valueSchema.type);
+    assert.deepEqual(field.scopes, ["session", "project", "global"]);
+    assert.ok(field.operations.includes("set")); assert.ok(field.operations.includes("inherit"));
+    assert.ok(["live", "restart"].includes(field.effect));
+  }
+  assert.deepEqual(schema["network.mode"].valueSchema.enum, ["default", "open", "allowlist", "deny"]);
+  assert.match(schema["network.mode"].choices.allowlist, /Restrict outbound hosts/);
+  assert.equal(schema.cpus.valueSchema.maximum, 64); assert.equal(schema.memory_mib.valueSchema.minimum, 128);
+  assert.equal(schema["docker.startup_timeout_ms"].valueSchema.type, "integer");
+  assert.deepEqual(schema.secrets.upsertSchema.required, ["env", "allowHosts"]);
+  assert.deepEqual(schema.secrets.valueSchema.items.required, ["env", "allowHosts", "value"]);
+  assert.equal(schema.show_footer.effect, "live"); assert.equal(schema["network.mode"].effect, "restart");
+  assert.match(schema["network.allow_hosts"].semantics.wildcards, /Rejected in network.allow_hosts/);
+  assert.deepEqual(schema.secrets.upsertSchema.properties.allowHosts.items.anyOf[0], schema["network.allow_hosts"].semantics.domainFormat);
+  assert.equal(Check(schema.secrets.upsertSchema.properties.allowHosts.items, "*.googleapis.com"), true);
+  assert.match(got.details.capabilities.network.hostMatching.dnsNames, /no automatic subdomains/);
+  assert.match(got.details.capabilities.network.secrets, /not egress authorization/);
+  assert.equal(got.details.capabilities.mutation.batch.maxReloads, 1);
+  assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0);
+  await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" }); noPrivate(got);
+});
+
+test("discovery survives invalid desired configuration without leaking parser input", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'network.allow_hosts = ["*.github.com"]\n');
+  const got = await f.get(); assert.equal(got.details.outcome, "rejected");
+  assert.ok(got.details.settingsSchema["network.allow_hosts"]);
+  assert.match(got.details.capabilities.network.hostMatching.wildcards, /Rejected in network.allow_hosts/);
+  assert.equal(got.details.desired, undefined); assert.equal(f.reloads(), 0);
+});
+
+test("registered setter schema accepts either single or batch form, rejects mixed and empty forms", async (t) => {
+  const f = await fixture(t); const parameters = f.tools.get("msb_config_set")!.parameters;
+  assert.equal(Check(parameters, set()), true); assert.equal(Check(parameters, batch()), true);
+  for (const input of [{ scope: "session" }, batch("session", []), { ...batch(), ...set() }, batch("session", [{ ...set(), scope: "global" }])]) assert.equal(Check(parameters, input), false);
+});
+
+test("effective policy: desired versus adoption, DNS exceptions and secret scopes are distinct", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nnetwork.mode = "allowlist"\nnetwork.allow_hosts = ["github.com", "api.github.com", "10.0.0.0/8"]\nsecrets = [{env="TOKEN",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["other.example"]}]\n');
+  let got = await f.get(); let policy = got.details.effectivePolicy;
+  assert.equal(policy.adopted, null); assert.equal(policy.desired.egress, "default-deny");
+  assert.deepEqual(policy.desired.allowedDestinations.map((item: any) => item.matcher), ["sdk-domain-exact", "sdk-domain-exact", "sdk-cidr"]);
+  assert.deepEqual(policy.desired.dns.explicitRule, { destination: "sdk-host", protocols: ["tcp", "udp"], port: 53 });
+  assert.equal(policy.desired.secretInjection.grantsNetworkAccess, false);
+  assert.deepEqual(policy.desired.secretInjection.destinations, [{ env: "TOKEN", allowHosts: ["other.example"] }]);
+  assert.equal(JSON.stringify(policy.desired.allowedDestinations).includes("other.example"), false);
+  assert.ok(policy.desired.warnings.some((warning: string) => warning.includes("DNS/IP")));
+  assert.ok(policy.desired.warnings.some((warning: string) => warning.includes("DNS exfiltration"))); noPrivate(got);
+  f.control.getAgentRuntimePolicy = () => ({ settings: { cpus: 2 }, knownFields: ["cpus"], provenance: {}, verification: "reconnected", adoptedAt: 1 });
+  assert.equal((await f.get()).details.effectivePolicy.adopted, null);
+  f.control.getAgentRuntimePolicy = () => ({ settings: { network: { mode: "deny", allow_hosts: [], allow_dns: true, publish_ports: [] } }, knownFields: ["network"], provenance: {}, verification: "created", adoptedAt: 2 });
+  got = await f.get(); policy = got.details.effectivePolicy;
+  assert.equal(policy.adopted.egress, "disabled"); assert.equal(policy.adopted.dns.explicitRule, null);
+  assert.equal(policy.adopted.secretInjection.destinations, null);
+  assert.equal(policy.desired.mode, "allowlist"); assert.equal(policy.runtimeStatus, "off");
+  assert.match(policy.note, /last-known/);
+});
+
+for (const mode of ["default", "open", "deny", "allowlist"]) test(`effective policy: ${mode} does not conflate configured hosts/DNS with active grants`, async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, `auto_start = false\nnetwork.mode = "${mode}"\nnetwork.allow_hosts = ["github.com"]\nnetwork.allow_dns = false\nnetwork.publish_ports = ["0.0.0.0:8080:80"]\n`);
+  const { desired } = (await f.get()).details.effectivePolicy;
+  assert.equal(desired.allowedDestinations.length, mode === "allowlist" ? 1 : 0);
+  assert.equal(desired.dns.explicitRule, null);
+  assert.deepEqual(desired.publishedPorts, ["0.0.0.0:8080:80"]);
+  assert.match(desired.warnings.at(-1), /inbound exposure/);
+});
+
+for (const scope of ["session", "project", "global"]) test(`batch: ${scope} one combined approval, one commit and one reload, no intermediate policy`, async (t) => {
+  const f = await fixture(t);
+  f.choose(async (title) => {
+    assert.match(title, /Network mode/); assert.match(title, /Hosts/);
+    assert.equal((await f.get()).details.desired.network.mode, "default");
+    assert.deepEqual(f.editor.temporary(), {}); assert.equal(f.reloads(), 0);
+    return "Yes";
+  });
+  const got = await f.call(batch(scope));
+  assert.equal(got.details.outcome, "applied"); assert.equal(f.reviews.length, 1); assert.equal(f.reloads(), 1);
+  assert.equal(got.details.review.focus.length, 2);
+  assert.equal(got.content[0].text.split("Restart:").length - 1, 1);
+  const read = await f.get(); assert.equal(read.details.desired.network.mode, "allowlist");
+  assert.deepEqual(read.details.desired.network.allow_hosts, ["registry.npmjs.org", "github.com"]);
+  assert.equal(read.details.layers[scope].network.mode, "allowlist");
+  for (const other of ["session", "project", "global"].filter((item) => item !== scope)) assert.equal(read.details.layers[other].network, undefined);
+});
+
+test("batch: ordered operations validate the final candidate, not invalid intermediate cross-field states", async (t) => {
+  const f = await fixture(t);
+  const got = await f.call(batch("session", [
+    { path: "network.allow_dns", operation: "set", value: false },
+    { path: "network.mode", operation: "set", value: "allowlist" },
+    { path: "network.allow_hosts", operation: "upsert", value: "old.example" },
+    { path: "network.allow_hosts", operation: "upsert", value: "github.com", previousIdentity: "old.example" },
+    { path: "cpus", operation: "set", value: 2 },
+    { path: "cpus", operation: "inherit" },
+  ]));
+  assert.equal(got.details.outcome, "applied"); assert.equal(f.reviews.length, 1); assert.equal(f.reloads(), 1);
+  assert.deepEqual((await f.get()).details.desired.network.allow_hosts, ["github.com"]);
+  assert.equal(f.editor.temporary().cpus, undefined);
+});
+
+test("batch: strict execute-time validation rejects mixed shapes, nested scope, empty/oversized and invalid final values atomically", async (t) => {
+  const f = await fixture(t);
+  const invalid = [batch("session", []), batch("session", Array.from({ length: 65 }, () => ({ path: "cpus", operation: "set", value: 2 }))),
+    { ...batch(), path: "cpus" }, { ...batch(), auto_approve: true }, { ...batch(), value: 2 },
+    batch("session", [{ scope: "global", path: "cpus", operation: "set", value: 2 }]),
+    batch("session", [null]), batch("session", [{ path: "cpus", operation: "remove", identity: "x" }]),
+    batch("session", [{ path: "show_footer", operation: "set", value: false }, { path: "cpus", operation: "set", value: 0 }]),
+    batch("session", [{ path: "network.mode", operation: "set", value: "allowlist" }, { path: "network.allow_dns", operation: "set", value: false }]),
+    batch("project", [{ path: "sandbox_name", operation: "set", value: null }]),
+    batch("session", [{ path: "network.allow_hosts", operation: "set", value: ["*.github.com"] }]),
+    batch("session", [{ path: "secrets", operation: "upsert", value: { env: "A", value: "PRIVATE_SENTINEL", allowHosts: ["api*.github.com"] } }]),
+  ];
+  for (const proposal of invalid) assert.equal((await f.call(proposal)).details.outcome, "rejected", JSON.stringify(proposal));
+  assert.equal(f.reviews.length, 0); assert.equal(f.reloads(), 0); assert.deepEqual(f.editor.temporary(), {});
+  assert.equal(await readFile(f.paths.global, "utf8"), "auto_start = false\n");
+});
+
+for (const scenario of ["No", "abort", "no UI", "source race", "runtime race"]) test(`batch: ${scenario} cannot partially save or reload`, async (t) => {
+  const f = await fixture(t); const controller = new AbortController();
+  if (scenario === "no UI") f.ctx.hasUI = false;
+  f.choose(async () => {
+    if (scenario === "abort") controller.abort();
+    if (scenario === "source race") await writeFile(f.paths.global, "auto_start = false\ncpus = 2\n");
+    if (scenario === "runtime race") f.control.getAgentRuntimePolicy = () => ({ settings: { cpus: 2 }, knownFields: ["cpus"], provenance: {}, verification: "created", adoptedAt: 2 });
+    return scenario === "No" ? "No" : "Yes";
+  });
+  const got = await f.call(batch(), controller.signal);
+  assert.ok(["cancelled", "conflict", "rejected"].includes(got.details.outcome));
+  assert.deepEqual(f.editor.temporary(), {}); assert.equal(f.reloads(), 0);
+});
+
+test("batch: no-op still approves once; reload failure reports the entire saved candidate without rollback", async (t) => {
+  const f = await fixture(t);
+  const noop = batch("session", [{ path: "cpus", operation: "inherit" }, { path: "memory_mib", operation: "inherit" }]);
+  assert.equal((await f.call(noop)).details.outcome, "no_op"); assert.equal(f.reviews.length, 1); assert.equal(f.reloads(), 0);
+  f.failReload(); const got = await f.call(batch());
+  assert.equal(got.details.outcome, "saved_but_reload_failed"); assert.equal(got.details.saved, true); assert.equal(got.details.reloaded, false);
+  const desired = (await f.get()).details.desired.network;
+  assert.equal(desired.mode, "allowlist"); assert.deepEqual(desired.allow_hosts, ["registry.npmjs.org", "github.com"]);
+  assert.equal(f.reloads(), 1);
+});
+
+test("batch: native secret edits retain credentials, preserve siblings and mask the complete review/results", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.paths.global, 'auto_start = false\nsecrets = [{env="A",value="$ENV:PRIVATE_SENTINEL",allow_hosts=["a.example"]},{env="B",value="B_PRIVATE_SENTINEL",allow_hosts=["b.example"]}]\n');
+  const got = await f.call(batch("session", [
+    { path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["changed.example"] } },
+    { path: "network.allow_hosts", operation: "set", value: ["github.com"] },
+    { path: "network.mode", operation: "set", value: "allowlist" },
+  ]));
+  assert.equal(got.details.outcome, "applied"); noPrivate(got); noPrivate(f.reviews); noPrivate(await f.get());
+  assert.equal(f.editor.temporary().secrets![0]!.value, "$ENV:PRIVATE_SENTINEL");
+  assert.equal(f.editor.temporary().secrets![1]!.value, "B_PRIVATE_SENTINEL");
+  assert.equal(f.reviews.length, 1); assert.equal(f.reloads(), 1);
+  const noResurrection = await f.call(batch("session", [
+    { path: "secrets", operation: "set", value: [] },
+    { path: "secrets", operation: "upsert", value: { env: "A", allowHosts: ["changed.example"] } },
+  ]));
+  assert.equal(noResurrection.details.outcome, "rejected"); assert.equal(f.editor.temporary().secrets!.length, 2);
+});
 
 test("msb_config_get: complete JSON inventory, raw layers, origins and headless read without bootstrap", async (t) => {
   const f = await fixture(t, true); f.ctx.hasUI = false;
@@ -206,12 +524,12 @@ test("msb_config_set: native scalar lists, rename, whole-list replacement/clear 
     { scope: "project", path: "pass_through_tools", operation: "remove", identity: "renamed" },
     set("project", "pass_through_tools", ["replace"]), set("project", "pass_through_tools", []), set("session", "block_third_party", false),
   ]) assert.equal((await f.call(proposal)).details.outcome, "applied");
-  for (const title of f.reviews) {
-    assert.match(title, /HOST/); assert.match(title, /without per-call host approval/);
-    assert.equal(title.includes("These tools run"), !title.includes("Unrecognized tools"));
+  for (const text of f.resultTexts) {
+    assert.match(text, /HOST/); assert.match(text, /without per-call host approval/);
+    assert.equal(text.includes("These tools run"), !text.includes("Unrecognized tools"));
   }
-  assert.match(f.reviews[3]!, /Replaces this scope’s entire list/);
-  assert.match(f.reviews[4]!, /Clears this scope’s entire list/);
+  assert.match(f.resultTexts[3]!, /Replaces this scope’s entire list/);
+  assert.match(f.resultTexts[4]!, /Clears this scope’s entire list/);
 });
 
 for (const [path, before, after, condition] of [
@@ -222,7 +540,34 @@ for (const [path, before, after, condition] of [
   await writeFile(f.paths.project, `${path} = ${JSON.stringify(before)}\n`);
   const got = await f.call(set("project", path, after));
   assert.equal(got.details.outcome, "applied");
-  assert.match(f.reviews.at(-1)!, condition);
+  assert.match(got.content[0].text, condition);
+});
+
+for (const scope of ["session", "project", "global"]) test(`setter channels: ${scope} saved-but-reload-failed returns only the approved sanitized diff and warnings, never activation`, async (t) => {
+  const f = await fixture(t); f.failReload();
+  const hostPath = join(f.root, "data"); await mkdir(hostPath);
+  const proposal = batch(scope, [
+    { path: "auto_start", operation: "set", value: true },
+    { path: "network.allow_hosts", operation: "set", value: ["api.example"] },
+    { path: "network.mode", operation: "set", value: "allowlist" },
+    { path: "pass_through_tools", operation: "set", value: ["trusted"] },
+    { path: "mounts", operation: "upsert", value: { type: "dir", hostPath, guestPath: "/mnt/data", readonly: false, options: [] } },
+    { path: "secrets", operation: "upsert", value: { env: "TOKEN", value: "$ENV:PRIVATE_SENTINEL", allowHosts: ["api.example"] } },
+  ]);
+  f.choose(async () => {
+    proposal.operations.push({ path: "host_env", operation: "set", value: ["UNREVIEWED_PRIVATE_SENTINEL"] });
+    return "Yes";
+  });
+  const got = await f.call(proposal);
+  assert.equal(got.details.outcome, "saved_but_reload_failed");
+  assert.equal(got.details.saved, true); assert.equal(got.details.reloaded, false);
+  assert.equal(f.reloads(), 1); assert.equal(f.control.getEffectiveConfig().config.network.mode, "default");
+  assert.match(got.content[0].text, /saved but not fully activated/);
+  assert.doesNotMatch(got.content[0].text, /Saved · reloaded|runtime active|Host variables/);
+  for (const warning of [/DNS\/IP/, /DNS exfiltration/, /Restart: temporary guest data/, /May start the sandbox/, /without per-call host approval/, /allows changes to HOST files/, /Replaces this scope’s entire list/]) assert.match(got.content[0].text, warning);
+  assert.equal(got.content[0].text.includes("Settings reload does not clear"), scope === "session");
+  assert.match(got.content[0].text, /Credential: <redacted>/); noPrivate(got); noPrivate(f.reviews);
+  assert.match(f.tools.get("msb_config_set")!.description, /After completion, explain relevant returned safety\/impact warnings to the user/);
 });
 
 test("msb_config_set: mount native CRUD retains canonical workspace/symlink/protected-guest safety", async (t) => {
@@ -294,7 +639,7 @@ function assertPrivateChannels(value: { content: unknown; details: unknown }, fo
 
 for (const valueKey of ["value", "VALUE"] as const) for (const source of ["global", "project", "legacy", "environment", "cli"] as const) {
   for (const kind of ["literal", "ENV", "FILE"] as const) {
-    test(`privacy: hidden ${source} ${kind} ${valueKey} credentials mask approval, applied/no-op results and readonly inspection`, async (t) => {
+    test(`privacy: hidden ${source} ${kind} ${valueKey} credentials mask approval, applied/no-op/failed-reload results and readonly inspection`, async (t) => {
       const f = await fixture(t);
       const identifier = kind === "literal" ? "AbcPrivateCredential123" : kind === "ENV" ? "PrivateEnvReference123" : "PrivateFileReference123";
       const credential = kind === "literal" ? identifier : `$${kind}:${identifier}`;
@@ -319,6 +664,8 @@ for (const valueKey of ["value", "VALUE"] as const) for (const source of ["globa
       const initial = await f.get(); assert.equal(initial.details.outcome, "inspected"); assertPrivateChannels(initial, forbidden);
       const applied = await f.call(set(target)); assert.equal(applied.details.outcome, "applied"); assertPrivateChannels(applied, forbidden);
       const noOp = await f.call(set(target)); assert.equal(noOp.details.outcome, "no_op"); assertPrivateChannels(noOp, forbidden);
+      f.failReload(); const failed = await f.call(set(target, "show_footer", true));
+      assert.equal(failed.details.outcome, "saved_but_reload_failed"); assertPrivateChannels(failed, forbidden);
       for (const title of f.reviews) for (const secret of forbidden) assert.equal(title.includes(secret), false);
       const after = await f.get(); assert.equal(after.details.outcome, "inspected"); assertPrivateChannels(after, forbidden);
       assert.ok(applied.details.review.warnings.some((warning: string) => warning.includes("<redacted>")));
@@ -458,7 +805,7 @@ test("compact review: shadowed target baseline and retained higher-scope credent
   const text = f.reviews.at(-1)!; noPrivate(text);
   assert.match(text, /- Hosts: target.example/); assert.match(text, /\+ Hosts: changed.example/);
   assert.match(text, /Credential: <redacted> \(changed\)/);
-  assert.match(text, /Copies this entry from Project into Global/); assert.match(text, /Higher-priority/); assert.match(text, /Higher-priority settings still apply/);
+  assert.match(got.content[0].text, /Copies this entry from Project into Global/); assert.match(got.content[0].text, /Higher-priority/); assert.match(got.content[0].text, /Higher-priority settings still apply/);
   assert.doesNotMatch(text, /higher.example/);
 });
 
@@ -467,15 +814,15 @@ test("compact review: inherit/no-op and shadowed bypass intent keep only relevan
   await writeFile(f.paths.global, 'auto_start = false\ncpus = 3\nblock_third_party = false\n');
   await writeFile(f.paths.project, 'cpus = 4\nblock_third_party = true\n');
   await f.call(set("global", "cpus", 5));
-  assert.match(f.reviews.at(-1)!, /- CPUs: 3\n\+ CPUs: 5/); assert.match(f.reviews.at(-1)!, /Higher-priority/); assert.doesNotMatch(f.reviews.at(-1)!, /HOST|block_third_party/);
+  assert.match(f.reviews.at(-1)!, /- CPUs: 3\n\+ CPUs: 5/); assert.match(f.resultTexts.at(-1)!, /Higher-priority/); assert.doesNotMatch(f.resultTexts.at(-1)!, /HOST|block_third_party/);
   await f.call(set("global", "block_third_party", false));
-  assert.match(f.reviews.at(-1)!, /No change/); assert.match(f.reviews.at(-1)!, /Unrecognized tools can run on the HOST/); assert.match(f.reviews.at(-1)!, /Higher-priority/);
+  assert.match(f.reviews.at(-1)!, /No change/); assert.match(f.resultTexts.at(-1)!, /Unrecognized tools can run on the HOST/); assert.match(f.resultTexts.at(-1)!, /Higher-priority/);
   await f.call({ scope: "project", path: "block_third_party", operation: "inherit" });
-  assert.match(f.reviews.at(-1)!, /Removes this override/); assert.match(f.reviews.at(-1)!, /Inherited changes/);
-  assert.match(f.reviews.at(-1)!, /\+ Block third-party tools: false/); assert.match(f.reviews.at(-1)!, /Unrecognized tools can run on the HOST/);
+  assert.match(f.resultTexts.at(-1)!, /Removes this override/); assert.match(f.reviews.at(-1)!, /Inherited changes/);
+  assert.match(f.reviews.at(-1)!, /\+ Block third-party tools: false/); assert.match(f.resultTexts.at(-1)!, /Unrecognized tools can run on the HOST/);
   await f.call({ scope: "project", path: "block_third_party", operation: "inherit" });
-  assert.match(f.reviews.at(-1)!, /No change/); assert.match(f.reviews.at(-1)!, /HOST/);
-  assert.doesNotMatch(f.reviews.at(-1)!, /pass_through_tools|allow_skill_reads|fallback_mode|Restart/);
+  assert.match(f.reviews.at(-1)!, /No change/); assert.match(f.resultTexts.at(-1)!, /HOST/);
+  assert.doesNotMatch(f.resultTexts.at(-1)!, /pass_through_tools|allow_skill_reads|fallback_mode|Restart/);
 });
 
 test("compact review: native secret rename/remove and whole-list set/clear show changed fields without siblings", async (t) => {
@@ -487,11 +834,11 @@ test("compact review: native secret rename/remove and whole-list set/clear show 
   assert.match(f.reviews.at(-1)!, /A → RENAMED/); assert.match(f.reviews.at(-1)!, /- Name: A\n\+ Name: RENAMED/);
   assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Hosts|b.example/);
   await f.call({ scope: "global", path: "secrets", operation: "remove", identity: "RENAMED" });
-  assert.match(f.reviews.at(-1)!, /- Name: RENAMED/); assert.match(f.reviews.at(-1)!, /Removes this entry/); assert.doesNotMatch(f.reviews.at(-1)!, /b.example/);
+  assert.match(f.reviews.at(-1)!, /- Name: RENAMED/); assert.match(f.resultTexts.at(-1)!, /Removes this entry/); assert.doesNotMatch(f.reviews.at(-1)!, /b.example/);
   await f.call(set("global", "secrets", [{ ...b, allowHosts: ["new.example"] }]));
-  assert.match(f.reviews.at(-1)!, /Replaces this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Hosts: b.example\n\+ Hosts: new.example/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Name:/);
+  assert.match(f.resultTexts.at(-1)!, /Replaces this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Hosts: b.example\n\+ Hosts: new.example/); assert.doesNotMatch(f.reviews.at(-1)!, /Credential|Name:/);
   await f.call(set("global", "secrets", []));
-  assert.match(f.reviews.at(-1)!, /Clears this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/);
+  assert.match(f.resultTexts.at(-1)!, /Clears this scope’s entire list/); assert.match(f.reviews.at(-1)!, /- Credential: <redacted>/);
 });
 
 test("compact review: mount edits/rename and scalar-list edits omit unchanged fields", async (t) => {
@@ -505,7 +852,7 @@ test("compact review: mount edits/rename and scalar-list edits omit unchanged fi
   assert.match(f.reviews.at(-1)!, /- Guest path: \/mnt\/data\n\+ Guest path: \/mnt\/renamed/); assert.doesNotMatch(f.reviews.at(-1)!, /Read only:|Host path/);
   await f.call(set("global", "host_env", ["KEEP", "OLD"]));
   await f.call({ scope: "global", path: "host_env", operation: "upsert", value: "NEW", previousIdentity: "OLD" });
-  assert.match(f.reviews.at(-1)!, /- Host variables: OLD\n\+ Host variables: NEW/); assert.doesNotMatch(f.reviews.at(-1)!, /KEEP|HOST/);
+  assert.match(f.reviews.at(-1)!, /- Host variables: OLD\n\+ Host variables: NEW/); assert.doesNotMatch(f.resultTexts.at(-1)!, /KEEP|HOST/);
 });
 
 test("compact review: collection reorder, inherited assignment and removal reconciliation remain visible", async (t) => {
@@ -553,14 +900,14 @@ test("compact setter renderers: never echo raw arguments or full review JSON, pr
 test("compact review: actual restart/start and explicit host intents retain relevant consequences", async (t) => {
   const f = await fixture(t);
   await f.call(set("session", "memory_mib", 4096));
-  assert.match(f.reviews.at(-1)!, /Restart: temporary guest data and nested containers may be lost/);
-  assert.doesNotMatch(f.reviews.at(-1)!, /HOST/);
+  assert.match(f.resultTexts.at(-1)!, /Restart: temporary guest data and nested containers may be lost/);
+  assert.doesNotMatch(f.resultTexts.at(-1)!, /HOST/);
   await writeFile(f.paths.global, "auto_start = true\n");
   await f.call(set("session", "show_footer", false));
-  assert.match(f.reviews.at(-1)!, /May start the sandbox/);
+  assert.match(f.resultTexts.at(-1)!, /May start the sandbox/);
   for (const [path, value, pattern] of [["allow_host_execution", true, /individual tool-call approval/], ["fallback_mode", "host", /Sandbox failure/], ["allow_skill_reads", true, /read from the HOST/]] as const) {
-    await f.call(set("global", path, value)); assert.match(f.reviews.at(-1)!, pattern);
-    assert.doesNotMatch(f.reviews.at(-1)!, /pass_through_tools|block_third_party = false/);
+    await f.call(set("global", path, value)); assert.match(f.resultTexts.at(-1)!, pattern);
+    assert.doesNotMatch(f.resultTexts.at(-1)!, /pass_through_tools|block_third_party = false/);
   }
 });
 
@@ -617,7 +964,7 @@ test("compact review: renaming onto an inherited entry discloses the overwritten
   const got = await f.call({ scope: "project", path: "secrets", operation: "upsert", previousIdentity: "A", value: { env: "B", allowHosts: ["a.example"] } });
   assert.equal(got.details.outcome, "applied");
   assert.match(f.reviews.at(-1)!, /- Hosts: \["b.example"\]/);
-  assert.match(f.reviews.at(-1)!, /Replaces the entry with this name/); noPrivate(got); noPrivate(f.reviews);
+  assert.match(f.resultTexts.at(-1)!, /Replaces the entry with this name/); noPrivate(got); noPrivate(f.reviews);
 });
 
 test("compact review: malformed shadowed native entry fields retain the strict JSON whitelist", async (t) => {
@@ -649,7 +996,7 @@ for (const type of ["dir", "file"] as const) for (const readonly of [false, true
     const themed = formatSettingsDiff(lines, consequenceTheme).join("\n");
     assert.equal(got.details.review.focus[0].writableMount, !readonly);
     assert.equal(plain.includes(hostWriteWarning), !readonly);
-    assert.equal(f.reviews.at(-1)!.includes(hostWriteWarning), !readonly);
+    assert.equal(got.content[0].text.includes(hostWriteWarning), !readonly);
     assert.equal(themed.includes(`<warning>${hostWriteWarning}</warning>`), !readonly);
     if (!readonly) { assert.match(plain, /\+ Read only: false/); assert.match(themed, /<toolDiffAdded>false<\/toolDiffAdded>/); }
     else assert.doesNotMatch(plain, /HOST/);
@@ -677,9 +1024,9 @@ for (const scope of ["global", "project"] as const) {
     assert.equal(got.details.review.desired.before.mounts[0].readonly, true);
     assert.equal(got.details.review.desired.after.mounts[0].readonly, true);
     assert.equal(got.details.review.focus[0].writableMount, true);
-    assert.match(f.reviews.at(-1)!, /Higher-priority settings still apply/);
-    assert.match(f.reviews.at(-1)!, /Higher-priority/);
-    assert.ok(f.reviews.at(-1)!.includes(hostWriteWarning));
+    assert.match(f.resultTexts.at(-1)!, /Higher-priority settings still apply/);
+    assert.match(f.resultTexts.at(-1)!, /Higher-priority/);
+    assert.ok(got.content[0].text.includes(hostWriteWarning));
     assert.ok(formatSettingsDiff(settingsDiff(got.details.review), consequenceTheme).join("\n").includes(`<warning>${hostWriteWarning}</warning>`));
     noPrivate(got);
   });
@@ -701,7 +1048,7 @@ test("inherited consequences: native mount warnings remain isolated to the selec
   const writable = await f.call({ ...edit, value: { ...edit.value, readonly: false } });
   assert.equal(writable.details.outcome, "applied");
   assert.equal(writable.details.review.focus[0].writableMount, true);
-  assert.ok(f.reviews.at(-1)!.includes(hostWriteWarning));
+  assert.ok(writable.content[0].text.includes(hostWriteWarning));
   assert.doesNotMatch(f.reviews.at(-1)!, /unrelated/);
 });
 
@@ -724,7 +1071,7 @@ for (const [path, inherited, override, consequence] of [
       const lines = settingsDiff(got.details.review);
       const hostWarnings = lines.filter((line) => line.kind === "warning" && line.text.includes("HOST"));
       assert.equal(hostWarnings.length, 1); assert.match(hostWarnings[0]!.text, consequence);
-      assert.match(f.reviews.at(-1)!, /HOST/); assert.match(f.reviews.at(-1)!, /Higher-priority/);
+      assert.match(f.resultTexts.at(-1)!, /HOST/); assert.match(f.resultTexts.at(-1)!, /Higher-priority/);
       assert.match(formatSettingsDiff(lines, consequenceTheme).join("\n"), /<warning>! .*HOST/);
       noPrivate(got);
     }

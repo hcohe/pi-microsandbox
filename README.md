@@ -47,10 +47,15 @@ keys and muted actions; narrow screens use grouped keys. Menus offer short hints
 value editors explain the format with examples. [All keys →](docs/commands.md)
 
 The agent can also inspect all settings with `msb_config_get` or propose a
-scoped change with `msb_config_set`. Every change needs your explicit approval;
+scoped change or atomic same-scope batch with `msb_config_set`. The getter includes
+value schemas, constraints and desired/adopted network policy summaries, so the
+model need not read extension source to configure it. Filter by section/setting
+and get readable text or indented JSON; structured results remain available. Every request needs your explicit approval;
 a HOST-style No/Yes question shows `Scope: Session`, `Scope: Project`, or
-`Scope: Global`, the focused color-coded diff and relevant
-warnings, with secrets/references masked. Headless inspection is read-only.
+`Scope: Global` and the focused color-coded diff, with secrets/references masked.
+Relevant safety/impact warnings are returned as text to the agent after the change
+tool completes so it can advise you, not shown in the confirmation dialog.
+Headless inspection is read-only.
 [Configuration tools →](docs/tools.md)
 
 The Pi footer shows **`msb-ID ●`**: a green circle when live, or a yellow/grey
@@ -67,7 +72,9 @@ alone.
 Each edit offers **Session**, **Project**, **Global**, or **Cancel**. Apply reloads
 this sandbox automatically; others pick up persisted defaults on next start/reload.
 Restarting settings ask before losing guest ephemeral state. Session changes
-are memory-only and reset on session/workspace switch or shutdown. The panel
+are memory-only and reset on **Pi `/reload`**, session/workspace switch or shutdown.
+Inherited defaults then return and may allow broader access. Ordinary settings
+reload preserves Session overrides; choose Project/Global explicitly to persist restrictions. The panel
 requires a running sandbox for Session. Project settings for `~/Code/app`
 live outside the worktree:
 

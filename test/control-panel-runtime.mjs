@@ -53,15 +53,26 @@ try {
     };
     const ui = new Renderer(terminal, false, root);
     const editor = { focused: false, getText: () => "", setText() {}, render: () => Array.from({ length: terminal.rows }, () => "UNDERLYING CHAT"), invalidate() {}, handleInput() { baseKeys++; } };
-    ui.addChild(editor);
-    if (ui instanceof tui.TuiAltScreen) ui.setLayoutRoot(editor);
+    const editorContainer = new tui.Container();
+    editorContainer.addChild(editor);
+    ui.addChild(editorContainer);
+    if (ui instanceof tui.TuiAltScreen) ui.setLayoutRoot(editorContainer);
     ui.setFocus(editor);
     const showOverlay = ui.showOverlay.bind(ui);
     ui.showOverlay = (component, options) => { panel = component; return showOverlay(component, options); };
     const mode = Object.create(InteractiveMode.prototype);
-    Object.assign(mode, { ui, editor, keybindings: tui.getKeybindings() });
+    Object.assign(mode, { ui, editor, editorContainer, extensionDialogs: [], keybindings: tui.getKeybindings(), programStatus: { setBlocked() {} } });
     const context = mode.createExtensionUIContext();
     context.notify = (message) => notices.push(message);
+    const nativeSelect = context.select.bind(context);
+    const custom = context.custom.bind(context);
+    let selection;
+    let customCalls = 0;
+    context.select = (title, choices, options) => {
+      selection = { title, choices, options };
+      return nativeSelect(title, choices, options);
+    };
+    context.custom = (...args) => { customCalls++; return custom(...args); };
     runner.setUIContext(context, "tui");
     ui.start();
     try {
@@ -209,60 +220,87 @@ try {
       assert.equal(inspection.details.outcome, "inspected");
       assert.deepEqual(Object.keys(inspection.details.layers).sort(), ["global", "project", "session"]);
       assert.deepEqual(setter.parameters.properties.scope.anyOf.map((item) => item.const), ["session", "project", "global"]);
+      assert.equal(inspection.details.capabilities.mutation.batch.maxReloads, 1);
+      assert.deepEqual(inspection.details.settingsSchema["network.mode"].valueSchema.enum, ["default", "open", "allowlist", "deny"]);
+      assert.ok(inspection.details.effectivePolicy.adopted);
       assert.doesNotMatch(JSON.stringify(inspection), /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
-      for (const action of ["default-cancel", "escape", "approve", "apply", "restart", "abort", "too-small", "secret-hosts", "secret-rotation", "long-warnings"]) {
-        panel = undefined;
+      assert.match(inspection.content[0].text, /Microsandbox settings/);
+      const filtered = await inspect.execute("filtered", { sections: ["summary", "desired"], paths: ["network"] }, undefined, undefined, runner.createContext());
+      assert.deepEqual(Object.keys(filtered.details.desired), ["network"]);
+      assert.equal(filtered.details.settingsSchema, undefined);
+      for (const expanded of [false, true]) {
+        const frame = inspect.renderResult(filtered, { expanded, isPartial: false }, theme, {}).render(100).join("\n");
+        assert.match(tui.stripTerminalSequences(frame), /Pi \/reload/);
+        assert.doesNotMatch(frame, /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+      }
+      const json = await inspect.execute("json", { sections: ["desired"], paths: ["network.mode"], format: "json" }, undefined, undefined, runner.createContext());
+      assert.deepEqual(JSON.parse(json.content[0].text), json.details);
+      const invalid = await setter.execute("invalid", { scope: "session", operations: [{ path: "show_footer", operation: "set", value: true }, { path: "cpus", operation: "set", value: 0 }] }, undefined, undefined, runner.createContext());
+      assert.equal(invalid.details.validation[0].operationIndex, 1); assert.equal(invalid.details.validation[0].path, "cpus");
+      for (const action of ["default-cancel", "escape", "ctrl-c", "approve", "apply", "restart", "batch", "abort", "narrow-approve", "secret-hosts", "secret-rotation", "long-warnings", "host-no-op", "network-reload-failed", "network-restore"]) {
+        selection = undefined;
+        const previousCustomCalls = customCalls;
         const abort = new AbortController();
-        const proposal = action === "long-warnings" ? { scope: "global", path: "pass_through_tools", operation: "set", value: Array.from({ length: 40 }, (_, n) => `trusted-${n}`) }
+        const proposal = action === "network-restore" ? { scope: "session", path: "network.mode", operation: "set", value: "default" }
+          : action === "network-reload-failed" ? { scope: "session", operations: [
+            { path: "auto_start", operation: "set", value: true },
+            { path: "network.allow_hosts", operation: "set", value: [`api-${Renderer.name.toLowerCase()}.example`] },
+            { path: "network.mode", operation: "set", value: "allowlist" },
+          ] }
+          : ["long-warnings", "host-no-op"].includes(action) ? { scope: "session", path: "pass_through_tools", operation: "set", value: Array.from({ length: 40 }, (_, n) => `trusted-${n}-${Renderer.name}`) }
           : action === "secret-hosts" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: Array.from({ length: 40 }, (_, n) => `host-${n}.example`) } }
           : action === "secret-rotation" ? { scope: "global", path: "secrets", operation: "upsert", value: { env: "TOKEN", allowHosts: ["api.example"], value: "ROTATED_PRIVATE_SENTINEL" } }
           : action === "apply" ? { scope: "session", path: "show_footer", operation: "set", value: !inspection.details.desired.show_footer }
           : action === "restart" ? { scope: "session", path: "memory_mib", operation: "set", value: inspection.details.desired.memory_mib + 128 }
+          : action === "batch" ? { scope: "session", operations: [
+            { path: "memory_mib", operation: "set", value: inspection.details.desired.memory_mib + 256 },
+            { path: "idle_timeout_sec", operation: "set", value: inspection.details.desired.idle_timeout_sec + 1 },
+          ] }
           : { scope: "session", path: "cpus", operation: "inherit" };
         const pending = setter.execute("config", proposal, abort.signal, undefined, runner.createContext());
         let failure; pending.catch((error) => { failure = error; });
-        for (let n = 0; n < 500 && !panel && !failure; n++) await new Promise((resolve) => setTimeout(resolve, 5));
-        assert.equal(failure, undefined); assert.ok(panel, "configuration execute must open a real approval overlay");
-        assert.equal(ui.hasOverlay(), true);
+        for (let n = 0; n < 500 && !selection && !failure; n++) await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(failure, undefined); assert.ok(selection, "configuration execute must call the native selector");
+        assert.deepEqual(selection.choices, ["No", "Yes"]);
+        assert.ok(selection.options.signal instanceof AbortSignal);
+        assert.equal(customCalls, previousCustomCalls);
+        assert.equal(ui.hasOverlay(), false);
+        panel = editorContainer.children[0];
+        assert.ok(panel instanceof ExtensionSelectorComponent);
+        assert.equal(editor.focused, false);
         for (const [width, height] of [[32, 10], [80, 24], [24, 2], [120, 40], [80, 24]]) {
           terminal.columns = width; terminal.rows = height;
-          const frame = panel.render(width);
-          assert.ok(frame.length <= height); assert.ok(frame.every((line) => tui.visibleWidth(line) <= width));
-          assert.doesNotMatch(frame.join("\n"), /PRIVATE_SENTINEL|\$FILE:|\$ENV:|UNDERLYING/);
+          // Pi owns native layout; long titles can exceed the viewport. No extension clipping/gate.
+          assert.doesNotMatch(panel.render(width).join("\n"), /PRIVATE_SENTINEL|\$FILE:|\$ENV:|UNDERLYING/);
+          output = ""; ui.renderNow(true);
+          assert.doesNotMatch(output, /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
         }
-        const frame = panel.render(100).join("\n");
+        const frame = selection.title;
+        assert.doesNotMatch(frame, /PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+        const rendered = panel.render(100).join("\n");
         const native = new ExtensionSelectorComponent("Allow host execution?", ["No", "Yes"], () => {}, () => {});
         const nativeRows = native.render(100);
         assert.equal(panel.render(100)[0], nativeRows[0]);
         assert.equal(panel.render(100).at(-1), nativeRows.at(-1));
-        assert.ok(frame.includes(theme.fg("accent", theme.bold("Allow configuration change?"))));
-        assert.ok(nativeRows.join("\n").includes(theme.fg("accent", theme.bold("Allow host execution?"))));
-        assert.ok(frame.includes(theme.fg("accent", "→ No")));
-        assert.ok(nativeRows.join("\n").includes(theme.fg("accent", "→ ") + theme.fg("accent", "No")));
-        assert.match(tui.stripTerminalSequences(frame), /\n → No\n   Yes\n/);
-        assert.doesNotMatch(frame, /MICROSANDBOX|End seen/);
+        assert.match(tui.stripTerminalSequences(rendered), /Allow configuration change\?/);
+        assert.ok(rendered.includes(theme.fg("accent", "→ ") + theme.fg("accent", "No")));
+        assert.match(tui.stripTerminalSequences(rendered), /\n → No *\n   Yes *\n/);
+        assert.doesNotMatch(rendered, /MICROSANDBOX|End seen|Read to end|PgUp|PgDn|32×10/);
         const scopeLabel = proposal.scope[0].toUpperCase() + proposal.scope.slice(1);
-        assert.ok(tui.stripTerminalSequences(frame).split("\n").some((line) => line.trim() === `Scope: ${scopeLabel}`));
+        assert.ok(tui.stripTerminalSequences(frame).split("\n").includes(`Scope: ${scopeLabel}`));
         assert.ok(frame.includes(theme.fg("muted", "Scope: ") + theme.fg("warning", scopeLabel)));
-        const painted = () => {
-          output = ""; ui.renderNow(true);
-          if (ui instanceof tui.TuiMainScreen) return tui.stripTerminalSequences(ui.captureRenderState().previousLines.slice(-terminal.rows).join("\n"));
-          const rows = [...output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H\x1b\[2K|$)/g)];
-          assert.equal(rows.length, terminal.rows);
-          return rows.map((row) => tui.stripTerminalSequences(row[2])).join("\n");
-        };
-        if (action === "secret-rotation") {
-          assert.ok(panel.render(100).length < terminal.rows);
-          assert.doesNotMatch(frame, /PgUp|Read to end/);
-        }
+        assert.ok(rendered.includes(theme.fg("muted", "Scope: ") + theme.fg("warning", scopeLabel)));
         const callFrame = setter.renderCall({ ...proposal, identity: "UNSAFE_PRIVATE_SENTINEL" }, theme, {}).render(100).join("\n");
         assert.doesNotMatch(callFrame, /PRIVATE_SENTINEL|allowHosts|value/);
         if (action.startsWith("secret-")) {
           assert.ok(frame.includes(theme.fg("toolDiffRemoved", "- ")));
           assert.ok(frame.includes(theme.fg("toolDiffAdded", "+ ")));
+          assert.ok(rendered.includes(theme.fg("toolDiffRemoved", "- ")));
+          assert.ok(rendered.includes(theme.fg("toolDiffAdded", "+ ")));
           assert.notEqual(theme.fg("toolDiffRemoved", "test"), theme.fg("toolDiffAdded", "test"));
           assert.ok(frame.includes(theme.fg("muted", "Scope: ") + theme.fg("warning", "Global")));
           assert.ok(frame.includes(theme.fg("muted", "Secret TOKEN")));
+          assert.ok(rendered.includes(theme.fg("muted", "Secret TOKEN")));
           assert.doesNotMatch(frame, /HOST|adoptedRuntime|provenance|"before"|"after"/);
           if (action === "secret-rotation") {
             assert.ok(frame.includes(theme.fg("toolDiffAdded", "<redacted> (changed)")));
@@ -270,47 +308,59 @@ try {
           }
         }
         if (action === "secret-hosts" || action === "long-warnings") {
-          input("\x1b[B"); assert.match(tui.stripTerminalSequences(panel.render(100).join("\n")), /→ No/);
-          assert.match(tui.stripTerminalSequences(frame), /Read to end for Yes/);
-          // A custom dock cannot clip the consent surface, in either renderer.
-          const dock = new tui.Text("CUSTOM DOCK\n".repeat(50), 0, 0);
-          if (ui instanceof tui.TuiAltScreen) ui.setLayoutRoot(new tui.VStack([editor, dock]));
-          else ui.addChild(dock);
-          let seen = "";
-          for (const [width, height] of [[32, 10], [80, 24]]) {
-            terminal.columns = width; terminal.rows = height; input("g");
-            for (let n = 0; n < 120; n++) {
-              const visible = painted(); seen += visible + "\n";
-              assert.match(visible, /Allow configuration change\?/); assert.match(visible, /→ No/); assert.match(visible, /Yes/);
-              input("\x1b[6;5~");
-            }
-          }
-          for (let n = 0; n < 40; n++) assert.ok(seen.includes(action === "secret-hosts" ? `host-${n}.example` : `trusted-${n}`));
+          // All changed values go to Pi without pagination; warnings go to the agent after completion.
+          for (let n = 0; n < 40; n++) assert.ok(frame.includes(action === "secret-hosts" ? `host-${n}.example` : `trusted-${n}`));
           if (action === "long-warnings") {
-            assert.match(seen, /without per-call host approval/);
-            assert.match(seen, /Replaces this scope’s entire list/);
+            assert.doesNotMatch(tui.stripTerminalSequences(frame), /without per-call host approval|Replaces this scope’s entire list/);
           }
-          if (ui instanceof tui.TuiAltScreen) ui.setLayoutRoot(editor); else ui.removeChild(dock);
-          terminal.columns = 80; terminal.rows = 24;
         }
         const key = (value) => { input(value); ui.renderNow(true); };
-        if (["default-cancel", "secret-hosts", "long-warnings"].includes(action)) key("\r");
+        if (["default-cancel", "secret-hosts"].includes(action)) key("\r");
         if (action === "escape" || action === "secret-rotation") key("\x1b");
+        if (action === "ctrl-c") key("\x03");
         if (action === "abort") abort.abort();
-        if (action === "too-small") { terminal.columns = 24; terminal.rows = 2; panel.render(24); key("\t"); key("G"); key("\r"); }
-        if (["approve", "apply", "restart"].includes(action)) {
-          key("G"); panel.render(80);
+        if (action === "narrow-approve") { terminal.columns = 24; terminal.rows = 2; panel.render(24); }
+        if (["approve", "apply", "restart", "batch", "narrow-approve", "long-warnings", "host-no-op", "network-reload-failed", "network-restore"].includes(action)) {
+          // Yes works immediately, even for long reviews or tiny terminals: there is no end gate.
           key("\x1b[B"); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /→ Yes/); key("\r");
         }
         const result = await pending;
+        const modelText = result.content[0].text;
+        assert.doesNotMatch(modelText, /\x1b|PRIVATE_SENTINEL|\$FILE:|\$ENV:/);
+        const warnings = modelText.split("\n").filter((line) => line.startsWith("! "));
+        for (const warning of warnings) assert.ok(!tui.stripTerminalSequences(frame).includes(warning));
+        assert.doesNotMatch(tui.stripTerminalSequences(frame), /! |Restart:|May start the sandbox|HOST|DNS\/IP|DNS exfiltration|Session settings are memory-only/);
+        if (action === "long-warnings") {
+          assert.match(modelText, /without per-call host approval/);
+          assert.match(modelText, /Replaces this scope’s entire list/);
+        }
+        // The fake SDK deliberately lacks the allowlist policy builder: saving succeeds, activation fails.
+        if (action === "network-reload-failed") {
+          assert.equal(result.details.outcome, "saved_but_reload_failed");
+          assert.equal(result.details.saved, true); assert.equal(result.details.reloaded, false);
+          assert.match(modelText, /saved but not fully activated/); assert.doesNotMatch(modelText, /Saved · reloaded/);
+          assert.match(modelText, /DNS\/IP/); assert.match(modelText, /DNS exfiltration/);
+        }
+        if (action === "host-no-op") {
+          assert.equal(result.details.saved, false); assert.equal(result.details.reloaded, false);
+          assert.match(modelText, /No change · not saved or reloaded/);
+          assert.match(modelText, /without per-call host approval/);
+        }
+        if (action === "network-restore") assert.match(modelText, /May start the sandbox/);
+        if (["restart", "batch"].includes(action)) assert.match(modelText, /Restart: temporary guest data/);
+        if (["apply", "restart", "batch", "long-warnings", "network-reload-failed"].includes(action)) assert.match(modelText, /Settings reload does not clear/);
         for (const expanded of [false, true]) {
           const rendered = setter.renderResult(result, { expanded, isPartial: false }, theme, { isError: false }).render(100).join("\n");
           assert.doesNotMatch(rendered, /PRIVATE_SENTINEL|adoptedRuntime|provenance|"before"|"after"/);
-          if (["apply", "restart"].includes(action)) assert.match(tui.stripTerminalSequences(rendered), /Saved · reloaded · runtime active/);
+          const humanText = tui.stripTerminalSequences(setter.renderResult(result, { expanded, isPartial: false }, theme, { isError: false }).render(10000).join("\n"));
+          for (const warning of warnings) assert.ok(!humanText.includes(warning));
+          if (["apply", "restart", "batch", "long-warnings", "network-restore"].includes(action)) assert.match(tui.stripTerminalSequences(rendered), /Saved · reloaded · runtime active/);
         }
-        assert.equal(result.details.outcome, action === "approve" ? "no_op" : ["apply", "restart"].includes(action) ? "applied" : "cancelled");
-        if (["apply", "restart"].includes(action)) { assert.equal(result.details.saved, true); assert.equal(result.details.reloaded, true); assert.equal(result.details.runtimeStatus, "active"); assert.equal(result.details.review.scope, proposal.scope); }
+        assert.equal(result.details.outcome, action === "network-reload-failed" ? "saved_but_reload_failed" : ["approve", "narrow-approve", "host-no-op"].includes(action) ? "no_op" : ["apply", "restart", "batch", "long-warnings", "network-restore"].includes(action) ? "applied" : "cancelled");
+        if (["apply", "restart", "batch", "long-warnings", "network-restore"].includes(action)) { assert.equal(result.details.saved, true); assert.equal(result.details.reloaded, true); assert.equal(result.details.runtimeStatus, "active"); assert.equal(result.details.review.scope, proposal.scope); }
         assert.equal(ui.hasOverlay(), false); assert.equal(editor.focused, true);
+        assert.equal(editorContainer.children[0], editor);
+        assert.equal(customCalls, previousCustomCalls);
         terminal.columns = 80; terminal.rows = 24;
       }
       await loaded.extensions[0].commands.get("msb-fixture-stop").handler("", runner.createCommandContext());
@@ -344,5 +394,5 @@ try {
   assert.doesNotMatch(policy, /RUNTIME_PRIVATE_SENTINEL/);
   assert.match(policy, /"show_footer" = false/);
   assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /"show_footer" = true/);
-  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, native-style No/Yes config approval, compact bounded overlay/custom-dock scrolling/default-No/abort/resize/provenance-collision-gate and focus teardown (fake SDK)`);
+  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, native No/Yes config approval, complete masked warning-free titles/agent-text-warnings/quiet-human-results/saved-not-activated/default-No/Escape/abort/immediate-long-review-consent/provenance-collision-gate and focus teardown (fake SDK)`);
 } finally { await rm(root, { recursive: true, force: true }); }

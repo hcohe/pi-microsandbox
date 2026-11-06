@@ -85,6 +85,9 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 ## mode: default | open | allowlist | deny. default blocks private/host networks;
 ## open permits them. allowlist restricts outbound hosts; deny blocks networking.
 ## allowlist requires a host or allow_dns=true. Secrets need their own allow_hosts.
+## Network hosts use exact DNS names: no wildcards, URLs, ports or implicit subdomains.
+## Secret hosts also accept wildcard subdomain scopes such as *.googleapis.com.
+## Only network hosts may additionally use IP addresses/CIDRs.
 # [network]
 # mode = "default"
 # allow_hosts = []
@@ -101,7 +104,10 @@ export function defaultConfigTemplate(config: DeepReadonly<Config>): string {
 
 ## Example: secrets
 ## Use references, not literal credentials. env is a valid environment name;
-## allow_hosts must be a non-empty list of destination hosts for secret injection.
+## allow_hosts must be non-empty exact DNS names or wildcard subdomain scopes
+## (single leading *. only, e.g. *.googleapis.com). No IP/CIDR, URLs or ports.
+## Add the apex separately if needed. This scopes credential
+## injection only; it does not grant network access.
 ## $ENV:NAME reads the host environment; $FILE:path reads a host file (relative
 ## paths resolve beside this host policy file). Literal values are redacted in the panel; entry is always masked.
 # [[secrets]]

@@ -57,6 +57,17 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   return { root, input, settings, control, integration, sdk, ctx, calls, panel, terminal, key, seek, choose, tree, expand, node, edit, save, apply, action, list, number, selected, full, text, paths, closed: () => closed };
 }
 
+test("Session scope selection and review explain Pi reload resets without changing settings reload semantics", async (t) => {
+  const f = await fixture(t); await f.number("2");
+  const scope = f.full().replace(/\s+/g, " ");
+  assert.match(scope, /Pi \/reload/); assert.match(scope, /Inherited defaults may allow broader access/);
+  await f.save();
+  const review = f.full().replace(/\s+/g, " ");
+  assert.match(review, /Review change/); assert.match(review, /Settings reload does not clear them/);
+  assert.match(review, /Choose Project or Global explicitly/);
+  assert.equal(f.calls.includes("reload"), false);
+});
+
 test("settings inventory describes every public schema leaf", () => {
   assert.deepEqual(SETTINGS_FIELDS.map((field) => field.path), SETTINGS_PATHS);
   assert.ok(SETTINGS_FIELDS.every((field) => field.description?.length > 10));
@@ -603,8 +614,9 @@ test("add/delete global secret intents exclude siblings, report shadowing and no
 
 test("nested secret host and mount options CRUD is identity-scoped, cancel restores credential", async (t) => {
   const f = await fixture(t); await seedScopedPanelSecrets(f, true);
-  await f.list("Secrets", "Secrets:"); await f.expand("EDIT:"); await f.expand("Allowed hosts:"); await f.key("a"); await f.key("second.example"); await f.key("\r"); await f.apply(1); assert.match(f.selected(), /second.example/);
-  await f.key("e"); await f.key("\x15"); await f.key("chosen.example"); await f.key("\r"); await f.choose("Cancel"); await f.seek("second.example"); await f.key("d"); await f.apply(2);
+  await f.list("Secrets", "Secrets:"); await f.expand("EDIT:"); await f.expand("Allowed hosts:"); await f.key("a"); await f.key("*.googleapis.com"); await f.key("\r"); await f.apply(1); assert.match(f.selected(), /\*\.googleapis\.com/);
+  assert.deepEqual((await storage(f, 1)).secrets!.find((entry) => entry.env === "EDIT")!.allowHosts, ["edit.example", "*.googleapis.com"]);
+  await f.key("e"); await f.key("\x15"); await f.key("chosen.example"); await f.key("\r"); await f.choose("Cancel"); await f.seek("*.googleapis.com"); await f.key("d"); await f.apply(2);
   const entries = (await storage(f, 2)).secrets!; assert.deepEqual(entries.map((entry) => entry.env), ["TARGET_ONLY", "TARGET_FILE", "EDIT"]); assert.deepEqual(entries[2]!.allowHosts, ["edit.example"]); assert.equal(entries[2]!.value, `$FILE:${join(dirname(f.paths.project!), "edit-token")}`);
   await mount(f); await f.apply(1); await f.seek("/scratch:"); await f.expand("/scratch:"); await f.expand("Options:"); await f.key("a"); await f.key("noexec"); await f.key("\r"); await f.apply(1); assert.match(f.selected(), /noexec/); await f.key("d"); await f.apply(1); assert.deepEqual((await storage(f, 1)).mounts![0]!.options, []);
 });
@@ -843,10 +855,10 @@ test("Secret forms separate friendly hints from multiline Allowed hosts editor h
   for (const [width, height] of [[32, 12], [80, 20]]) {
     f.terminal.columns = width!; f.terminal.rows = height!;
     const input = f.text(); frames.push(`Allowed hosts input ${width}x${height}\n${input}`);
-    assert.match(input.replace(/\s+/g, " "), /Enter a comma-separated list; at least one host is required\. Example: api\.typesafe\.ai, api\.example\.com/);
+    assert.match(input.replace(/\s+/g, " "), /Enter comma-separated exact DNS names or wildcard subdomain scopes; at least one host is required\. Example: api\.typesafe\.ai, \*\.googleapis\.com/);
     assert.doesNotMatch(input, /Which services/);
     const lines = input.split("\n");
-    assert.ok(lines.findIndex((line) => line.includes("Enter a comma")) < lines.findIndex((line) => line.includes("Example:")));
+    assert.ok(lines.findIndex((line) => line.includes("Enter comma-separated")) < lines.findIndex((line) => line.includes("Example:")));
     assert.match(lines.at(-1)!, /Enter keep.*Esc cancel/);
   }
   for (const line of SECRET_HOST_HELP.editorHelp.split("\n")) {
@@ -882,8 +894,8 @@ test("nested secret hosts, network hosts and mount options explain one-item inpu
     assert.doesNotMatch(text, /Enter a comma-separated list|api\.typesafe|one-item-private/);
   };
   await f.list("Secrets", "Secrets:"); await f.expand("ONE_HOST:"); await f.expand("Allowed hosts:");
-  await f.key("a"); oneItem(f.text(), "api.example.com"); assert.match(f.text().replace(/\s+/g, " "), /At least one allowed host must remain/); await f.key("\x1b");
-  await f.seek("first.example"); await f.key("e"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
+  await f.key("a"); oneItem(f.text(), "\\*\\.googleapis\\.com"); assert.match(f.text().replace(/\s+/g, " "), /At least one allowed host must remain/); await f.key("\x1b");
+  await f.seek("first.example"); await f.key("e"); oneItem(f.text(), "\\*\\.googleapis\\.com"); await f.key("\x1b");
   await f.list("Network", "Allowed hosts:"); await f.key("a"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
   await f.seek("network.example"); await f.key("e"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
   await f.list("Mounts", "Mounts:"); await f.expand("/mnt/help:"); await f.expand("Options:");
