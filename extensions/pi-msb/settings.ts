@@ -136,15 +136,35 @@ function patchRaw(raw: Record<string, unknown>, path: string[], value: unknown, 
   if (!raw[key] || typeof raw[key] !== "object" || Array.isArray(raw[key])) raw[key] = {};
   patchRaw(raw[key] as Record<string, unknown>, path.slice(1), value, inherit);
 }
-/** Inline tables retain original raw key spelling and unknown data; comments/formatting are not retained. */
+/** Readable TOML retaining raw key spelling and unknown data, but not original comments/layout. */
 function serializeRaw(raw: Record<string, unknown>): string {
+  const key = (name: string): string => /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name);
+  const table = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
   const scalar = (value: unknown): string => {
     if (value === null || value === undefined) throw new ConfigError(["TOML cannot store null; use inherit instead"]);
     if (Array.isArray(value)) return `[${value.map(scalar).join(", ")}]`;
-    if (typeof value === "object") return `{ ${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)} = ${scalar(v)}`).join(", ")} }`;
+    if (table(value)) return `{ ${Object.entries(value).map(([k, v]) => `${key(k)} = ${scalar(v)}`).join(", ")} }`;
     return JSON.stringify(value);
   };
-  return Object.entries(raw).map(([k, v]) => `${JSON.stringify(k)} = ${scalar(v)}`).join("\n") + "\n";
+  // Empty tables must remain assignments: the reader only creates sections when a field is assigned.
+  const section = (value: unknown): value is Record<string, unknown> => table(value) && Object.keys(value).length > 0;
+  const blocks: string[] = [];
+  const writeTable = (value: Record<string, unknown>, path: string[] = [], arrayEntry = false): void => {
+    const entries = Object.entries(value);
+    // Nested collections stay inline to match the reader's supported TOML subset.
+    const arrayTable = (child: unknown): child is Record<string, unknown>[] => path.length === 0 && Array.isArray(child) && child.length > 0 && child.every(section);
+    const fields = entries.filter(([, child]) => arrayEntry || (!section(child) && !arrayTable(child)))
+      .map(([name, child]) => `${key(name)} = ${scalar(child)}`);
+    const heading = path.map(key).join(".");
+    blocks.push([...(path.length ? [arrayEntry ? `[[${heading}]]` : `[${heading}]`] : []), ...fields].join("\n"));
+    if (arrayEntry) return;
+    for (const [name, child] of entries) {
+      if (section(child)) writeTable(child, [...path, name]);
+      else if (arrayTable(child)) for (const item of child) writeTable(item, [...path, name], true);
+    }
+  };
+  writeTable(raw);
+  return blocks.filter(Boolean).join("\n\n") + "\n";
 }
 /** A deliberate authoritative collection edit wins over conflicting removals in that same scope. */
 export const COLLECTION_REMOVALS: Readonly<Record<string, string>> = Object.freeze({

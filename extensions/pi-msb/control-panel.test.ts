@@ -630,7 +630,7 @@ test("mount/list cross-scope edits preserve hidden target entries, raw removal c
   const text = await readFile(f.paths.global!, "utf8"); const raw = parseTomlConfig(text, "global").value;
   assert.deepEqual(raw.mounts!.map((mount) => mount.guestPath), ["/mnt/global", "/mnt/edit"]); assert.equal(raw.mounts![1]!.readonly, false); assert.deepEqual(raw.network!.allowHosts, ["global.example", "chosen.example"]); assert.doesNotMatch(text, /private/);
   await f.list("Tools", "Route Tools:"); await f.key("a"); await f.key("bash"); await f.key("\r"); await f.apply(1);
-  assert.deepEqual((await resolveConfig(f.input)).config.routeTools, ["read", "bash"]); const saved = await readFile(f.paths.project!, "utf8"); assert.match(saved, /KEEP_REMOVED/); assert.match(saved, /"remove_route_tools" = \[\]/);
+  assert.deepEqual((await resolveConfig(f.input)).config.routeTools, ["read", "bash"]); const saved = await readFile(f.paths.project!, "utf8"); assert.match(saved, /KEEP_REMOVED/); assert.match(saved, /^remove_route_tools = \[\]$/m);
 });
 
 for (const [scope, source, label] of [[0, "temporary", "Session"], [1, "host-project", "Project"], [2, "host-default", "Global"]] as const) test(`native adoption freezes accurate scope origins, runtime readonly and automatic restart: ${scope}`, async (t) => {

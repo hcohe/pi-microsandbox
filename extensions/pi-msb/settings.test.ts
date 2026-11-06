@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
-import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
+import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, readRawConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
 import type { Config } from "./types.ts";
 
 import { classifySettingsEffect, COLLECTION_REMOVALS, SETTINGS_PATHS, SettingsEditor } from "./settings.ts";
@@ -47,6 +47,47 @@ test("settings sparse saves preserve unrelated raw data/references; no-op does n
   assert.equal(parseTomlConfig(saved, "global").value.cpus, 3);
   assert.equal((await resolveConfig(input)).config.network.allowDns, false);
   assert.equal((await stat(paths.global)).mode & 0o777, 0o600);
+});
+
+for (const scope of ["global", "project"] as const) test(`${scope} saves format TOML tables and collection entries without changing raw data`, async (t) => {
+  const { editor, paths, root } = await fixture(t);
+  const cache = join(root, "cache");
+  await mkdir(cache);
+  const raw = [
+    'cpus = 3',
+    'route_tools = ["read", "bash"]',
+    'empty_list = []',
+    'empty_table = {}',
+    'empty_entries = [{}]',
+    'mixed_list = [1, { originalKey = "keep" }]',
+    'network = { mode = "deny", allow_hosts = ["a.example", "b.example"] }',
+    'secrets = [{ env = "ONE", value = "$ENV:ONE", allow_hosts = ["a.example"] }, { env = "TWO", value = "$ENV:TWO", allow_hosts = ["b.example"] }]',
+    `mounts = [{ type = "dir", host_path = ${JSON.stringify(cache)}, guest_path = "/cache", readonly = true, options = [] }]`,
+    '"custom.section" = { "key with spaces" = "keep", nested = { originalKey = "keep", "literal.key" = "keep" }, entries = [{ name = "one" }, { name = "two" }], empty = {} }',
+  ].join("\n") + "\n";
+  await writeFile(paths[scope], raw);
+  const draft = await editor.open(scope);
+  draft.set("show_footer", false);
+  await draft.apply();
+  const saved = await readFile(paths[scope], "utf8");
+  assert.match(saved, /^cpus = 3\nroute_tools = \["read", "bash"\]/);
+  assert.match(saved, /\n\n\[network\]\nmode = "deny"\nallow_hosts = \["a.example", "b.example"\]/);
+  assert.equal(saved.match(/^\[\[secrets\]\]$/gm)?.length, 2);
+  assert.match(saved, /\[\[secrets\]\]\nenv = "ONE"\nvalue = "\$ENV:ONE"/);
+  assert.match(saved, /\n\n\[\[mounts\]\]\ntype = "dir"\nhost_path = /);
+  assert.match(saved, /\["custom.section"\]\n"key with spaces" = "keep"/);
+  assert.match(saved, /\["custom.section"\.nested\]\noriginalKey = "keep"\n"literal.key" = "keep"/);
+  assert.ok(saved.endsWith("\n"));
+  const expected = readRawConfig(raw); expected.show_footer = false;
+  assert.deepEqual(readRawConfig(saved), expected);
+  const noOp = await editor.open(scope);
+  noOp.set("show_footer", false);
+  assert.equal((await noOp.apply()).saved, false);
+  assert.equal(await readFile(paths[scope], "utf8"), saved);
+  for (const value of [true, false]) {
+    const next = await editor.open(scope); next.set("show_footer", value); await next.apply();
+  }
+  assert.equal(await readFile(paths[scope], "utf8"), saved);
 });
 
 test("project save is sparse and reports global edits shadowed by project and temporary", async (t) => {

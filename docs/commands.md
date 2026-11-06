@@ -121,8 +121,10 @@ entry; removing the last may leave an explicit empty list, still with entry
 removal intent. Scalar `d` previews inheritance at the chosen scope.
 Project/Session layers can shadow a lower-scope change or deletion; preview and
 results report shadowing and no-ops. Conflicting same-scope `remove_*` identities are reconciled; unrelated removals stay intact.
-Unknown raw settings are retained; comments/layout are not preserved on changed
-saves. Unsafe paths and external edits are rejected; cancel and reopen a stale proposal.
+Changed saves use readable TOML with section headers, separate secret/mount
+entries, and blank lines between tables. Unknown raw settings and key spelling
+are retained; original comments/layout are not preserved. No-op saves leave the
+file untouched. Unsafe paths and external edits are rejected; cancel and reopen a stale proposal.
 
 Confirmation shows scope, changed fields, entry intents/origins, higher-scope
 imports, runtime effect and shadowing. Resources, image, networking, secrets,

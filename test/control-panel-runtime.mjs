@@ -392,7 +392,7 @@ try {
   const policy = await readFile(join(canonicalAgent, "pi-microsandbox/default.toml"), "utf8");
   assert.ok(policy.includes("$FILE:../../token"));
   assert.doesNotMatch(policy, /RUNTIME_PRIVATE_SENTINEL/);
-  assert.match(policy, /"show_footer" = false/);
-  assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /"show_footer" = true/);
+  assert.match(policy, /^show_footer = false$/m);
+  assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /^show_footer = true$/m);
   console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, native No/Yes config approval, complete masked warning-free titles/agent-text-warnings/quiet-human-results/saved-not-activated/default-No/Escape/abort/immediate-long-review-consent/provenance-collision-gate and focus teardown (fake SDK)`);
 } finally { await rm(root, { recursive: true, force: true }); }
