@@ -30,10 +30,10 @@ rather than a language toolchain, so all six variants built from this version
 contain it. The extension's digest-pinned default changes only after that cohort
 has been published and verified.
 
-Select a variant in trusted project configuration:
+Select a variant in host-owned configuration outside the mounted worktree:
 
 ```toml
-# .pi-msb.toml
+# ~/.pi/agent/pi-microsandbox/default.toml (or a host-owned project override)
 image = "ghcr.io/hcohe/pi-microsandbox:python-1.0.0"
 pull_policy = "if-missing"
 ```
@@ -110,7 +110,8 @@ docker buildx build \
   --push .
 ```
 
-Then select it in `.pi-msb.toml`:
+Then select it in `~/.pi/agent/pi-microsandbox/default.toml` or a
+[host-owned project override](configuration.md#host-owned-project-overrides):
 
 ```toml
 image = "registry.example.com/team/pi-image:1.0.0"

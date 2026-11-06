@@ -33,7 +33,10 @@ just dev
 host. `dev-image` builds the current `default` variant as
 `pi-microsandbox-dev:local` and imports it into Microsandbox's separate image
 cache. `dev` runs both prerequisites, then starts Pi with this checkout's
-extension explicitly loaded alongside your normal discovered extensions. It
+extension explicitly loaded alongside your normal discovered extensions. `pi` is
+resolved from `PATH` (not necessarily the devDependency version). `--extension .`
+uses this package's `pi.extensions` manifest, and Pi's loader supplies its own
+framework/TUI imports rather than this checkout's devDependency copies. It
 forces the local image with `pull_policy = "never"`, requires Docker, and uses
 4 CPUs and 8192 MiB. Docker caching keeps repeat builds short
 when image inputs have not changed. Pass Pi arguments directly, for example:
@@ -43,7 +46,139 @@ just dev --continue
 just dev "Run docker info and report the storage driver"
 ```
 
+To test only the extension without building or importing a Docker image, run
+`just dev-extension-only` (Pi arguments are forwarded as with `dev`). This still
+builds and smoke-tests the native addon, but uses your normal sandbox
+configuration instead of forcing the local image, Docker mode, or resource
+settings.
+
 Run `just dev-image` by itself when you only need to refresh the local image.
+
+### Configuration-tool integration and testing
+
+`settings-tools.ts` registers `msb_config_get` and `msb_config_set`; the latter
+revalidates runtime arguments inside execute and always requests explicit
+approval. Single operations and ordered same-scope batches share one draft,
+combined approval, atomic commit and at most one reload. `settings-schema.ts`
+provides static leaf schemas/capabilities and safe desired/adopted network policy
+summaries; `network-domains.ts` centralizes exact DNS names, secret-only leading
+`*.` wildcard scopes, and network-only IP/CIDR rules. `settings-json.ts` is the strict JSON/redaction boundary, and
+`settings-approval.ts` uses the public `ctx.ui.select(question, ["No", "Yes"], {signal})`
+API in TUI and RPC, like HOST-command approval. It passes the complete masked diff
+and nonwarning context, filtering only semantic `kind === "warning"` lines, using
+public `ctx.ui.theme` in TUI and plain text in RPC. Scope names retain the theme's
+warning color with a muted `Scope:` label; color is not the warning filter.
+There is no extension overlay, pagination or read-to-end gate; Pi owns native
+layout, which does not guarantee all long-question lines are visible. `settings-diff.ts`
+shares semantic added/removed/context/warning lines across TUI, plain-text RPC,
+and setter results. Generation and review metadata retain all warnings. Model-facing
+setter text includes them for applied/no-op and saved-but-reload-failed outcomes;
+the latter retains the approved sanitized review and clearly denies full activation.
+The tool description asks the agent to explain relevant returned warnings after
+completion. Human setter result renderers filter warning kinds too. Build display
+data only from the sanitized approval-bound review: private comparisons in
+SettingsDraft emit changed-field metadata before credential masking, not raw arguments or literal credential text. The setter's
+public tool renderers never echo arguments or dump review JSON.
+`settings-inspection.ts` validates section/path filters inside execute, filters
+only agent-safe projections, keeps selected structured JSON and produces bounded
+readable text (optional indented JSON). Schema caching is caller-controlled via
+`knownSchemaVersion`; update the discovery version when its contract changes.
+`settings-validation.ts` maps only known error prefixes to static schemas and
+zero-based operation indices; never forward ConfigError messages or inputs.
+`settings-safety.ts` shares Session-reset, reconnection and DNS/IP guidance across
+reports, approval and the panel; shutdown warnings must not prevent cleanup. Print/JSON/no-UI modes cannot mutate. The panel and tool share one editor modal lease. Tools use
+the same SettingsDraft CRUD, validation, atomic persistence and controller reload
+rather than their own writer. Read/proposal construction must never bootstrap.
+
+`settings-tools.test.ts`, `settings-diff.test.ts`, `settings-approval.test.ts` and
+`settings.test.ts` cover all layers/inventory/origins, headless reads, serialized redaction, sparse/entry
+isolation, approval cancellation/concurrency/races, hidden owned credentials,
+mount guards and truthful save/reload failure. `tools.test.ts` checks exact-name
+routing exemptions. The gate requires both an exact tool name and public
+`sourceInfo.path` canonically matching the entry path pinned by `index.ts`;
+missing/mismatched metadata fails closed, with no basename/directory fallback.
+Real-loader tests include a symlinked package entry and duplicate-winning foreign
+registrations under both selected runtimes. `control-panel-runtime.test.ts` also executes both actual
+loaded config tools using the native context and both terminal renderers,
+including actual theme diff colors, compact masked secret edits/rotations,
+quiet setter call/result rendering, complete warning-free native-selector diff payloads,
+plain agent-text warnings (including no-op and saved-but-reload-failed outcomes),
+No default, Escape, abort, immediate long-review approval, native layout on resize,
+live/restart fake-SDK reconciliation and
+focus restoration. SDK/terminals are
+doubled; none of these tests executes a live VM. Set `PI_PACKAGE_DIR` to this
+checkout's pinned coding-agent package when running direct Node tests so an
+inherited installed-package theme override cannot contaminate them. Add
+`PI_MSB_TEST_PI_PACKAGE` to run the loader fixture against another installed Pi;
+report that actual package version (do not infer 1.4.0 compatibility from 1.5.0).
+
+### Control-panel integration and testing
+
+`/msb` is the only command surface. `control-panel.ts` owns collapsed Resources,
+Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General
+and Advanced trees directly below MICROSANDBOX, initially focused on Resources.
+Settings edit desired policy; only inner read-only Status metadata is labeled `[runtime]`. Node identities
+and expansion stay stable across compact transient forms. The
+single-line footer stays at the bottom with accented keys and muted action labels;
+narrow terminals use compact hints. Normal keys are
+j/k move, h/l fold/parent/child, e/a/d edit/add/entry-delete-or-scalar-inherit,
+q close; input dispatch precedes all command bindings. Each operation creates
+an isolated private SettingsDraft and exposes themed scope action rows. Apply
+transfers only that intent, persists and automatically reloads; Cancel discards
+it before returning to committed settings. Forms expose scope actions directly.
+Session uses authoritative session memory and is unavailable without an
+active sandbox. Project/Global defaults never broadcast to unrelated instances.
+`settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
+retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
+never renders plaintext or uses an Input undo/kill ring. The settings backend
+keeps literal credentials private while exposing host source metadata to agent
+tools; do not stringify effective Config.
+The manager's successful boot/live-adoption observer captures a redacted runtime
+policy and frozen provenance, separate from resolved desired config/configRef.
+The UI uses this snapshot for Status/adoption metadata and pending comparisons,
+not a second policy tree. Failed/canceled/pending changes must never appear as
+adopted policy; inactive snapshots are last-known, and session teardown clears them. Successful
+fresh creation verifies all fields. Revalidation of an existing guest or transport replacement
+have no trustworthy instance ID or verified actual image metadata, so snapshots
+include only live extension-policy fields; image and all other VM fields are unknown. Live/no-op adoption must
+not promote partial certainty. Keep this conservative until the SDK proves actual
+instance/config identity; never infer it from name/session/image labels.
+Native `ctx.ui.custom` with a 100%-width/height overlay covers and pads the whole
+terminal viewport, including regular and alternate-screen renderers. This uses
+public APIs compatible with Pi 0.84.4 and 1.4.0, not a second TUI, private layoutRoot access, render patches,
+or manually emitted screen-switch escapes. Pi owns overlay focus/restoration.
+Opening is exclusive; cancel, errors and shutdown dispose drafts and entry buffers.
+
+`control-panel.test.ts` exercises keyboard-only CRUD/apply/cancel, exact widths
+24/32/40/80/120 and heights 1/2/3/4/6/16/24/40, and actual native renderer composition
+with terminal doubles (including an installed viewport layout root). Runtime tests
+use an injected SDK to verify live adoption versus guarded resource recreation.
+Regressions also drive the panel through the native integration with the shared
+`test/fake-msb-sdk.ts` fixture: startup-preference safety, isolated proposal
+cancellation/retry and saved/runtime failure recovery, short-height feedback, repeated secret editing and removal reconciliation.
+`control-panel-runtime.test.ts` additionally launches a process fixture with the
+actual Pi extension loader, command context, `ui.custom`, theme and both native
+renderers. It covers a symlinked agent root, all apply scopes, masked input,
+responsive overlay composition, close/reopen and focus restoration without a VM.
+It drives tree keys rather than section menus, including all scoped actions
+(fake SDK, no live VM) and literal command letters in inputs. It always tests the declared Pi 0.84.4 runtime;
+include an installed Pi 1.4.0 runtime with:
+
+```sh
+PI_MSB_TEST_PI_PACKAGE=/path/to/pi-coding-agent \
+  node --experimental-strip-types --import ./test/setup.ts --test extensions/pi-msb/control-panel-runtime.test.ts
+```
+
+The fixture overrides `PI_PACKAGE_DIR` to match the selected runtime: an inherited
+override for a different version can otherwise load incompatible theme assets.
+These are not live-VM or human-terminal tests. Before release, manually verify
+both native modes, themes, IME, bracketed paste, rapid resizing, and session
+switch/shutdown. Do not enable terminal input recording when entering secrets.
+
+Changed saves preserve sparse parsed raw data, not TOML comments/layout. Ordinary
+external edits and unsafe paths fail validation; portable Node APIs cannot provide
+an atomic compare-and-swap rename against a malicious host process. Keep policy
+outside every writable workspace/mount. See [backend contract](settings-backend.md).
 
 ### Bundled flock addon
 

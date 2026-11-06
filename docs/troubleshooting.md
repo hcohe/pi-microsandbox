@@ -2,16 +2,27 @@
 
 [Back to README](../README.md)
 
-1. Run `/msb status` and `/msb logs`.
-2. If the state is `unavailable (blocked)`, fix the displayed configuration,
-   image, virtualization, path, or missing-tool error and run `/msb reload`.
+1. Ask the agent to run `msb_diagnostics` even when routed tools are blocked.
+   This is passive: it uses cached, secret-redacted state without shell commands,
+   native SDK loading, log fetching, credential resolution, or VM startup.
+   Unknown/live health remains explicitly unverified. For human-only follow-up,
+   open `/msb`: inspect Status and Actions → Recent logs when the panel is available.
+2. Use `msb_config_get` to inspect configuration and recovery metadata, then
+   `msb_config_set` for an explicitly approved repair. These host management tools
+   do not require a healthy VM. Supported semantic repairs validate the full final
+   configuration before saving; malformed TOML and unresolved workspace identity
+   require host-side human repair. Fix image, virtualization, path, or missing-tool
+   problems as indicated, then choose Actions → Reload settings or apply a new
+   approved settings change. Saved-but-reload-failed means the file changed, not
+   that the sandbox recovered.
    Startup failures fail closed; routed tools do not silently run on the host.
-3. If a process died, a later startup or `/msb prune` can remove its labelled
+   Do not disable protection or broaden host access merely to make recovery tools work.
+3. If a process died, a later startup or Actions → Prune stale sandboxes can remove its labelled
    sandbox after the owner lock is free.
 4. If a same-name resource has different managed labels, pi-microsandbox
    refuses to attach or replace it. Verify the resource with Microsandbox's
    tooling before removing it.
-5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb off`
+5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb` → Actions → Turn off
    for explicit host mode, or configure `fallback_mode = "host"` knowingly.
    Automatic fallback remains visibly distinct from explicit off mode; both are
    unsandboxed.
@@ -30,16 +41,14 @@ the mount.
 ## Legacy named volumes
 
 Named Git volumes created by older releases are never migrated or deleted
-automatically. Before upgrading, use the old `/msb volumes` and `/msb export`
-commands to inventory and copy work while those commands are available. After
-upgrading, use Microsandbox's volume tooling to inspect and recover each
+automatically. Use Microsandbox's volume tooling to inspect and recover each
 `pi-msb-vol-*` volume, then remove it manually only after confirming that
 nothing is needed. Current pi-microsandbox commands do not manage these volumes.
 
 ## Docker daemon problems
 
-`/msb status` shows the configured Docker mode, readiness, server version, and
-storage driver. Inside an active sandbox, start or recheck the daemon with:
+`/msb` → Status shows Docker readiness, server version, and storage driver
+when known. Inside an active sandbox, start or recheck the daemon with:
 
 ```sh
 pi-msb-docker-start 15000

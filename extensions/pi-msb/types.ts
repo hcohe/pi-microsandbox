@@ -44,7 +44,10 @@ export interface NetworkConfig {
 }
 export interface SecretConfig {
   env: string;
-  value: string;
+  /** Exactly one source is required; textValue is always a literal string. */
+  textValue?: string;
+  hostEnv?: string;
+  hostCmd?: string;
   allowHosts: string[];
 }
 export interface MountConfig {
@@ -82,7 +85,6 @@ export interface Config {
   pruneOnStart: boolean;
   showFooter: boolean;
   lockDir: string;
-  hostRoAllowlist: string[];
 }
 export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends Array<infer U>
@@ -98,7 +100,7 @@ export type DeepReadonly<T> = T extends (...args: any[]) => unknown
     : T extends object
       ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
       : T;
-export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project";
+export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "temporary";
 export interface ParsedConfigLayer {
   name: ConfigLayerName;
   value: DeepPartial<Config>;
@@ -330,6 +332,8 @@ export interface BootRequest {
   workspace: Workspace;
   config: Config;
   restored: PersistedSandboxState | null;
+  /** Recreate only after ownership validation, even when inspected labels match. */
+  forceRecreate?: boolean;
 }
 export interface SandboxManager extends ToolOpsProvider {
   boot(request: BootRequest): Promise<RuntimeState>;
@@ -356,10 +360,40 @@ export type ExecFn = (
 
 // ------------------------------------------------------- command/control ----
 
+/** Redacted adopted policy; unverified VM fields are omitted rather than guessed. */
+export interface RuntimePolicySnapshot {
+  effectiveToml: string;
+  provenance: Record<string, string>;
+  /** Only these top-level Config keys are known; omitted VM policy is never guessed. */
+  knownFields: Array<keyof Config>;
+  verification: "created" | "reconnected";
+  /** TOML has no null; distinguish automatic naming from an empty string. */
+  automaticSandboxName: boolean;
+  adoptedAt: number;
+}
+/** Agent-safe projection frozen at successful adoption, independent of current desired credentials. */
+export interface AgentRuntimePolicySnapshot {
+  settings: Record<string, unknown>;
+  provenance: Record<string, string>;
+  knownFields: Array<keyof Config>;
+  verification: "created" | "reconnected";
+  adoptedAt: number;
+}
 export interface MsbControl {
+  /** Passive allowlisted snapshot from held state only. No settings.inspect,
+   * source/environment reads, commands, SDK, logs, lifecycle or writes.
+   * Cached desired/adoption is last-known, not live; raw errors are withheld.
+   * Optional for adapters: callers must not fall back to other methods. */
+  getDiagnostics?(): Promise<Record<string, unknown>>;
+  getAgentRuntimePolicy?(): AgentRuntimePolicySnapshot | undefined;
+  getRuntimePolicy?(): RuntimePolicySnapshot | undefined;
+  /** Present on the native integration; optional for third-party control adapters. */
+  readonly settings?: import("./settings.ts").SettingsEditor;
   getState(): RuntimeState;
   setEnabled(enabled: boolean): Promise<void>;
-  reload(): Promise<void>;
+  reload(options?: { allowRestart?: boolean; guard?: () => Promise<void> }): Promise<void>;
+  /** Native facade compares candidate to the actual adopted runtime configuration privately. */
+  previewSettings?(draft: import("./settings.ts").SettingsDraft): Promise<import("./settings.ts").SettingsPreview>;
   pruneNow(): Promise<PruneReport>;
   getLogs(tailLines?: number): Promise<string>;
   getEffectiveConfig(): ResolvedConfig;

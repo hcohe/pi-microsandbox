@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR_NAME,
   DEFAULT_MAX_BYTES,
@@ -12,21 +13,38 @@ import { createHostReadAccess } from "./skill-access.ts";
 import { createSandboxGrepExecute } from "./operations-exec.ts";
 import { registerMsbCommand, systemPromptNote } from "./command.ts";
 import { createMsbIntegration } from "./control.ts";
+import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
+import { registerConfigTools } from "./settings-tools.ts";
+import { registerDiagnosticsTool } from "./diagnostics-tools.ts";
+import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 import { registerSandboxTools } from "./tools.ts";
-import type { ResolvedConfig, RuntimeState } from "./types.ts";
+import { displayId, type ResolvedConfig, type RuntimeState } from "./types.ts";
 
-export function footerStatus(state: RuntimeState, visible: boolean): string | undefined {
+export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: string): string | undefined {
   if (!visible) return undefined;
+  const sessionDisplayId = sessionId ? displayId(sessionId) : undefined;
   switch (state.status) {
-    case "active": return `msb-${state.info?.displayId ?? "active"}`;
-    case "off": return "MSB host";
+    case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}`;
+    case "off": return "Microsandbox disabled - Running on host";
     case "host-fallback": return "MSB host fallback";
-    case "unavailable": return "MSB blocked";
-    case "booting": return "(msb) preparing sandbox...";
+    case "unavailable": return "Microsandbox Blocked";
+    case "booting": return `msb-${sessionDisplayId ?? state.info?.displayId ?? "…"}`;
     case "stopping": return "MSB stopping";
     default: return "MSB disabled";
   }
+}
+
+export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "fg">, text: string, state: RuntimeState, frame = 0): string {
+  const { status, info } = state;
+  const needsAttention = status === "off" || status === "unavailable" || status === "host-fallback"
+    || status === "active" && (info?.docker.readiness === "missing" || info?.docker.readiness === "unavailable");
+  let circleColor: "success" | "warning" | "dim" | "error" = "dim";
+  if (needsAttention) circleColor = "error";
+  else if (status === "active") circleColor = "success";
+  else if (status === "booting") circleColor = frame % 2 === 0 ? "warning" : "dim";
+  else if (status === "stopping") circleColor = "warning";
+  return `\x1b[22m${theme.fg("dim", text)} ${theme.fg(circleColor, "●")}\x1b[22m`;
 }
 
 /**
@@ -49,12 +67,11 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
   const currentProvider = integration.provider;
   let currentContext: ExtensionContext | undefined;
+  let currentSessionId: string | undefined;
+  let currentCwd: string | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
   let customFooterInstalled = false;
-
-  const styleFooterStatus = (ctx: ExtensionContext, text: string): string =>
-    `\x1b[22m${ctx.ui.theme.fg("dim", text)}\x1b[22m`;
 
   const stopBootAnimation = (): void => {
     if (bootAnimation !== undefined) {
@@ -63,17 +80,17 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     }
   };
 
-  const startBootAnimation = (ctx: ExtensionContext): void => {
+  const startBootAnimation = (): void => {
     if (bootAnimation !== undefined) return;
-    const frames = [
-      "(msb) preparing sandbox.",
-      "(msb) preparing sandbox..",
-      "(msb) preparing sandbox...",
-    ];
     let frame = 0;
     const render = (): void => {
-      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, frames[frame]));
-      frame = (frame + 1) % frames.length;
+      // Read the current session and theme on every tick, never a previous context.
+      const ctx = currentContext;
+      if (!ctx) return;
+      const state: RuntimeState = { status: "booting", info: null };
+      const text = footerStatus(state, true, ctx.sessionManager.getSessionId())!;
+      ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state, frame));
+      frame = (frame + 1) % 2;
     };
     render();
     bootAnimation = setInterval(render, 400);
@@ -86,7 +103,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   };
 
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
-    const text = footerStatus(state, integration.configRef.value.showFooter);
+    const text = footerStatus(state, integration.configRef.value.showFooter, ctx.sessionManager.getSessionId());
     if (text !== undefined) ensureCustomFooter(ctx);
     if (text === undefined) {
       stopBootAnimation();
@@ -94,11 +111,11 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       return;
     }
     if (state.status === "booting") {
-      startBootAnimation(ctx);
+      startBootAnimation();
       return;
     }
     stopBootAnimation();
-    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx, text));
+    ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state));
   };
 
   registerSandboxTools(pi, {
@@ -106,19 +123,25 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     config: integration.configRef.value,
     cwd: process.cwd(),
     hostReads,
+    ownedConfigToolEntry: fileURLToPath(import.meta.url),
     createGrepExecute: ({ provider, cwd, grepHelpers }) =>
       createSandboxGrepExecute({ provider, cwd, helpers: grepHelpers }),
     grepHelpers: { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead: truncateHead as (content: string, options?: unknown) => any, truncateLine, formatSize },
     systemPromptNote,
   });
   registerMsbCommand(pi, integration.control);
+  registerConfigTools(pi, integration.control);
+  registerDiagnosticsTool(pi, integration.control);
 
   pi.on("session_start", async (_event, ctx) => {
+    stopBootAnimation();
     currentContext = ctx;
+    currentSessionId = ctx.sessionManager.getSessionId();
+    currentCwd = ctx.cwd;
     updateStatus(ctx, { status: "booting", info: null });
     try {
-      // configureSession discovers the workspace once before project config
-      // resolution, and passes that same identity through sandbox boot.
+      // Discover the workspace before host config bootstrap/resolution, then
+      // pass that same identity through sandbox boot. Bare loads never write.
       const state = await integration.configureSession({
         sessionId: ctx.sessionManager.getSessionId(),
         cwd: ctx.cwd,
@@ -136,7 +159,15 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     }
   });
 
+  const warnSessionReset = (ctx: ExtensionContext): void => {
+    if (ctx.hasUI && Object.keys(integration.control.settings?.temporary() ?? {}).length) {
+      try { ctx.ui.notify(`Session sandbox overrides are being cleared. ${SESSION_LIFETIME_WARNING}`, "warning"); } catch { /* Notification failure must not prevent teardown. */ }
+    }
+  };
   pi.on("session_shutdown", async (_event, ctx) => {
+    await closeControlPanel();
+    warnSessionReset(ctx);
+    integration.endSession();
     stopBootAnimation();
     await integration.manager.shutdown();
     hostReads.clear();
@@ -146,10 +177,22 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     currentContext = undefined;
   });
 
-  // The tools module owns the skill capture hook. This handler only keeps the
-  // footer in sync after transitions initiated by commands or reload.
-  pi.on("session_info_changed", () => {
-    if (currentContext) updateStatus(currentContext, integration.control.getState());
+  // The tools module owns skill capture. Session identity changes must invalidate
+  // temporary settings before routing tools under the replacement session.
+  pi.on("session_info_changed", async (_event, ctx) => {
+    if (!currentContext) return;
+    if (ctx.sessionManager.getSessionId() !== currentSessionId || ctx.cwd !== currentCwd) {
+      await closeControlPanel();
+      warnSessionReset(ctx);
+      integration.endSession();
+      currentContext = ctx;
+      currentSessionId = ctx.sessionManager.getSessionId();
+      currentCwd = ctx.cwd;
+      stopBootAnimation();
+      updateStatus(ctx, { status: "booting", info: null });
+      await integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+    }
+    updateStatus(ctx, integration.control.getState());
   });
 
   void lastConfig;

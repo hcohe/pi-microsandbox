@@ -4,16 +4,24 @@
 
 The default is fail-closed:
 
-- Configuration, including trusted local settings, host-owned defaults, and
-  project overrides, is resolved before a sandbox starts. A boot, image,
+- Configuration, including host-owned defaults and project overrides, is
+  resolved before a sandbox starts. A boot, image,
   configuration, or tool failure blocks the seven routed tools
   (`read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash`). Failure never
   silently falls back to host execution.
 - `execution_target = "host"` is an opt-in escape for routed tool calls. While
   a sandbox is active it requires interactive approval for the exact tool,
   working directory, and recursively sorted arguments. It is unavailable in
-  headless operation and is never silently selected.
-- `/msb off` is an explicit host-mode handoff and does not prompt. This is
+  headless operation and is never silently selected. The approval prompt uses
+  theme-colored labels, a Bash command in the theme's string color (orange in
+  the dark theme), syntax-highlighted JSON arguments for other tools, and a
+  prominent isolation warning in the terminal. Bash
+  prompts omit execution options such as timeout; approval still binds all
+  arguments. Terminal control characters in commands are shown as escapes.
+  **No** is selected by default; Escape
+  also denies the request.
+- `/msb` → Actions → Turn off is an explicit host-mode handoff and asks for
+  confirmation before stopping/removing the guest. This is
   different from `fallback_mode = "host"`, which automatically uses host tools
   after a sandbox failure and is shown as `MSB host fallback`. Both are
   unsandboxed controls, not workspace settings.
@@ -22,8 +30,8 @@ The default is fail-closed:
   bundled POSIX addon is loaded lazily, has no install script, and never falls
   back to a racy PID check.
 
-There are no workspace modes. Inside a Git worktree, pi-microsandbox
-bind-mounts the entire worktree root read/write at the same lexical guest path.
+Inside a Git worktree, pi-microsandbox bind-mounts the entire worktree root
+read/write at the same lexical guest path.
 Outside Git, it bind-mounts the current directory. Commands start in the
 original current directory, but their path boundary is the selected root.
 
@@ -35,23 +43,74 @@ another's work. Use separate host worktrees or checkouts for isolation between
 sessions. Unsafe root mappings fail startup rather than falling back to a
 narrower mount.
 
+### Local files and secrets are your responsibility
+
+pi-microsandbox does not manage local-file security: it does not hide, filter,
+or restrict access to `.env` files or other sensitive information inside the
+mounted workspace. Git ignore rules do not prevent the sandbox from reading
+those files.
+
+We recommend [Worktrunk](https://worktrunk.dev/) for managing separate worktrees
+and automating per-project or per-worktree setup with hooks. Use that workflow
+to prepare a dedicated `.env` containing only credentials the agent may access,
+and review it before starting Pi. Avoid copying production secrets into agent
+worktrees. Worktrunk is workflow tooling, not a secret-filtering security boundary;
+any sensitive file placed in the mounted workspace remains accessible.
+
 The extension entry point does not import the native SDK or load the flock
 addon. Unsupported hosts can still load Pi and remain blocked or explicitly
 off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64
 with KVM; Windows, Intel macOS, and musl Linux are not supported.
 
+## Approved configuration tools
+
+`msb_config_get` is read-only, including headless use. `msb_config_set` can edit
+one explicit Session/Project/Global setting only after a fresh sanitized
+Cancel-first review; host-execution permission never substitutes for approval.
+The tool confirmation shows the masked diff without semantic warning lines.
+Relevant safety/impact warnings remain in review metadata and are returned in
+agent-visible text after completion (including saved-but-not-activated outcomes),
+so the agent can advise the user. Human setter result rows also omit warning
+blocks; getter inspection warnings are unchanged.
+No UI means no mutation. Secret sources and arbitrary unknown raw values
+are not exposed. Changed files/session identity/Session settings invalidate approval;
+conflicts never silently retry. Only these two exact tool names bypass the
+third-party tool gate, not other host tools or `msb_*` prefixes. See
+[schemas, review navigation and truthful save/reload outcomes](tools.md).
+
 ## Host-owned configuration
 
-A trusted local `.pi-msb.toml` is writable guest input, not an immutable host
-policy. Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
-under Pi's agent directory to pin security-sensitive fields outside the worktree.
-`pi-microsandbox/default.toml` applies to all projects; a host-owned per-project
-file overrides it. Both take precedence over local, environment, and session
-settings, and their lists replace rather than extend lower-layer lists.
+Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
+under Pi's agent directory to pin security-sensitive fields. Keep configuration
+outside the mounted worktree and all writable mounts.
+The first enabled session creates a missing `default.toml` as a fully commented
+reference, not an active policy; existing files (even empty ones) are preserved.
+New files use mode `0600`, new directories `0700`, and setup errors block startup.
+`pi-microsandbox/default.toml` supplies Global defaults; a host-owned per-project
+file supplies Project overrides. Both take precedence over launch environment/CLI settings;
+deliberate Session changes sit above both files, last only for the current
+session and are not written to its transcript. Host lists replace rather than
+extend lower-layer lists. `PI_MSB_*`
+environment variables and session `/msb` controls are also supported.
+Panel saves revalidate canonical host targets and workspace/mount guards, reject
+symlink targets/ancestors and external changes, and replace files atomically with
+mode 0600 (new directories 0700). Portable filesystem checks cannot prevent every
+host-process race; the policy directory must remain host-owned and inaccessible
+to guest writes. Save confirmation is a security decision: open networking,
+pass-through tools, host fallback and writable mounts widen the boundary.
+The human panel uses masked secret entry and never prefills source fields.
+Agent tools can read and configure host variable names and host commands, but
+cannot read or set literal `textValue` credentials. Do not embed credentials in
+host commands: their text is visible to the agent. A secret's host command runs
+with Pi's host privileges, not in the sandbox; approve only trusted commands.
+Inspection and settings saves never execute them.
+Configured secret bytes are redacted from recent log display, but guest application
+logs may contain other sensitive data. Do not share logs blindly.
+
 Unspecified settings are **not** locked. Missing overrides preserve the usual
 configuration behavior; unreadable or invalid overrides fail closed.
 
-Policy files may not reside in or symlink into the mounted workspace. While a
+Keep policy files and their symlink targets outside the mounted workspace. While a
 host policy is active, extra writable mounts may not overlap its directory,
 including locations for project overrides not yet created. Keep policy and
 credential files outside writable mounts. A project override applies to one

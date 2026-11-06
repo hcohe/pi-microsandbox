@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { DEFAULT_CONFIG } from "./config.ts";
-import { createMsbIntegration, type MicrosandboxModule } from "./control.ts";
+import { fakeSdk } from "../../test/fake-msb-sdk.ts";
+import { createMsbIntegration } from "./control.ts";
 import { sandboxNameFor, STATE_SCHEMA_VERSION, type Config, type ResolvedConfig } from "./types.ts";
 
 function config(overrides: Partial<Config> = {}): Config {
@@ -23,113 +24,20 @@ function resolved(value: Config): ResolvedConfig {
   return { config: value, provenance: {}, warnings: [] };
 }
 
-function notFound(): Error {
-  return Object.assign(new Error("not found"), { code: "NOT_FOUND" });
-}
-
-function fakeSdk(calls: string[], initial?: { name: string; status: string; labels: Record<string, string> }): MicrosandboxModule {
-  const sandboxes = new Map<string, any>();
-
-  const rawSandbox = (name: string) => ({
-    name,
-    fs: () => ({
-      read: async () => Buffer.alloc(0), write: async () => undefined, exists: async () => true,
-      stat: async () => ({ kind: "directory", size: 0, mode: 0o755, readonly: false }), list: async () => [],
-    }),
-    execWith: async (command: string, configure: (builder: any) => void) => {
-      const execution = { args: [] as string[], cwd: undefined as string | undefined, timeout: undefined as number | undefined };
-      const builder: any = {
-        args(value: string[]) { execution.args = value; return builder; },
-        cwd(value: string) { execution.cwd = value; return builder; },
-        timeout(value: number) { execution.timeout = value; return builder; },
-      };
-      configure(builder);
-      calls.push(`exec:${command}:${JSON.stringify(execution.args)}`);
-      return { stdoutBytes: () => Buffer.alloc(0), stderrBytes: () => Buffer.alloc(0), code: 0 };
-    },
-    execStreamWith: async () => ({ async *[Symbol.asyncIterator]() { yield { kind: "exited", code: 0 }; }, kill: async () => undefined }),
-  });
-
-  const makeHandle = (name: string, status: string, labels: Record<string, string>) => {
-    const raw = rawSandbox(name);
-    const handle: any = {
-      name, status, createdAt: new Date(),
-      config: () => ({ name, labels }),
-      connect: async () => { calls.push(`connect:${name}`); return raw; },
-      startDetached: async () => { calls.push(`start:${name}`); return raw; },
-      stopWithTimeout: async () => { calls.push(`stop:${name}`); },
-      waitUntilStopped: async () => ({ status: "stopped" }),
-      remove: async () => { calls.push(`remove:${name}`); sandboxes.delete(name); },
-      logs: async () => [],
-    };
-    sandboxes.set(name, handle);
-    return handle;
-  };
-  if (initial) makeHandle(initial.name, initial.status, initial.labels);
-
-  const Sandbox = {
-    builder(name: string) {
-      const metadata = { labels: {} as Record<string, string> };
-      const builder: any = {
-        image(value: string) { calls.push(`image:${value}`); return builder; },
-        pullPolicy(value: string) { calls.push(`pull-policy:${value}`); return builder; },
-        cpus(value: number) { calls.push(`cpus:${value}`); return builder; },
-        memory(value: number) { calls.push(`memory:${value}`); return builder; },
-        idleTimeout(value: number) { calls.push(`idle:${value}`); return builder; },
-        detached(value: boolean) { calls.push(`detached:${value}`); return builder; },
-        workdir(value: string) { calls.push(`workdir:${value}`); return builder; },
-        labels(value: Record<string, string>) { metadata.labels = value; calls.push(`labels:${JSON.stringify(value)}`); return builder; },
-        volume(guest: string, configure: (mount: any) => void) {
-          calls.push(`volume:${guest}`);
-          const mount: any = {
-            bind(value: string) { calls.push(`bind:${value}`); return mount; },
-            named(value: string) { calls.push(`named:${value}`); return mount; },
-            tmpfs() { calls.push("tmpfs"); return mount; },
-            readonly() { calls.push("readonly"); return mount; },
-            noexec() { calls.push("noexec"); return mount; },
-            nosuid() { calls.push("nosuid"); return mount; },
-            nodev() { calls.push("nodev"); return mount; },
-          };
-          configure(mount);
-          return builder;
-        },
-        disableNetwork() { calls.push("network:deny"); return builder; },
-        network(configure: (network: any) => void) { const network = { policy: () => { calls.push("network:policy"); return network; } }; configure(network); return builder; },
-        port(host: number, guest: number) { calls.push(`port:${host}:${guest}`); return builder; },
-        portBind(bind: string, host: number, guest: number) { calls.push(`port-bind:${bind}:${host}:${guest}`); return builder; },
-        envs() { return builder; },
-        secret(configure: (secret: any) => void) {
-          const secret: any = { env: () => secret, value: () => secret, requireTlsIdentity: () => secret, allowHost: () => secret, allowHostPattern: () => secret };
-          configure(secret); return builder;
-        },
-        async create() {
-          calls.push(`create:${name}`);
-          makeHandle(name, "running", metadata.labels);
-          return rawSandbox(name);
-        },
-      };
-      return builder;
-    },
-    async get(name: string) { const handle = sandboxes.get(name); if (!handle) throw notFound(); return handle; },
-    async listWith() { return { sandboxes: [], nextCursor: undefined }; },
-  };
-  return { Sandbox };
-}
-
 async function temp(t: test.TestContext, prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), `pi-msb-${prefix}-`));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
 
-test("host defaults and project policy survive local edits, reload, session overrides, and off/on", async (t) => {
+test("host policy survives local edits while temporary settings override it through reload and off/on", async (t) => {
   const root = await temp(t, "host-config");
   const cwd = join(root, "Code", "app");
   await mkdir(cwd, { recursive: true });
   initRepo(cwd);
   const agentDir = join(root, "agent");
   const defaultFile = join(agentDir, "pi-microsandbox", "default.toml");
-  const projectFile = join(agentDir, "pi-microsandbox", "projects", "Code", "app", ".pi-msb.toml");
+  const projectFile = join(agentDir, "pi-microsandbox", "projects", "Code", "app", "config.toml");
   await mkdir(dirname(projectFile), { recursive: true });
   await writeFile(defaultFile, `
 bootstrap_tools = false
@@ -163,9 +71,11 @@ mode = "disabled"
   assert.equal(integration.configRef.value.fallbackMode, "block");
   assert.equal(integration.configRef.value.allowHostExecution, false);
   await integration.control.setOverride("cpus", 64);
-  assert.equal(integration.configRef.value.cpus, 2);
+  assert.equal(integration.configRef.value.cpus, 64);
   await integration.control.setEnabled(false);
   await integration.control.setEnabled(true);
+  assert.equal(integration.configRef.value.cpus, 64);
+  await integration.control.resetOverrides();
   assert.equal(integration.configRef.value.cpus, 2);
   await rm(projectFile);
   await integration.control.reload();
@@ -287,19 +197,23 @@ test("guest runtime probes do not require Git", async (t) => {
   await integration.manager.shutdown();
 });
 
-test("persisted overrides containing removed workspace keys fail closed without SDK load", async (t) => {
+test("historical persisted overrides are ignored and never resurrect temporary settings", async (t) => {
   const root = await temp(t, "legacy-overrides");
+  const cwd = join(root, "workspace");
+  await mkdir(cwd);
   for (const key of ["mode", "clone_branch", "clone_depth", "shallow_archive", "volume_quota_mib"]) {
     let loads = 0;
     const integration = createMsbIntegration({
-      sessionId: `legacy-${key}`, cwd: root, configDirName: ".pi",
+      sessionId: `legacy-${key}`, cwd, configDirName: ".pi", agentDir: join(root, "agent"),
       entries: () => [{ type: "custom", customType: "pi-msb.override", data: { key, value: "legacy" } }],
       sdkLoader: async () => { loads++; return fakeSdk([]); },
+      acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
     });
-    const state = await integration.configureSession({ sessionId: `legacy-${key}`, cwd: root, projectTrusted: true });
-    assert.equal(state.status, "unavailable");
-    assert.match(state.reason ?? "", /removed.*bind-mounts.*read\/write/);
-    assert.equal(loads, 0);
+    const state = await integration.configureSession({ sessionId: `legacy-${key}`, cwd, projectTrusted: true });
+    t.after(() => integration.manager.shutdown());
+    assert.equal(state.status, "active");
+    assert.equal(loads, 1);
+    assert.deepEqual(integration.control.settings?.temporary(), {});
   }
 });
 
@@ -324,6 +238,65 @@ test("legacy same-session sandbox is removed and recreated, never reconnected", 
   await integration.manager.shutdown();
 });
 
+test("session setup bootstraps only on first enabled session and ignores obsolete local policy", async (t) => {
+  const root = await temp(t, "bootstrap-lifecycle");
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const file = join(agentDir, "pi-microsandbox/default.toml");
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  await writeFile(join(cwd, ".pi-msb.toml"), 'mode = "git"\n[[malformed');
+  await writeFile(join(cwd, ".pi/msb.toml"), 'cpus = 0\nfallback_mode = "host"');
+  let loads = 0;
+  const env = { PI_MSB_AUTO_START: "false", PI_MSB_CPUS: "3", PI_MSB_DISABLE: "1" };
+  const integration = createMsbIntegration({
+    sessionId: "bootstrap", cwd, agentDir, configDirName: ".pi", env,
+    sdkLoader: async () => { loads++; return fakeSdk([]); },
+  });
+  await assert.rejects(stat(file), { code: "ENOENT" });
+  assert.equal((await integration.configureSession({ sessionId: "bootstrap", cwd, projectTrusted: true })).status, "off");
+  await assert.rejects(stat(file), { code: "ENOENT" });
+  env.PI_MSB_DISABLE = "0";
+  assert.equal((await integration.configureSession({ sessionId: "bootstrap", cwd, projectTrusted: true })).status, "off");
+  const template = await readFile(file, "utf8");
+  assert.match(template, /pi-microsandbox host-owned configuration/);
+  assert.equal(integration.configRef.value.cpus, 3);
+  assert.equal(loads, 0);
+  await writeFile(file, "cpus = 2\n");
+  await integration.control.reload();
+  assert.equal(integration.configRef.value.cpus, 2);
+  assert.equal(await readFile(file, "utf8"), "cpus = 2\n");
+  await writeFile(file, "");
+  await integration.configureSession({ sessionId: "bootstrap-next", cwd, projectTrusted: false });
+  assert.equal(await readFile(file, "utf8"), "");
+  assert.equal(integration.configRef.value.cpus, 3);
+  assert.equal(loads, 0);
+});
+
+test("bootstrap failures block setup and explicit on even when environment requests host fallback", async (t) => {
+  const root = await temp(t, "bootstrap-failure");
+  const cwd = join(root, "project");
+  await mkdir(cwd);
+  const unusableAgent = join(root, "not-a-directory");
+  await writeFile(unusableAgent, "preserve this");
+  for (const agentDir of [unusableAgent, join(cwd, "agent")]) {
+    let loads = 0;
+    const integration = createMsbIntegration({
+      sessionId: "blocked-bootstrap", cwd, agentDir, configDirName: ".pi",
+      env: { PI_MSB_FALLBACK_MODE: "host" },
+      sdkLoader: async () => { loads++; return fakeSdk([]); },
+    });
+    const state = await integration.configureSession({ sessionId: "blocked-bootstrap", cwd, projectTrusted: true });
+    assert.equal(state.status, "unavailable");
+    assert.match(state.reason ?? "", /host configuration/);
+    await integration.control.setEnabled(true);
+    assert.equal(integration.provider.getState().status, "unavailable");
+    await assert.rejects(integration.provider.withRuntime(async () => undefined));
+    assert.equal(loads, 0);
+  }
+  assert.equal(await readFile(unusableAgent, "utf8"), "preserve this");
+  await assert.rejects(stat(join(cwd, "agent")), { code: "ENOENT" });
+});
+
 test("network and port behavior remains independent of workspace storage", async (t) => {
   const root = await temp(t, "network");
   const calls: string[] = [];
@@ -339,5 +312,181 @@ test("network and port behavior remains independent of workspace storage", async
   assert.ok(calls.includes("network:deny"));
   assert.ok(calls.includes("port:3000:3000"));
   assert.ok(calls.includes("port-bind:0.0.0.0:5000:50"));
+  await integration.manager.shutdown();
+});
+
+test("network uses exact domains; wildcard secret destinations stay separate from network rules", async (t) => {
+  const root = await temp(t, "exact-domains"); const calls: string[] = [];
+  const sdk = fakeSdk(calls);
+  const policy: any = {
+    defaultDeny() { calls.push("default-deny"); return policy; }, defaultIngress: () => policy,
+    egress(configure: (rule: any) => void) {
+      const rule: any = { allow(configure: (destination: any) => void) {
+        const destination: any = {
+          domain(host: string) { calls.push(`domain:${host}`); return destination; },
+          ip(host: string) { calls.push(`ip:${host}`); return destination; },
+          cidr(host: string) { calls.push(`cidr:${host}`); return destination; },
+        };
+        configure(destination); return rule;
+      } };
+      configure(rule); return policy;
+    },
+  };
+  sdk.NetworkPolicy = { builder: () => policy };
+  const builder = sdk.Sandbox.builder;
+  sdk.Sandbox.builder = (...args: any[]) => {
+    const value = builder(...args);
+    value.secret = (configure: (entry: any) => void) => {
+      const entry: any = { env: () => entry, value: () => entry, requireTlsIdentity(required: boolean) { assert.equal(required, true); return entry; },
+        allowHost(host: string) { calls.push(`secret-host:${host}`); return entry; },
+        allowHostPattern(host: string) { calls.push(`secret-pattern:${host}`); return entry; },
+      };
+      configure(entry); return value;
+    };
+    return value;
+  };
+  const integration = createMsbIntegration({ sessionId: "exact", cwd: root, configDirName: ".pi", sdkLoader: async () => sdk,
+    acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => {} }) });
+  t.after(() => integration.manager.shutdown());
+  const state = await integration.configureSession({ sessionId: "exact", cwd: root, projectTrusted: true, config: resolved(config({
+    network: { mode: "allowlist", allowHosts: ["github.com", "api.github.com", "127.0.0.1", "2001:db8::/32"], allowDns: false, publishPorts: [] },
+    secrets: [{ env: "TOKEN", textValue: "synthetic-private", allowHosts: ["github.com", "other.example", "*.googleapis.com"] }],
+  })) });
+  assert.equal(state.status, "active");
+  assert.ok(calls.includes("default-deny"));
+  assert.deepEqual(calls.filter((call) => /^(domain|ip|cidr):/.test(call)), ["domain:github.com", "domain:api.github.com", "ip:127.0.0.1", "cidr:2001:db8::/32"]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("secret-host:")), ["secret-host:github.com", "secret-host:other.example"]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("secret-pattern:")), ["secret-pattern:*.googleapis.com"]);
+  assert.ok(!calls.includes("domain:other.example"));
+  assert.ok(!calls.includes("domain:*.googleapis.com"));
+});
+
+test("temporary control edits are memory-only, validated atomically, and reset at session boundaries", async (t) => {
+  const root = await temp(t, "temporary-control");
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const agentDir = join(root, "agent");
+  const defaultFile = join(agentDir, "pi-microsandbox", "default.toml");
+  await mkdir(dirname(defaultFile), { recursive: true });
+  await writeFile(defaultFile, 'auto_start = false\ncpus = 3\n');
+  const entries: string[] = [];
+  const integration = createMsbIntegration({ sessionId: "one", cwd, agentDir, configDirName: ".pi", env: { HOME: root }, appendEntry: (kind) => { entries.push(kind); } });
+  t.after(() => integration.manager.shutdown());
+  await integration.configureSession({ sessionId: "one", cwd, projectTrusted: true });
+  await integration.control.setOverride("cpus", 8);
+  assert.equal(integration.configRef.value.cpus, 8);
+  await assert.rejects(integration.control.setOverride("cpus", 0));
+  assert.equal(integration.configRef.value.cpus, 8);
+  assert.equal(integration.control.settings?.temporary().cpus, 8);
+  await integration.configureSession({ sessionId: "one", cwd, projectTrusted: true });
+  assert.equal(integration.configRef.value.cpus, 8);
+  await integration.configureSession({ sessionId: "two", cwd, projectTrusted: true });
+  assert.equal(integration.configRef.value.cpus, 3);
+  await integration.control.setOverride("cpus", 12);
+  integration.endSession();
+  await integration.configureSession({ sessionId: "two", cwd, projectTrusted: true });
+  assert.equal(integration.configRef.value.cpus, 3);
+  assert.equal(entries.includes("pi-msb.override"), false);
+  assert.equal(await readFile(defaultFile, "utf8"), 'auto_start = false\ncpus = 3\n');
+});
+
+test("settings apply reload adopts live fields and recreates SDK resources/network/secrets; temporary reset/end is memory-only", async (t) => {
+  const root = await realpath(await temp(t, "settings-runtime"));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const calls: string[] = []; const entries: Array<{ type: string; customType: string; data: unknown }> = [];
+  const sdk = fakeSdk(calls);
+  const integration = createMsbIntegration({ sessionId: "settings-runtime", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }), appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }) });
+  await integration.configureSession({ sessionId: "settings-runtime", cwd, projectTrusted: true });
+  calls.length = 0;
+  const live = await integration.control.settings!.open("temporary"); live.set("show_footer", false); await live.apply(); await integration.control.reload();
+  assert.equal(integration.configRef.value.showFooter, false); assert.ok(!calls.some((call) => /create:|remove:|stop:/.test(call)));
+  const draft = await integration.control.settings!.open("temporary");
+  draft.set("cpus", 2); draft.set("memory_mib", 2048); draft.set("network.mode", "deny");
+  draft.upsertSecret({ env: "TOKEN", textValue: "PRIVATE_TEST_SENTINEL", allowHosts: ["api.example.com"] });
+  await draft.apply(); await integration.control.reload();
+  assert.ok(calls.includes("cpus:2")); assert.ok(calls.includes("memory:2048")); assert.ok(calls.includes("network:deny")); assert.ok(calls.includes("secret-env:TOKEN"));
+  assert.ok(calls.some((call) => call.startsWith("remove:"))); assert.ok(calls.some((call) => call.startsWith("create:")));
+  assert.doesNotMatch(JSON.stringify(entries), /PRIVATE_TEST_SENTINEL|pi-msb.override/);
+  await integration.control.resetOverrides(); assert.equal(integration.configRef.value.cpus, 4); assert.deepEqual(integration.configRef.value.secrets, []);
+  const again = await integration.control.settings!.open("temporary"); again.set("cpus", 3); await again.apply(); await integration.control.reload();
+  integration.endSession(); await integration.manager.shutdown();
+  await integration.configureSession({ sessionId: "settings-runtime", cwd, projectTrusted: true }); assert.equal(integration.configRef.value.cpus, 4);
+  await integration.manager.shutdown();
+});
+
+test("preview compares privately to adopted runtime and late resource changes cannot restart without consent", async (t) => {
+  const root = await realpath(await temp(t, "settings-consent")); const cwd = join(root, "workspace"); await mkdir(cwd);
+  const agentDir = join(root, "agent"); const calls: string[] = []; const sdk = fakeSdk(calls);
+  const integration = createMsbIntegration({ sessionId: "consent", cwd, agentDir, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
+  await integration.configureSession({ sessionId: "consent", cwd, projectTrusted: true });
+  await writeFile(join(agentDir, "pi-microsandbox/default.toml"), "cpus = 2\n");
+  const draft = await integration.control.settings!.open("temporary"); draft.set("show_footer", false);
+  assert.equal((await draft.preview()).effect, "live"); // disk baseline already has cpus=2
+  assert.equal((await integration.control.previewSettings!(draft)).effect, "restart");
+  await draft.apply(); calls.length = 0;
+  await assert.rejects(integration.control.reload({ allowRestart: false }), /restart confirmation/);
+  assert.equal(integration.configRef.value.cpus, 4); assert.equal(integration.provider.isActive(), true);
+  assert.ok(!calls.some((call) => /create:|remove:|stop:/.test(call)));
+  await integration.control.reload({ allowRestart: true }); assert.equal(integration.configRef.value.cpus, 2);
+  await integration.manager.shutdown();
+});
+
+test("disabled Git subdirectory settings use canonical worktree identity without bootstrap/SDK/adoption", async (t) => {
+  const root = await realpath(await temp(t, "disabled-settings")); const repo = join(root, "repo"); const cwd = join(repo, "packages/app"); await mkdir(cwd, { recursive: true }); initRepo(repo);
+  const agentDir = join(root, "agent"); let loads = 0;
+  const integration = createMsbIntegration({ sessionId: "disabled", cwd, agentDir, configDirName: ".pi", env: { PI_MSB_DISABLE: "1", PI_MSB_CPUS: "3" }, sdkLoader: async () => { loads++; return fakeSdk([]); } });
+  const state = await integration.configureSession({ sessionId: "disabled", cwd, projectTrusted: true }); assert.equal(state.status, "off"); assert.match(state.reason!, /PI_MSB_DISABLE/);
+  await assert.rejects(stat(agentDir), { code: "ENOENT" }); assert.equal(loads, 0); assert.equal(integration.configRef.value.cpus, 4);
+  const draft = await integration.control.settings!.open("project");
+  const expected = join(agentDir, "pi-microsandbox/projects-absolute", repo.slice(1), "config.toml"); assert.equal(draft.path, expected); assert.ok(!draft.path!.includes("packages/app/config.toml"));
+  draft.set("cpus", 2); await draft.apply(); await integration.control.reload();
+  assert.equal(integration.control.getState().status, "off"); assert.equal(integration.configRef.value.cpus, 4); assert.equal(loads, 0);
+  assert.match(await readFile(expected, "utf8"), /cpus/); await assert.rejects(stat(join(agentDir, "pi-microsandbox/default.toml")), { code: "ENOENT" });
+});
+
+test("disabled workspace discovery failure stays off and blocks wrong-identity editing", async (t) => {
+  const root = await realpath(await temp(t, "disabled-failed-settings")); const cwd = join(root, "missing"); let loads = 0;
+  const integration = createMsbIntegration({ sessionId: "disabled-failed", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env: { PI_MSB_DISABLE: "1" }, sdkLoader: async () => { loads++; return fakeSdk([]); } });
+  const state = await integration.configureSession({ sessionId: "disabled-failed", cwd, projectTrusted: true });
+  assert.equal(state.status, "off"); assert.match(state.reason!, /Settings editing is blocked/);
+  assert.throws(() => integration.control.settings, /canonical workspace discovery/); assert.equal(loads, 0);
+  await assert.rejects(stat(join(root, "agent")), { code: "ENOENT" });
+});
+
+test("recent logs redact actual boot-time secret bytes even if an environment reference changes", async (t) => {
+  const root = await realpath(await temp(t, "settings-log-redaction")); const cwd = join(root, "workspace"); await mkdir(cwd);
+  const env = { PI_MSB_SECRETS: JSON.stringify([{ env: "TOKEN", hostEnv: "ACTUAL_TOKEN", allow_hosts: ["api.example.com"] }]), ACTUAL_TOKEN: "BOOT_SECRET_SENTINEL" };
+  const sdk = fakeSdk([], undefined, "log BOOT_SECRET_SENTINEL and NEW_SECRET_SENTINEL");
+  const integration = createMsbIntegration({ sessionId: "logs", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
+  await integration.configureSession({ sessionId: "logs", cwd, projectTrusted: true });
+  env.ACTUAL_TOKEN = "NEW_SECRET_SENTINEL";
+  assert.doesNotMatch(await integration.control.getLogs(100), /BOOT_SECRET_SENTINEL|NEW_SECRET_SENTINEL/);
+  await integration.manager.shutdown();
+});
+
+test("runtime activation failure after a valid settings save stays blocked and does not echo credential bytes", async (t) => {
+  const root = await realpath(await temp(t, "settings-failure")); const cwd = join(root, "workspace"); await mkdir(cwd);
+  const sdk = fakeSdk([]); const integration = createMsbIntegration({ sessionId: "failure", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
+  await integration.configureSession({ sessionId: "failure", cwd, projectTrusted: true });
+  const originalBuilder = sdk.Sandbox.builder;
+  sdk.Sandbox.builder = (name: string) => { const builder = originalBuilder(name); builder.create = async () => { throw new Error("SDK rejected PRIVATE_FAILURE_SENTINEL"); }; return builder; };
+  const draft = await integration.control.settings!.open("temporary"); draft.set("cpus", 2); draft.upsertSecret({ env: "TOKEN", textValue: "PRIVATE_FAILURE_SENTINEL", allowHosts: ["api.example.com"] }); await draft.apply();
+  await assert.rejects(integration.control.reload(), /activation failed/);
+  assert.equal(integration.control.getState().status, "unavailable"); assert.equal(integration.provider.isActive(), false);
+  assert.doesNotMatch(JSON.stringify(integration.control.getState()), /PRIVATE_FAILURE_SENTINEL/);
+  await assert.rejects(integration.provider.withRuntime(async () => undefined), /not available/);
+  assert.equal(integration.configRef.value.fallbackMode, "block");
+  await integration.manager.shutdown();
+});
+
+test("prune diagnostic details redact current and boot-time credential bytes before reaching the panel", async (t) => {
+  const root = await realpath(await temp(t, "prune-redaction")); const cwd = join(root, "workspace"); await mkdir(cwd);
+  const env = { PI_MSB_SECRETS: JSON.stringify([{ env: "TOKEN", hostEnv: "TOKEN", allow_hosts: ["a.example"] }]), TOKEN: "BOOT_PRIVATE_SENTINEL" };
+  const sdk = fakeSdk([]);
+  const integration = createMsbIntegration({ sessionId: "prune-redaction", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
+  await integration.configureSession({ sessionId: "prune-redaction", cwd, projectTrusted: true });
+  env.TOKEN = "CURRENT_PRIVATE_SENTINEL";
+  sdk.Sandbox.listWith = async () => { throw new Error("Prune failed: BOOT_PRIVATE_SENTINEL / CURRENT_PRIVATE_SENTINEL"); };
+  const report = await integration.control.pruneNow();
+  assert.ok(report.errors.length); assert.doesNotMatch(JSON.stringify(report), /BOOT_PRIVATE_SENTINEL|CURRENT_PRIVATE_SENTINEL/); assert.match(report.errors.join(" "), /REDACTED/);
   await integration.manager.shutdown();
 });

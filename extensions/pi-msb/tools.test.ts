@@ -1,10 +1,13 @@
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import {
   hostApprovalMessage,
   registerSandboxTools,
@@ -19,6 +22,12 @@ import type {
   ToolOpsProvider,
 } from "./types.ts";
 
+initTheme("dark");
+
+const approvalTheme = {
+  fg: (color: string, text: string) => `\x1b[${color === "warning" ? 33 : color === "accent" ? 36 : 37}m${text}\x1b[39m`,
+  bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+};
 const ROUTED = ["bash", "edit", "find", "grep", "ls", "read", "write"] as const;
 
 function config(overrides: Partial<Config> = {}): Config {
@@ -50,7 +59,6 @@ function config(overrides: Partial<Config> = {}): Config {
     pruneOnStart: true,
     showFooter: false,
     lockDir: "/tmp/pi-msb-locks",
-    hostRoAllowlist: [],
     ...overrides,
   };
 }
@@ -105,12 +113,15 @@ function createHarness(options: {
   config?: Partial<Config>;
   hasUI?: boolean;
   confirm?: boolean;
+  cancel?: boolean;
+  mode?: ExtensionContext["mode"];
+  configToolSource?: string | null;
 } = {}) {
   const cwd = process.cwd();
   let current = options.runtimeState ?? state();
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
   const tools = new Map<string, any>();
-  const confirmations: Array<{ title: string; message: string }> = [];
+  const confirmations: Array<{ title: string; choices: string[] }> = [];
   const allowedReads: string[] = [];
   const skillUpdates: unknown[][] = [];
   const hostReads: HostReadAccess = {
@@ -126,22 +137,24 @@ function createHarness(options: {
   };
   const ctx = {
     cwd,
+    mode: options.mode ?? "rpc",
     hasUI: options.hasUI ?? true,
     ui: {
-      confirm: async (title: string, message: string) => {
-        confirmations.push({ title, message });
-        return options.confirm ?? true;
+      theme: approvalTheme,
+      select: async (title: string, choices: string[]) => {
+        confirmations.push({ title, choices });
+        return options.cancel ? undefined : options.confirm === false ? "No" : "Yes";
       },
     },
   } as unknown as ExtensionContext;
   const pi = {
     registerTool(tool: any) { tools.set(tool.name, tool); },
     getAllTools() {
-      return [...tools.values()].map((tool) => ({
+      return [...tools.values(), ...["msb_config_get", "msb_config_set", "msb_diagnostics"].map((name) => ({ name, configTool: true }))].map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
-        sourceInfo: { source: "builtin" },
+        sourceInfo: tool.configTool ? options.configToolSource === null ? undefined : { source: "local", path: options.configToolSource ?? fileURLToPath(new URL("./index.ts", import.meta.url)) } : { source: "builtin" },
       }));
     },
     on(name: string, handler: any) {
@@ -153,6 +166,7 @@ function createHarness(options: {
     config: config(options.config),
     cwd,
     hostReads,
+    ownedConfigToolEntry: fileURLToPath(new URL("./index.ts", import.meta.url)),
     createGrepExecute: () => async () => ({ content: [{ type: "text", text: "sandbox" }] }),
     grepHelpers: {
       DEFAULT_MAX_BYTES: 1000,
@@ -188,16 +202,83 @@ test("adds an optional Google-compatible target while preserving required fields
 });
 
 test("approval messages omit routing and use a generic host-isolation warning", () => {
-  const message = hostApprovalMessage("bash", {
+  const message = hostApprovalMessage("read", {
     z: 1,
     execution_target: "host",
-    command: "git status",
+    path: "README.md",
   }, "/work/repo");
-  assert.match(message, /Tool: bash/);
+  assert.match(message, /Tool: read/);
   assert.match(message, /Working directory: \/work\/repo/);
   assert.match(message, /bypasses VM, process, and network isolation/i);
   assert.doesNotMatch(message, /execution_target|mode|volume/i);
-  assert.ok(message.indexOf('"command"') < message.indexOf('"z"'));
+  assert.ok(message.indexOf('"path"') < message.indexOf('"z"'));
+});
+
+test("Bash approval shows the literal command instead of JSON or execution options", () => {
+  const command = 'ls -la "$HOME/Desktop"\nprintf "hello\\n"';
+  const message = hostApprovalMessage("bash", { command, timeout: 10, execution_target: "host" }, "/work/repo");
+  assert.equal(message.split("Command:\n\n")[1], command);
+  assert.doesNotMatch(message, /Exact arguments|"command"|timeout|execution_target/);
+});
+
+test("Bash approval colors every command line with the theme's orange string color", () => {
+  const calls: Array<{ color: string; text: string }> = [];
+  const theme = {
+    ...approvalTheme,
+    fg(color: string, text: string) {
+      calls.push({ color, text });
+      return approvalTheme.fg(color, text);
+    },
+  };
+  const command = 'ls -la "$HOME/Desktop"\nprintf "hello\\n"';
+  const message = hostApprovalMessage("bash", { command }, "/work/repo", theme);
+  assert.equal(stripVTControlCharacters(message).split("Command:\n\n")[1], command);
+  assert.deepEqual(calls.filter(({ color }) => color === "syntaxString"),
+    command.split("\n").map((text) => ({ color: "syntaxString", text })));
+});
+
+test("Bash approval escapes terminal controls rather than executing or hiding them", () => {
+  const message = hostApprovalMessage("bash", { command: "echo \x1b[2J\r\u202e" }, "/work/repo");
+  assert.equal(message.split("Command:\n\n")[1], "echo \\u{1b}[2J\\u{d}\\u{202e}");
+});
+
+test("approval styling preserves exact arguments and emphasizes the isolation warning", () => {
+  const input = { path: 'file "name"', limit: 10, execution_target: "host" };
+  const theme = approvalTheme;
+  const plain = hostApprovalMessage("read", input, "/work/repo");
+  const styled = hostApprovalMessage("read", input, "/work/repo", theme);
+  assert.equal(stripVTControlCharacters(styled), plain);
+  assert.ok(styled.includes(theme.bold(theme.fg("accent", "read"))));
+  assert.match(styled, /\x1b\[33mWarning:/);
+  assert.ok(plain.indexOf("Warning:") < plain.indexOf("Exact arguments:"));
+  assert.deepEqual(JSON.parse(plain.split("Exact arguments:\n")[1]!), {
+    path: input.path, limit: 10,
+  });
+  assert.match(styled.split("\n").find((line) => line.includes('"path"'))!, /\x1b\[/);
+});
+
+test("approval selector defaults to denial and keeps non-TUI prompts plain", async () => {
+  const harness = createHarness();
+  await harness.emit("tool_call", {
+    toolName: "bash", toolCallId: "prompt", input: { command: "pwd", execution_target: "host" },
+  });
+  assert.deepEqual(harness.confirmations[0]!.choices, ["No", "Yes"]);
+  assert.match(harness.confirmations[0]!.title, /^Allow host execution\?\n\nTool: bash/);
+  assert.doesNotMatch(harness.confirmations[0]!.title, /\x1b/);
+
+  const terminal = createHarness({ mode: "tui" });
+  await terminal.emit("tool_call", {
+    toolName: "bash", toolCallId: "themed", input: { command: "pwd", execution_target: "host" },
+  });
+  assert.match(terminal.confirmations[0]!.title, /\x1b\[33mWarning:/);
+  assert.equal(stripVTControlCharacters(terminal.confirmations[0]!.title), harness.confirmations[0]!.title);
+  assert.match(stripVTControlCharacters(terminal.confirmations[0]!.title), /Command:\n\npwd$/);
+
+  const canceled = createHarness({ cancel: true });
+  const [result] = await canceled.emit("tool_call", {
+    toolName: "bash", toolCallId: "cancel", input: { command: "pwd", execution_target: "host" },
+  });
+  assert.equal(result.block, true);
 });
 
 test("registers all routed schemas and keeps built-in prompt/render metadata", () => {
@@ -251,11 +332,13 @@ test("fails closed without UI and clears denied approvals", async () => {
 });
 
 test("blocks routed tools when unavailable and supports configured host fallback", async () => {
-  const blocked = createHarness({ runtimeState: state("unavailable") });
+  const blocked = createHarness({ runtimeState: { ...state("unavailable"), reason: "PRIVATE_STARTUP_REASON" } });
   const input = { path: "extensions/pi-msb/tools.ts" };
   const [gate] = await blocked.emit("tool_call", { toolName: "read", toolCallId: "blocked", input });
   assert.equal(gate.block, true);
-  await assert.rejects(blocked.tools.get("read").execute("blocked", input, undefined, undefined, blocked.ctx), /unavailable/);
+  assert.doesNotMatch(gate.reason, /PRIVATE_STARTUP_REASON/);
+  assert.match(gate.reason, /msb_diagnostics/);
+  await assert.rejects(blocked.tools.get("read").execute("blocked", input, undefined, undefined, blocked.ctx), (error: Error) => /unavailable/.test(error.message) && !error.message.includes("PRIVATE_STARTUP_REASON"));
 
   const disabled = createHarness({ runtimeState: state("disabled"), config: { fallbackMode: "host" } });
   const [disabledGate] = await disabled.emit("tool_call", { toolName: "read", toolCallId: "disabled", input });
@@ -292,4 +375,32 @@ test("updates skill access, tracks Bash output, and proxies user_bash", async ()
   assert.deepEqual(harness.skillUpdates[0], [{ filePath: "/tmp/SKILL.md", baseDir: "/tmp" }]);
   assert.deepEqual(harness.skillUpdates[1], []);
   assert.deepEqual(harness.allowedReads, []);
+});
+
+test("third-party gate exempts only the exact owned configuration and diagnostics tools", async () => {
+  for (const status of ["active", "unavailable", "off", "host-fallback", "booting", "stopping", "disabled"] as const) {
+    const f = createHarness({ runtimeState: state(status) });
+    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics"]) {
+      const outcomes = await f.emit("tool_call", { toolName, toolCallId: "config", input: {} });
+      assert.ok(outcomes.every((outcome) => !outcome?.block));
+    }
+    if (status !== "off" && status !== "host-fallback") {
+      for (const toolName of ["msb_config_get_extra", "msb_config_set_extra", "msb_diagnostics_extra", "msb_other", "external_tool"]) {
+        const outcomes = await f.emit("tool_call", { toolName, toolCallId: "external", input: {} });
+        assert.ok(outcomes.some((outcome) => outcome?.block), toolName);
+      }
+    }
+    assert.equal(f.confirmations.length, 0);
+  }
+});
+
+
+test("management tools with missing or mismatched registration provenance receive no exemption", async () => {
+  for (const configToolSource of [null, fileURLToPath(new URL("./settings-tools.ts", import.meta.url)), "/tmp/nonexistent/index.ts"]) {
+    const f = createHarness({ configToolSource });
+    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics"]) {
+      const outcomes = await f.emit("tool_call", { toolName, toolCallId: "spoof", input: {} });
+      assert.ok(outcomes.some((outcome) => outcome?.block));
+    }
+  }
 });

@@ -1,9 +1,13 @@
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { Type } from "typebox";
 import type {
   BashOperations,
   ExtensionAPI,
   ExtensionContext,
   ToolDefinition,
+  Theme,
   UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -14,6 +18,7 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
+  highlightCode,
 } from "@earendil-works/pi-coding-agent";
 import type {
   Config,
@@ -80,15 +85,26 @@ export function hostApprovalMessage(
   tool: string,
   input: Record<string, unknown>,
   cwd: string,
+  theme?: Pick<Theme, "fg" | "bold">,
 ): string {
+  const label = (text: string) => theme ? theme.fg("muted", text) : text;
+  const value = (text: string) => theme ? theme.fg("text", text) : text;
+  const command = tool === "bash" && typeof input.command === "string" ? input.command : undefined;
+  // Commands are no longer JSON-escaped: keep terminal controls visible, not executable.
+  const content = command === undefined
+    ? JSON.stringify(sortForFingerprint(withoutExecutionTarget(input)), null, 2)
+    : command.replace(/[\p{Cc}\p{Cf}]/gu, (char) => char === "\n" ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`);
+  const warning = "Warning: this operation runs on the host and bypasses VM, process, and network isolation.";
   return [
-    `Tool: ${tool}`,
-    `Working directory: ${cwd}`,
+    `${label("Tool:")} ${theme ? theme.bold(theme.fg("accent", tool)) : tool}`,
+    `${label("Working directory:")} ${value(cwd)}`,
     "",
-    "Exact arguments:",
-    JSON.stringify(sortForFingerprint(withoutExecutionTarget(input)), null, 2),
+    theme ? theme.bold(theme.fg("warning", warning)) : warning,
     "",
-    "Warning: this operation runs on the host and bypasses VM, process, and network isolation.",
+    label(command === undefined ? "Exact arguments:" : "Command:"),
+    ...(command === undefined ? [] : [""]),
+    ...(theme && command === undefined ? highlightCode(content, "json") : content.split("\n"))
+      .map((line) => command === undefined ? `  ${line}` : theme ? theme.fg("syntaxString", line) : line),
   ].join("\n");
 }
 
@@ -97,6 +113,8 @@ export interface RegisterToolsDeps {
   config: Config;
   cwd: string;
   hostReads: HostReadAccess;
+  /** Exact entry module that owns the configuration tools; missing provenance never exempts them. */
+  ownedConfigToolEntry?: string;
   createGrepExecute: (args: {
     provider: ToolOpsProvider;
     cwd: string;
@@ -121,9 +139,9 @@ function isSandboxActive(state: RuntimeState, provider: ToolOpsProvider): boolea
   return state.status === "active" && provider.isActive();
 }
 
-function unavailableError(state: RuntimeState): Error {
-  const reason = state.reason ? `: ${state.reason}` : "";
-  return new Error(`Sandbox is unavailable${reason}; routed tool execution is blocked.`);
+function unavailableError(_state: RuntimeState): Error {
+  // Startup/adapter reasons can contain data for which no redaction context exists.
+  return new Error("Sandbox is unavailable; routed tool execution is blocked. Use msb_diagnostics and msb_config_get to diagnose it; msb_config_set can request an approved repair without a running sandbox.");
 }
 
 function routeError(tool: string): Error {
@@ -180,6 +198,12 @@ function resultFullOutputPath(result: unknown): string | undefined {
  * and execution policy are not accidentally replaced.
  */
 export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps): void {
+  const canonicalEntry = (path: string | undefined): string | undefined => {
+    if (!path || path.startsWith("<")) return;
+    try { return realpathSync(resolve(deps.cwd, path.startsWith("~/") ? `${homedir()}/${path.slice(2)}` : path)); }
+    catch { return; }
+  };
+  const ownedConfigToolEntry = canonicalEntry(deps.ownedConfigToolEntry);
   const hostDefinitions: Record<RoutedToolName, AnyToolDefinition> = {
     bash: createBashToolDefinition(deps.cwd),
     edit: createEditToolDefinition(deps.cwd),
@@ -324,11 +348,10 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
           reason: "Host execution requires user approval, but no interactive UI is available.",
         };
       }
-      const approved = await ctx.ui.confirm(
-        "Allow host execution?",
-        hostApprovalMessage(tool, input, deps.cwd),
-      );
-      if (!approved) {
+      // Keep RPC prompts plain, and make denial the default in the TUI selector.
+      const message = hostApprovalMessage(tool, input, deps.cwd, ctx.mode === "tui" ? ctx.ui.theme : undefined);
+      const choice = await ctx.ui.select(`Allow host execution?\n\n${message}`, ["No", "Yes"]);
+      if (choice !== "Yes") {
         clearApproval(event.toolCallId);
         return { block: true, reason: "Host execution was denied by the user." };
       }
@@ -346,6 +369,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const registered = (typeof (pi as ExtensionAPI).getAllTools === "function"
       ? pi.getAllTools()
       : []).find((candidate) => candidate.name === tool);
+    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics") && ownedConfigToolEntry
+      && canonicalEntry(registered?.sourceInfo?.path) === ownedConfigToolEntry) return;
     const source = registered?.sourceInfo?.source;
     if (source === "builtin") return;
     if (!deps.config.blockThirdParty) return;

@@ -54,8 +54,25 @@ starting virtualization:
 ```sh
 PI_MSB_DISABLE=1 pi
 # In Pi:
-/msb status
+/msb
 ```
+
+The panel opens even when virtualization is disabled. Canonical workspace
+discovery is still required for correct project identity, but disabled startup
+creates no configuration and loads no SDK. PI_MSB_DISABLE remains authoritative:
+saving never enables the sandbox; remove the variable and restart Pi to enable.
+Resources, Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions,
+Status, General and Advanced start collapsed directly below MICROSANDBOX, with
+Resources focused.
+Settings edit desired policy; Status contains read-only `[runtime]` metadata,
+not duplicated settings. A single-line contextual footer stays at the bottom. Use j/k and h/l (or arrows),
+e/a/d to edit/add/delete-an-entry-or-inherit-a-scalar, and q to close. Each change
+offers Session, Project, Global, or Cancel.
+Apply reloads this sandbox automatically; others pick up defaults on next
+start/reload. Review any restart/promotion/shadowing warning before confirming.
+Actions contains enable/off/reload/logs/prune. This panel requires
+interactive terminal mode; headless users can edit host-owned policy or set
+`PI_MSB_*` before launch.
 
 Off mode is **not sandboxed**: Pi's tools run directly on the host. Remove
 `PI_MSB_DISABLE` only after reviewing the configuration and host prerequisites.
@@ -65,18 +82,14 @@ default for a fail-closed setup. `fallback_mode = "host"` is an explicit,
 visibly labelled opt-in to automatic unsandboxed execution.
 
 The public package is named `pi-microsandbox`. Current technical interfaces
-retain the shorter `msb` name, including `/msb`, `PI_MSB_*`, `.pi-msb.toml`,
+retain the shorter `msb` name, including `/msb`, `PI_MSB_*`,
 configuration directories, and managed-resource labels.
 
-There are no workspace modes. Starting inside Git mounts the entire worktree
-root read/write; starting elsewhere mounts the cwd. The mount uses the same
+## Workspace mounting
+
+Starting inside Git mounts the entire worktree root read/write; starting
+elsewhere mounts the cwd. The mount uses the same
 lexical guest path, commands retain their original cwd, and writes reach the
 host immediately. This exposes `.git`, secrets, untracked files, and sibling
 directories. Concurrent sessions share a checkout, and nested containers can
 reach the mount.
-
-Before upgrading from a release with named Git workspaces, use its `/msb
-volumes` and `/msb export` commands to inventory and copy retained work. The new
-release neither reconnects nor deletes legacy volumes. Recover or remove them
-manually with Microsandbox tooling after confirming their contents. Removed
-settings such as `mode` and `PI_MSB_MODE` are errors, not compatibility aliases.

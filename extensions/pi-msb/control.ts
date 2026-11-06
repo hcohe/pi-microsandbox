@@ -1,17 +1,20 @@
 import { homedir } from "node:os";
+import { isIP } from "node:net";
 import { join } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  applyOverride,
   DEFAULT_CONFIG,
+  ensureDefaultHostConfig,
   isDisabledByEnv,
-  overridesToToml,
   resolveConfig,
   resolveSecretValue,
-  removeOverride,
   toEffectiveToml,
 } from "./config.ts";
+import { boundDiagnosticsReport, type DiagnosticFailureCode } from "./diagnostics-tools.ts";
+import { projectSettingsJson } from "./settings-json.ts";
+import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
+import { classifySettingsEffect, LIVE_SETTINGS_KEYS, SettingsEditor } from "./settings.ts";
 import { buildSandboxLabels, decodeSessionState, normalizeSandboxRecord, encodeSessionState } from "./labels.ts";
 import { acquireOwnerLock, createLocksPort } from "./locks.ts";
 import { createBashOps, createFindOps, createGrepOps } from "./operations-exec.ts";
@@ -23,6 +26,7 @@ import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } 
 import {
   LOCKFILE_VERSION,
   sandboxNameFor,
+  type AgentRuntimePolicySnapshot,
   type BootRequest,
   type Config,
   type LockInfo,
@@ -33,14 +37,13 @@ import {
   type RuntimeExecution,
   type RuntimePreparation,
   type RuntimeState,
+  type RuntimePolicySnapshot,
   type ToolOperations,
   type ToolOpsProvider,
   type Workspace,
-  type DeepPartial,
 } from "./types.ts";
 
 const STATE_ENTRY = "pi-msb.state";
-const OVERRIDE_ENTRY = "pi-msb.override";
 const REQUIRED_GUEST_COMMANDS = ["bash", "rg", "file", "cat", "mkdir", "rm"] as const;
 
 type AnyRecord = Record<string, any>;
@@ -81,15 +84,31 @@ export interface MsbIntegration {
   provider: ToolOpsProvider;
   configRef: { value: Config };
   configureSession(setup: SessionSetup): Promise<RuntimeState>;
+  /** Lifecycle owner must call this on shutdown; does not stop the manager. */
+  endSession(): void;
 }
 
 function errorText(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
 }
 
-function redactedError(error: unknown, config: Config): Error {
-  let message = errorText(error);
-  for (const secret of config.secrets) if (secret.value) message = message.split(secret.value).join("[REDACTED]");
+function secretDescriptors(config: Config): string[] {
+  return config.secrets.flatMap((secret) => [secret.textValue, secret.hostEnv, secret.hostCmd]).filter((value): value is string => typeof value === "string" && !!value);
+}
+
+function redactSecretText(text: string, values: Iterable<string>): string {
+  const variants = new Set<string>();
+  for (const value of values) if (value) {
+    variants.add(value);
+    variants.add(JSON.stringify(value).slice(1, -1));
+  }
+  // Longest first prevents overlapping credentials leaving a suffix visible.
+  for (const value of [...variants].sort((a, b) => b.length - a.length)) text = text.split(value).join("[REDACTED]");
+  return text;
+}
+
+function redactedError(error: unknown, config: Config, resolvedValues: Iterable<string> = []): Error {
+  const message = redactSecretText(errorText(error), [...secretDescriptors(config), ...resolvedValues]);
   return new Error(message || "microsandbox operation failed");
 }
 
@@ -190,7 +209,8 @@ function applyNetwork(builder: AnyRecord, config: Config, sdk: MicrosandboxModul
       const policy = policyApi.builder().defaultDeny().defaultIngress("deny");
       for (const host of network.allowHosts) {
         policy.egress((rule: AnyRecord) => rule.allow((destination: AnyRecord) => {
-          if (host.includes("/") || /^\d+(?:\.\d+){3}$/.test(host)) return destination.cidr(host);
+          if (host.includes("/")) return destination.cidr(host);
+          if (isIP(host)) return destination.ip(host);
           return destination.domain(host);
         }));
       }
@@ -227,31 +247,69 @@ function persistenceState(entries: readonly unknown[], sessionId: string): Persi
   return null;
 }
 
-function sanitizeOverride(key: string, value: unknown): unknown {
-  if (/secret|password|token|credential|\.value/i.test(key)) return "[REDACTED]";
-  return structuredClone(value);
-}
-
 export function createMsbIntegration(options: MsbControlOptions): MsbIntegration {
   const configRef = { value: { ...DEFAULT_CONFIG, network: { ...DEFAULT_CONFIG.network }, docker: { ...DEFAULT_CONFIG.docker } } as Config };
   let sessionId = options.sessionId;
   let cwd = options.cwd;
   let workspace: Workspace | null = null;
   let resolved: ResolvedConfig = { config: configRef.value, provenance: {}, warnings: [] };
-  let overrides: DeepPartial<Config> = {};
+  const resolutionSanitizers = new WeakMap<ResolvedConfig, SettingsSanitizer>();
+  const requestSanitizers = new WeakMap<Config, SettingsSanitizer>();
   let projectTrusted = true;
+  const settingsInput = () => ({ cwd, repoRoot: workspace?.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env });
+  const settings = new SettingsEditor(settingsInput(), sessionId);
+  // Diagnostics never resolve configuration or inspect settings. Only this small,
+  // non-string projection is retained on the existing resolution paths. Raw
+  // parser/SDK errors are deliberately withheld: even a known sanitizer cannot
+  // prove coverage for rejected syntax or unobserved reconnect credentials.
+  let diagnosticDesired: Record<string, unknown> | undefined;
+  let diagnosticFailure: DiagnosticFailureCode = "unknown";
+  let capturingBootFailure = false;
+  const cacheDiagnosticConfig = (config: Config): void => {
+    diagnosticDesired = {
+      autoStart: config.autoStart, allowHostExecution: config.allowHostExecution,
+      bootstrapTools: config.bootstrapTools, blockThirdParty: config.blockThirdParty,
+      secretCount: config.secrets.length, mountCount: config.mounts.length,
+      networkMode: config.network.mode, dockerMode: config.docker.mode,
+      fallbackMode: config.fallbackMode,
+    };
+  };
   let configReady = false;
+  let settingsReady = false;
+  let pendingRestart = false;
+  const logSecretRedactions = new Set<string>();
+  let endingSession = false;
+  const resolvedCommandSources = new Set<string>();
   let explicitOff = isDisabledByEnv(options.env ?? process.env);
   let failureState: RuntimeState | null = explicitOff ? { status: "off", info: null } : { status: "unavailable", info: null, reason: "session has not started" };
   let sdkPromise: Promise<MicrosandboxModule> | null = null;
   let activeProjectRoot = cwd;
 
+  const redactDiagnostic = async (text: string): Promise<string> => {
+    try {
+      const sensitive = new Set(logSecretRedactions);
+      for (const value of secretDescriptors(configRef.value)) sensitive.add(value);
+      for (const secret of configRef.value.secrets) {
+        // A fresh reconnect cannot recover the token used by an existing VM.
+        // Never execute a command for diagnostics or expose potentially unmasked logs.
+        if (secret.hostCmd !== undefined && !resolvedCommandSources.has(secret.hostCmd)) return "Diagnostic unavailable: startup secret tokens are unavailable for redaction.";
+        if (secret.hostEnv !== undefined) sensitive.add(await resolveSecretValue(secret, options.env ?? process.env));
+      }
+      return redactSecretText(text, sensitive);
+    } catch { return "Diagnostic unavailable: a secret source could not be read for redaction."; }
+  };
   const loadSdk = async (): Promise<MicrosandboxModule> => {
     if (!sdkPromise) sdkPromise = (options.sdkLoader ?? (async () => await import("microsandbox")))();
     return sdkPromise;
   };
   const lockPort = () => options.locksPort ?? createLocksPort({ lockDir: expandHome(configRef.value.lockDir) });
-  const sdk = async () => loadSdk();
+  const sdk = async () => {
+    try { return await loadSdk(); }
+    catch (error) {
+      if (capturingBootFailure && diagnosticFailure === "runtime_start_failed") diagnosticFailure = "native_sdk_unavailable";
+      throw error;
+    }
+  };
 
   const listSandboxPage = async (input: { labels: Record<string, string>; cursor?: string }) => {
     const msb = await sdk();
@@ -287,6 +345,12 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
 
   const deps: SandboxManagerDeps = {
+    redactError: (message) => redactedError(message, configRef.value, logSecretRedactions).message,
+    disposed: () => {
+      if (endingSession) {
+        logSecretRedactions.clear(); resolvedCommandSources.clear(); endingSession = false;
+      }
+    },
     acquireOwnerLock: async (request) => options.acquireOwnerLock
       ? options.acquireOwnerLock(request)
       : acquireOwnerLock({ lockDir: expandHome(request.config.lockDir) }, lockInfoFor(request)),
@@ -321,12 +385,20 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const resolvedSecrets: string[] = [];
       try {
         for (const secret of request.config.secrets) {
-          const value = await resolveSecretValue(secret.value, options.env ?? process.env);
+          let value: string;
+          try { value = await resolveSecretValue(secret, options.env ?? process.env); }
+          catch (error) {
+            diagnosticFailure = secret.hostCmd !== undefined ? "host_secret_command_failed"
+              : secret.hostEnv !== undefined ? "host_secret_environment_unavailable" : "unknown";
+            throw error;
+          }
           resolvedSecrets.push(value);
+          if (value) logSecretRedactions.add(value);
+          if (secret.hostCmd !== undefined) resolvedCommandSources.add(secret.hostCmd);
           builder.secret((entry: AnyRecord) => {
             entry.env(secret.env).value(value).requireTlsIdentity(true);
             for (const host of secret.allowHosts) {
-              if (host.includes("*") || host.includes("?")) entry.allowHostPattern(host);
+              if (host.startsWith("*.")) entry.allowHostPattern(host);
               else entry.allowHost(host);
             }
             return entry;
@@ -334,9 +406,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         }
         return await builder.create();
       } catch (error) {
-        let message = errorText(error);
-        for (const value of resolvedSecrets) if (value) message = message.split(value).join("[REDACTED]");
-        throw new Error(message || "sandbox creation failed");
+        throw redactedError(error, request.config, resolvedSecrets);
       }
     },
     stopAndRemove: async (name, timeout) => {
@@ -364,6 +434,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       } as ToolOperations;
     },
     prepareRuntime: async (runtime, config): Promise<RuntimePreparation> => {
+      try {
       const commandsMissing = async (commandNames: readonly string[]) => {
         const result = await Promise.all(commandNames.map(async (command) => ({
           command,
@@ -457,15 +528,54 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         return { docker: { mode, readiness: "unavailable", reason } };
       }
       return { docker: { mode, readiness: "ready", version, storageDriver } };
+      } catch (error) {
+        diagnosticFailure = "runtime_preparation_failed";
+        throw error;
+      }
     },
     persist: (state) => options.appendEntry?.(STATE_ENTRY, encodeSessionState(state)),
   };
 
+  let adopted: { sessionId: string; cwd: string; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot } | undefined;
+  deps.adopted = (request, verification) => {
+    diagnosticFailure = "unknown";
+    const sameRuntime = adopted?.sessionId === request.sessionId && adopted.cwd === request.cwd;
+    const knownFields = verification === "created" ? Object.keys(request.config) as Array<keyof Config>
+      : verification === "live" && sameRuntime ? adopted!.policy.knownFields : [...LIVE_SETTINGS_KEYS];
+    const safeConfig = Object.fromEntries(knownFields.map((key) => [key, key === "secrets"
+      ? request.config.secrets.map((secret) => ({ env: secret.env, allowHosts: [...secret.allowHosts],
+        ...Object.fromEntries(["textValue", "hostEnv", "hostCmd"].filter((source) => Object.hasOwn(secret, source)).map((source) => [source, "<redacted>"])),
+      }))
+      : request.config[key]])) as unknown as Config;
+    const provenance: Record<string, string> = Object.fromEntries(Object.entries(resolved.provenance).filter(([key]) => knownFields.some((field) => key === field || key.startsWith(`${field}.`) || key.startsWith(`${field}[`))));
+    const effectiveToml = toEffectiveToml({ ...resolved, config: safeConfig });
+    if (verification === "reconnected" && sameRuntime && adopted!.policy.verification === "reconnected" && adopted!.policy.effectiveToml === effectiveToml) return;
+    const policy: RuntimePolicySnapshot = {
+      effectiveToml, provenance, automaticSandboxName: knownFields.includes("sandboxName") && request.config.sandboxName === null,
+      knownFields: [...knownFields], verification: verification === "created" || verification === "live" && sameRuntime && adopted!.policy.verification === "created" ? "created" : "reconnected", adoptedAt: Date.now(),
+    };
+    const sanitize = requestSanitizers.get(request.config) ?? createSettingsSanitizer([request.config]);
+    const agentPolicy = sanitize({
+      // Human TOML stays source-masked, but agents can inspect known host source descriptors.
+      settings: projectSettingsJson(Object.fromEntries(knownFields.map((key) => [key, request.config[key]]))), knownFields: policy.knownFields,
+      provenance: policy.provenance, verification: policy.verification, adoptedAt: policy.adoptedAt,
+    }, [request.config]);
+    adopted = { sessionId: request.sessionId, cwd: request.cwd, policy, agentPolicy };
+  };
   const manager = createSandboxManager(deps);
+  const boot = async (request: Parameters<typeof manager.boot>[0]) => {
+    diagnosticFailure = "runtime_start_failed";
+    capturingBootFailure = true;
+    try {
+      const result = await manager.boot(request);
+      if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
+      return result;
+    } finally { capturingBootFailure = false; }
+  };
   const notifyState = (state: RuntimeState) => options.onState?.(state);
   const visibleState = (): RuntimeState => {
     const state = failureState ?? manager.getState();
-    if (explicitOff && (state.status === "disabled" || state.status === "off")) return { status: "off", info: null };
+    if (explicitOff && (state.status === "disabled" || state.status === "off")) return { ...state, status: "off", info: null };
     return state;
   };
   const provider: ToolOpsProvider = {
@@ -474,48 +584,66 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     withRuntime: (callback) => manager.withRuntime(callback),
   };
   const effective = (): ResolvedConfig => resolved;
-  const configSnapshot = (): Config => structuredClone(configRef.value);
-  const overrideEntries = (entries: readonly unknown[]): DeepPartial<Config> => {
-    let result: DeepPartial<Config> = {};
-    for (const entry of entries) {
-      const value = objectConfig(entry);
-      if (value.type !== "custom" || value.customType !== OVERRIDE_ENTRY) continue;
-      if (value.data?.reset === true) { result = {}; continue; }
-      if (typeof value.data?.key !== "string") continue;
-      if (value.data?.unset === true) result = removeOverride(result, value.data.key);
-      else if (value.data?.value !== "[REDACTED]") result = applyOverride(result, value.data.key, value.data.value);
-    }
-    return result;
+  const configSnapshot = (): Config => {
+    const snapshot = structuredClone(configRef.value);
+    requestSanitizers.set(snapshot, resolutionSanitizers.get(resolved) ?? createSettingsSanitizer([snapshot]));
+    return snapshot;
   };
-  const resolveForSession = async (setup: SessionSetup, selected: Workspace): Promise<ResolvedConfig> => {
-    if (setup.config) return setup.config;
-    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted: setup.projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false): Promise<ResolvedConfig> => {
+    configReady = false;
+    const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
+    if (approvedSettingsReload) settings.assertSession(input, sessionId);
+    else {
+      settings.configureSession(input, sessionId);
+      await ensureDefaultHostConfig(selected.guestRoot, options.agentDir);
+    }
+    let sanitize!: SettingsSanitizer;
+    const next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary() }, (captured) => { sanitize = captured; });
+    cacheDiagnosticConfig(next.config);
+    resolutionSanitizers.set(next, sanitize);
+    return next;
   };
 
   const configureSession = async (setup: SessionSetup): Promise<RuntimeState> => {
     sessionId = setup.sessionId;
     cwd = setup.cwd;
     configReady = false;
+    settingsReady = false;
+    workspace = null;
+    diagnosticDesired = undefined;
+    diagnosticFailure = "unknown";
     projectTrusted = setup.projectTrusted;
+    settings.beginSession({ ...settingsInput(), cwd: setup.cwd, repoRoot: undefined }, setup.sessionId);
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     if (explicitOff) {
-      failureState = { status: "off", info: null };
+      try {
+        workspace = await discoverWorkspace(cwd);
+        cwd = workspace.cwd;
+        activeProjectRoot = workspace.guestRoot;
+        settings.configureSession(settingsInput(), sessionId);
+        settingsReady = true;
+        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
+      } catch {
+        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set; workspace discovery failed. Settings editing is blocked. Fix the working directory/Git discovery and restart Pi." };
+      }
       notifyState(failureState);
       return visibleState();
     }
     let next: ResolvedConfig;
     try {
-      overrides = overrideEntries(options.entries?.() ?? []);
       workspace = await discoverWorkspace(cwd);
       cwd = workspace.cwd;
       activeProjectRoot = workspace.guestRoot;
-      next = await resolveForSession(setup, workspace);
+      settings.configureSession(settingsInput(), sessionId);
+      settingsReady = true;
+      next = setup.config ?? await resolveForWorkspace(workspace);
     } catch (error) {
-      failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
+      failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
       notifyState(failureState);
       return visibleState();
     }
     resolved = next;
+    cacheDiagnosticConfig(next.config);
     configReady = true;
     Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
     const state = setup.restored ?? persistenceState(options.entries?.() ?? [], sessionId);
@@ -525,18 +653,50 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       if (!explicitOff) { await manager.setEnabled(false); failureState = { status: "off", info: null }; }
       return visibleState();
     }
-    const result = await manager.boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: state });
+    const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: state });
     if (result.status === "unavailable") failureState = result;
     notifyState(visibleState());
     return visibleState();
   };
 
   const control: MsbControl = {
+    get settings() {
+      if (!settingsReady) throw new Error("Settings unavailable until canonical workspace discovery succeeds. Fix the working directory and restart Pi.");
+      return settings;
+    },
     getState: visibleState,
+    async getDiagnostics() {
+      const state = visibleState();
+      const statuses = ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"];
+      const status = statuses.includes(state.status) ? state.status : "unknown";
+      const failed = status === "unavailable" || status === "host-fallback";
+      const phase = !settingsReady ? "workspace_or_session_not_ready"
+        : !configReady ? "configuration_not_ready"
+        : failed ? "runtime_failure" : "none";
+      const code: DiagnosticFailureCode = !failed ? "none" : !settingsReady ? "workspace_unavailable"
+        : !configReady ? "invalid_configuration" : diagnosticFailure;
+      return boundDiagnosticsReport({
+        outcome: "diagnosed", readOnly: true, evidence: "cached; last-known, not live-probed",
+        runtime: { status, execution: status === "active" ? "sandbox" : status === "off" ? "explicit-host" : status === "host-fallback" ? "fallback-host" : "blocked" },
+        readiness: { workspaceReady: workspace !== null && settingsReady, settingsReady, configReady },
+        host: { platform: process.platform, arch: process.arch, node: process.version },
+        failure: { phase, code },
+        desired: { evidence: "last-known resolution; not live", validForSession: configReady,
+          ...(configReady && diagnosticDesired ? { settings: { ...diagnosticDesired } } : {}) },
+        adoption: { evidence: "last-known; not live", known: adopted?.sessionId === sessionId && adopted.cwd === cwd,
+          verification: adopted?.sessionId === sessionId && adopted.cwd === cwd ? adopted.policy.verification : "unknown" },
+        recovery: !settingsReady
+          ? "Fix working-directory/Git identity on the host and restart Pi; settings editing is blocked until canonical workspace discovery succeeds."
+          : "Use msb_config_get to inspect recovery constraints, then msb_config_set to propose a supported repair. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Never disable protection or use host fallback as an automatic repair.",
+        notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "logs/stdout", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
+      });
+    },
+    getAgentRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.agentPolicy) : undefined,
+    getRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.policy) : undefined,
     async setEnabled(enabled) {
       if (enabled && isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
-        failureState = { status: "off", info: null };
+        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
         notifyState(failureState);
         return;
       }
@@ -554,83 +714,109 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         failureState = { status: "off", info: null };
       } else {
         try {
+          workspace = null;
+          settingsReady = false;
           workspace = await discoverWorkspace(cwd);
+          settingsReady = true;
           cwd = workspace.cwd;
           activeProjectRoot = workspace.guestRoot;
-          const next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+          const next = await resolveForWorkspace(workspace);
           resolved = next;
           configReady = true;
           Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-          const result = await manager.boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: persistenceState(options.entries?.() ?? [], sessionId) });
+          const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate: pendingRestart, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+          if (result.status === "active") pendingRestart = false;
           if (result.status === "unavailable") failureState = result;
         } catch (error) {
-          failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
+          configReady = false;
+          failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
         }
       }
       notifyState(visibleState());
     },
-    async reload() {
+    previewSettings: (draft) => draft.preview(configSnapshot()),
+    async reload(reloadOptions) {
+      await reloadOptions?.guard?.();
       if (isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
-        failureState = { status: "off", info: null };
+        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
         notifyState(failureState);
+        if (reloadOptions?.guard) throw new Error("Runtime reload disabled by environment");
         return;
       }
       let next: ResolvedConfig;
       try {
+        workspace = null;
+        settingsReady = false;
         workspace = await discoverWorkspace(cwd);
+        settingsReady = true;
         cwd = workspace.cwd;
         activeProjectRoot = workspace.guestRoot;
-        next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+        next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
       } catch (error) {
         configReady = false;
-        if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
+        if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
         notifyState(visibleState());
         throw error;
       }
+      await reloadOptions?.guard?.();
+      pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
+      if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+        throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
+      }
+      const forceRecreate = pendingRestart;
       resolved = next;
       configReady = true;
       Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
       failureState = null;
-      if (!explicitOff && configRef.value.autoStart && workspace) {
-        const result = await manager.boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: persistenceState(options.entries?.() ?? [], sessionId) });
-        if (result.status === "unavailable") failureState = result;
+      if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
+        const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+        if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
+        else if (result.status === "active") pendingRestart = false;
       }
       notifyState(visibleState());
+      if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
     },
     async pruneNow() {
       const report = await pruneStale({ port: prunePort, locks: lockPort(), currentSessionId: sessionId, stopTimeoutMs: configRef.value.stopTimeoutMs });
+      for (const key of ["errors", "removed", "kept"] as const) report[key] = await Promise.all(report[key].map(redactDiagnostic));
       notifyState(visibleState());
       return report;
     },
     async getLogs(tailLines) {
       const name = visibleState().info?.name;
       if (!name) return "";
-      const msb = await sdk();
-      const handle = await msb.Sandbox.get(name);
-      const rows = await handle.logs(tailLines === undefined ? undefined : { tail: tailLines });
-      return rows.map((row: AnyRecord) => typeof row.text === "function" ? row.text() : Buffer.from(row.data ?? []).toString("utf8")).join("");
+      try {
+        const msb = await sdk();
+        const handle = await msb.Sandbox.get(name);
+        const rows = await handle.logs(tailLines === undefined ? undefined : { tail: tailLines });
+        const text = rows.map((row: AnyRecord) => typeof row.text === "function" ? row.text() : Buffer.from(row.data ?? []).toString("utf8")).join("");
+        return await redactDiagnostic(text);
+      } catch (error) {
+        throw new Error(await redactDiagnostic(errorText(error)));
+      }
     },
     getEffectiveConfig: effective,
     getEffectiveConfigToml: () => toEffectiveToml(effective()),
     async setOverride(key, value) {
-      overrides = applyOverride(overrides, key, value);
-      options.appendEntry?.(OVERRIDE_ENTRY, { key, value: sanitizeOverride(key, value) });
+      const draft = await settings.open("temporary");
+      draft.set(key, value);
+      await draft.apply();
       await control.reload();
     },
     async unsetOverride(key) {
-      overrides = removeOverride(overrides, key);
-      options.appendEntry?.(OVERRIDE_ENTRY, { key, unset: true });
+      const draft = await settings.open("temporary");
+      draft.inherit(key);
+      await draft.apply();
       await control.reload();
     },
     async resetOverrides() {
-      overrides = {};
-      options.appendEntry?.(OVERRIDE_ENTRY, { reset: true });
+      settings.endSession();
       await control.reload();
     },
   };
 
-  return { control, manager, provider, configRef, configureSession };
+  return { control, manager, provider, configRef, configureSession, endSession: () => { settings.endSession(); settingsReady = false; configReady = false; workspace = null; diagnosticDesired = undefined; diagnosticFailure = "unknown"; adopted = undefined; endingSession = true; } };
 }
 
 export const createControl = createMsbIntegration;
