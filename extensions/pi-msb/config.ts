@@ -18,7 +18,7 @@ import type {
 } from "./types.ts";
 
 const ROUTED_TOOLS = ["read", "write", "edit", "ls", "find", "grep", "bash"];
-const PASS_THROUGH_TOOLS = ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"];
+const PASS_THROUGH_TOOLS = ["web_search", "source_check", "fetch_content"];
 const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "network.allowHosts"]);
 const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeAllowHosts", "removePublishPorts"]);
 const SECRET_FIELDS = new Set(["env", "textValue", "hostEnv", "hostCmd", "allowHosts"]);

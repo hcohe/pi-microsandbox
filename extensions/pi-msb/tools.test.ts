@@ -16,6 +16,7 @@ import {
 } from "./tools.ts";
 import { createSessionExecution } from "./types.ts";
 import { createHostReadAccess } from "./skill-access.ts";
+import { DEFAULT_CONFIG } from "./config.ts";
 import type {
   Config,
   HostReadAccess,
@@ -367,6 +368,21 @@ test("blocks routed tools when unavailable and supports configured host fallback
   const [gateResult] = await fallback.emit("tool_call", { toolName: "read", toolCallId: "fallback", input: { ...input, execution_target: "host" } });
   assert.equal(gateResult, undefined);
   assert.equal(fallback.confirmations.length, 0);
+});
+
+test("todo and ask_user_question require explicit pass-through configuration", async () => {
+  const names = ["todo", "ask_user_question"];
+  const defaults = createHarness({ config: { passThroughTools: [...DEFAULT_CONFIG.passThroughTools] } });
+  const configured = createHarness({ config: { passThroughTools: [...DEFAULT_CONFIG.passThroughTools, ...names] } });
+  for (const toolName of names) {
+    const event = { toolName, toolCallId: toolName, input: {} };
+    const [blocked] = await defaults.emit("tool_call", event);
+    assert.equal(blocked.block, true, toolName);
+    assert.equal((await configured.emit("tool_call", event))[0], undefined, toolName);
+  }
+  for (const toolName of DEFAULT_CONFIG.passThroughTools) {
+    assert.equal((await defaults.emit("tool_call", { toolName, toolCallId: toolName, input: {} }))[0], undefined, toolName);
+  }
 });
 
 test("applies the provenance gate and pass-through allowlist", async () => {

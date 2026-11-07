@@ -48,7 +48,7 @@ test("defaults and precedence are deterministic and ignore worktree config", asy
   assert.deepEqual(result.config.routeTools, DEFAULT_CONFIG.routeTools);
   assert.equal(result.provenance.memoryMiB, "env");
   assert.equal("volumeQuotaMiB" in result.config, false);
-  assert.deepEqual(result.config.passThroughTools, ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"]);
+  assert.deepEqual(result.config.passThroughTools, ["web_search", "source_check", "fetch_content"]);
 });
 
 test("all removed workspace keys are rejected at TOML, environment, and direct override ingress", () => {

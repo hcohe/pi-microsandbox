@@ -167,7 +167,7 @@ test("Tools owns exactly the four routing/host fields with folding, scalar edits
     for (const scope of APPLY) assert.ok(f.full().includes(scope));
     await f.choose("Cancel"); assert.ok(f.selected().startsWith(label));
   }
-  for (const [label, entry, path] of [["Route Tools:", "read", "route_tools"], ["Pass Through Tools:", "todo", "pass_through_tools"]]) {
+  for (const [label, entry, path] of [["Route Tools:", "read", "route_tools"], ["Pass Through Tools:", "web_search", "pass_through_tools"]]) {
     await f.node("Tools", label!); await f.key("a");
     assert.ok(f.full().replace(/\s+/g, " ").includes(SETTINGS_FIELDS.find((field) => field.path === path)!.editorHelp.replace(/\s+/g, " ")));
     await f.key(entry!); await f.key("\r"); await f.choose("Cancel");

@@ -132,6 +132,10 @@ override individual fields. **Lists in both host-owned layers replace the entire
 lower-layer list**, including secrets, mounts,
 network hosts, and tool lists; `[]` clears a list.
 
+The default `pass_through_tools` list contains only `web_search`, `source_check`
+and `fetch_content`. Third-party `todo` and `ask_user_question` tools require
+explicit pass-through configuration; they are not allowed by default.
+
 For example, a host-owned npm policy can pin the relevant execution, host-access,
 and network settings as well as the secret:
 
