@@ -26,6 +26,7 @@ import type {
   GrepFormattingHelpers,
   HostReadAccess,
   RuntimeState,
+  SessionExecutionIdentity,
   SandboxGrepExecute,
   ToolOpsProvider,
 } from "./types.ts";
@@ -113,6 +114,8 @@ export interface RegisterToolsDeps {
   config: Config;
   cwd: string;
   hostReads: HostReadAccess;
+  /** Native lifecycle uses a fresh grant store so stale async writes cannot repopulate it. */
+  createHostReads?: () => HostReadAccess;
   /** Exact entry module that owns the configuration tools; missing provenance never exempts them. */
   ownedConfigToolEntry?: string;
   createGrepExecute: (args: {
@@ -128,6 +131,7 @@ type AnyToolDefinition = ToolDefinition<any, any, any>;
 type ToolParams = Record<string, any> & { execution_target?: ExecutionTarget };
 
 function stateOf(deps: RegisterToolsDeps): RuntimeState {
+  if (deps.provider.execution && !deps.provider.execution.isReady()) return { status: "unavailable", info: null };
   return deps.provider.getState();
 }
 
@@ -156,6 +160,20 @@ function isHostTarget(value: ToolParams): boolean {
   return value.execution_target === "host";
 }
 
+const toolFactories = {
+  bash: createBashToolDefinition,
+  edit: createEditToolDefinition,
+  find: createFindToolDefinition,
+  grep: createGrepToolDefinition,
+  ls: createLsToolDefinition,
+  read: createReadToolDefinition,
+  write: createWriteToolDefinition,
+};
+
+function createHostDefinition(name: RoutedToolName, cwd: string): AnyToolDefinition {
+  return toolFactories[name](cwd) as AnyToolDefinition;
+}
+
 function createSandboxDefinition(
   name: RoutedToolName,
   cwd: string,
@@ -171,15 +189,7 @@ function createSandboxDefinition(
           ? { operations: runtime.operations.bash, exposeSessionEnvironment: false }
           : { operations: runtime.operations[name] };
 
-        const factory = {
-          bash: createBashToolDefinition,
-          edit: createEditToolDefinition,
-          find: createFindToolDefinition,
-          grep: createGrepToolDefinition,
-          ls: createLsToolDefinition,
-          read: createReadToolDefinition,
-          write: createWriteToolDefinition,
-        }[name] as (cwd: string, options?: never) => AnyToolDefinition;
+        const factory = toolFactories[name] as (cwd: string, options?: never) => AnyToolDefinition;
         const definition = (factory as any)(cwd, options) as AnyToolDefinition;
         return definition.execute(id, params, signal, onUpdate, ctx);
       });
@@ -213,12 +223,39 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     read: createReadToolDefinition(deps.cwd),
     write: createWriteToolDefinition(deps.cwd),
   };
-  const sandboxGrepExecute = deps.createGrepExecute({
-    provider: deps.provider,
-    cwd: deps.cwd,
-    grepHelpers: deps.grepHelpers,
+  let hostReads = deps.hostReads;
+  const execution = deps.provider.execution;
+  const fixedIdentity: SessionExecutionIdentity = { sessionId: "adapter", cwd: deps.cwd };
+  const currentIdentity = () => execution?.current() ?? fixedIdentity;
+  const assertCurrent = (identity: SessionExecutionIdentity): void => execution?.assertCurrent(identity);
+  const scopedProvider = (identity: SessionExecutionIdentity): ToolOpsProvider => ({
+    isActive: () => deps.provider.isActive(),
+    getState: () => deps.provider.getState(),
+    withRuntime: (callback) => {
+      assertCurrent(identity);
+      return deps.provider.withRuntime((runtime) => {
+        assertCurrent(identity);
+        return callback(runtime);
+      });
+    },
   });
-  const approvedHostCalls = new Map<string, string>();
+  const approvedHostCalls = new Map<string, { identity: SessionExecutionIdentity; fingerprint: string }>();
+  const clearGrants = (): void => {
+    approvedHostCalls.clear();
+    hostReads.clear();
+  };
+  execution?.onChange(() => {
+    clearGrants();
+    hostReads = deps.createHostReads?.() ?? deps.hostReads;
+  });
+  const allowOutput = async (result: unknown, identity: SessionExecutionIdentity, access: HostReadAccess): Promise<void> => {
+    const fullOutputPath = resultFullOutputPath(result);
+    if (!fullOutputPath || currentIdentity() !== identity) return;
+    await access.allowGeneratedFile(fullOutputPath);
+    // Compatibility adapters may reuse their store; native execution discards
+    // it on replacement, leaving the new session's grants untouched.
+    if (currentIdentity() !== identity) access.clear();
+  };
 
   const clearApproval = (id: unknown): void => {
     if (typeof id === "string") approvedHostCalls.delete(id);
@@ -228,10 +265,11 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     tool: string,
     id: string,
     input: Record<string, unknown>,
+    identity: SessionExecutionIdentity,
   ): void => {
     const approved = approvedHostCalls.get(id);
     approvedHostCalls.delete(id);
-    if (approved !== hostRequestFingerprint(tool, input, deps.cwd)) {
+    if (approved?.identity !== identity || approved.fingerprint !== hostRequestFingerprint(tool, input, identity.cwd)) {
       throw new Error("Host execution was not approved for this exact tool call.");
     }
     // Approval is deliberately consumed here rather than cached; a runtime
@@ -246,13 +284,15 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     onUpdate: any,
     ctx: ExtensionContext,
     active: boolean,
+    identity: SessionExecutionIdentity,
   ): Promise<any> => {
+    assertCurrent(identity);
     if (active) {
       if (!deps.config.allowHostExecution) {
         throw new Error("Host execution is disabled by pi-microsandbox configuration.");
       }
-      requireApprovedHostExecution(definition.name, id, input);
-    }
+      requireApprovedHostExecution(definition.name, id, input, identity);
+    } else clearApproval(id);
     return definition.execute(id, withoutExecutionTarget(input), signal, onUpdate, ctx);
   };
 
@@ -262,6 +302,12 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       ...hostDefinition,
       parameters: withExecutionTarget(hostDefinition.parameters as Type.TObject<any>),
       execute: async (id, rawParams, signal, onUpdate, ctx) => {
+        const identity = currentIdentity();
+        assertCurrent(identity);
+        const cwd = identity.cwd;
+        const access = hostReads;
+        const hostDefinition = createHostDefinition(name, cwd);
+        const provider = scopedProvider(identity);
         const params = rawParams as ToolParams;
         const state = stateOf(deps);
         const hostMode = isHostMode(state);
@@ -270,18 +316,19 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
 
         if (!deps.config.routeTools.includes(name)) throw routeError(name);
         if (hostMode) {
-          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, false);
+          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, false, identity);
         }
         if (!active) throw unavailableError(state);
         if (targetHost) {
-          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, true);
+          return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, true, identity);
         }
 
         if (name === "read" && deps.config.allowSkillReads) {
-          const hostSkillPath = await deps.hostReads.resolve(
+          const hostSkillPath = await access.resolve(
             String((params as Record<string, unknown>).path ?? ""),
-            deps.cwd,
+            cwd,
           );
+          assertCurrent(identity);
           if (hostSkillPath) {
             return hostDefinition.execute(
               id,
@@ -294,18 +341,18 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         }
 
         if (name === "grep") {
+          const sandboxGrepExecute = deps.createGrepExecute({ provider, cwd, grepHelpers: deps.grepHelpers });
           const result = await sandboxGrepExecute(
             id,
             withoutExecutionTarget(params),
             signal,
             onUpdate,
           );
-          const fullOutputPath = resultFullOutputPath(result);
-          if (fullOutputPath) await deps.hostReads.allowGeneratedFile(fullOutputPath);
+          await allowOutput(result, identity, access);
           return result;
         }
 
-        const sandboxDefinition = createSandboxDefinition(name, deps.cwd, deps.provider, hostDefinition);
+        const sandboxDefinition = createSandboxDefinition(name, cwd, provider, hostDefinition);
         const result = await sandboxDefinition.execute(
           id,
           withoutExecutionTarget(params),
@@ -313,10 +360,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
           onUpdate,
           ctx,
         );
-        if (name === "bash") {
-          const fullOutputPath = resultFullOutputPath(result);
-          if (fullOutputPath) await deps.hostReads.allowGeneratedFile(fullOutputPath);
-        }
+        if (name === "bash") await allowOutput(result, identity, access);
         return result;
       },
     };
@@ -324,6 +368,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
   }
 
   pi.on("tool_call", async (event, ctx) => {
+    const identity = currentIdentity();
     const state = stateOf(deps);
     const hostMode = isHostMode(state);
     const active = isSandboxActive(state, deps.provider);
@@ -331,6 +376,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const input = asRecord(event.input);
 
     if (ROUTED_TOOL_SET.has(tool)) {
+      clearApproval(event.toolCallId);
+      if (execution && !execution.isReady()) return { block: true, reason: unavailableError(state).message };
       if (!deps.config.routeTools.includes(tool)) {
         return { block: true, reason: `Tool ${tool} is excluded from pi-microsandbox routing by configuration.` };
       }
@@ -349,15 +396,19 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         };
       }
       // Keep RPC prompts plain, and make denial the default in the TUI selector.
-      const message = hostApprovalMessage(tool, input, deps.cwd, ctx.mode === "tui" ? ctx.ui.theme : undefined);
+      const message = hostApprovalMessage(tool, input, identity.cwd, ctx.mode === "tui" ? ctx.ui.theme : undefined);
       const choice = await ctx.ui.select(`Allow host execution?\n\n${message}`, ["No", "Yes"]);
+      if (currentIdentity() !== identity || execution && !execution.isReady()) {
+        clearApproval(event.toolCallId);
+        return { block: true, reason: "Session execution context changed while awaiting host approval." };
+      }
       if (choice !== "Yes") {
         clearApproval(event.toolCallId);
         return { block: true, reason: "Host execution was denied by the user." };
       }
       approvedHostCalls.set(
         event.toolCallId,
-        hostRequestFingerprint(tool, input, deps.cwd),
+        { identity, fingerprint: hostRequestFingerprint(tool, input, identity.cwd) },
       );
       return;
     }
@@ -386,6 +437,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
   });
 
   pi.on("user_bash", (): UserBashEventResult | undefined => {
+    const identity = currentIdentity();
     const state = stateOf(deps);
     if (isHostMode(state)) return undefined;
     if (!isSandboxActive(state, deps.provider)) {
@@ -398,8 +450,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       return { operations };
     }
     const operations: BashOperations = {
-      exec: async (command, cwd, options) => deps.provider.withRuntime((runtime) =>
-        runtime.operations.bash.exec(command, cwd, options),
+      exec: async (command, _cwd, options) => scopedProvider(identity).withRuntime((runtime) =>
+        runtime.operations.bash.exec(command, identity.cwd, options),
       ),
     };
     return { operations };
@@ -410,8 +462,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       filePath?: string;
       baseDir?: string;
     }>;
-    deps.hostReads.updateSkills(
-      skills
+    hostReads.updateSkills(
+      (execution && !execution.isReady() ? [] : skills)
         .filter((skill): skill is { filePath: string; baseDir: string } =>
           typeof skill.filePath === "string" && typeof skill.baseDir === "string",
         )
@@ -422,8 +474,5 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     return { systemPrompt: note ? `${event.systemPrompt}\n\n${note}` : event.systemPrompt };
   });
 
-  pi.on("session_shutdown", () => {
-    approvedHostCalls.clear();
-    deps.hostReads.clear();
-  });
+  pi.on("session_shutdown", clearGrants);
 }

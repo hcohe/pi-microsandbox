@@ -699,6 +699,14 @@ async function defaultRealpath(path: string): Promise<string> { return fs.realpa
 function configDir(env: NodeJS.ProcessEnv, input: ResolveConfigInput): string {
   return input.xdgConfigHome ?? env.XDG_CONFIG_HOME ?? join(input.homedir ?? env.HOME ?? osHomedir(), ".config");
 }
+/** Ordered legacy inputs shared by normal resolution and degraded inspection. No reads. */
+export function legacyConfigSources(input: ResolveConfigInput): Array<{ name: "legacy" | "environment file"; path: string }> {
+  const env = input.env ?? process.env;
+  return [
+    { name: "legacy", path: join(configDir(env, input), "pi-msb", "config.toml") },
+    ...(env.PI_MSB_CONFIG_FILE ? [{ name: "environment file" as const, path: isAbsolute(env.PI_MSB_CONFIG_FILE) ? env.PI_MSB_CONFIG_FILE : resolve(input.cwd, env.PI_MSB_CONFIG_FILE) }] : []),
+  ];
+}
 function layerFromText(name: ConfigLayerName, text: string, source: string): ParsedConfigLayer {
   try { return normalizeLayer(name, readToml(text), source); }
   catch (error) {
@@ -851,8 +859,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   const realpath = input.realpath ?? defaultRealpath;
   const warnings: string[] = [];
   const layers: ConfigLayerInput[] = [{ name: "defaults", value: clone(DEFAULT_CONFIG), warnings: [] }];
-  const globalPaths = [join(configDir(env, input), "pi-msb", "config.toml")];
-  if (env.PI_MSB_CONFIG_FILE) globalPaths.push(isAbsolute(env.PI_MSB_CONFIG_FILE) ? env.PI_MSB_CONFIG_FILE : resolve(input.cwd, env.PI_MSB_CONFIG_FILE));
+  const globalPaths = legacyConfigSources(input).map((source) => source.path);
   const canonicalPath = async (path: string, failClosed = false): Promise<string> => {
     try { return await realpath(path); }
     catch {

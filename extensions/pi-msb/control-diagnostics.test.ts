@@ -155,6 +155,61 @@ test("literal repetitions, shadowed descriptors and cached resolved tokens stay 
   assert.equal(ended.adoption.known, false);
 });
 
+test("an obsolete reload cannot replace the current session's cached desired diagnostics", async (t) => {
+  const root = await mkdtemp("/tmp/msb-obsolete-reload-"), cwd = join(root, "workspace"), agentDir = join(root, "agent");
+  await mkdir(cwd);
+  let forbidden = false, envReads = 0, stateChanges = 0;
+  const env = new Proxy({}, {
+    get() { envReads++; if (forbidden) throw new Error("environment read"); return undefined; },
+    ownKeys() { envReads++; if (forbidden) throw new Error("environment enumeration"); return []; },
+  });
+  const integration = createMsbIntegration({ sessionId: "original", cwd, agentDir, configDirName: ".pi", env,
+    sdkLoader: async () => { assert.fail("inactive sessions must not load the SDK"); },
+    onState: () => { stateChanges++; } });
+  const config = { ...structuredClone(DEFAULT_CONFIG), autoStart: false } as Config;
+  t.after(async () => { forbidden = false; await integration.manager.shutdown(); integration.endSession(); await rm(root, { recursive: true, force: true }); });
+  await integration.configureSession({ sessionId: "original", cwd, projectTrusted: true, config: { config, provenance: {}, warnings: [] } });
+  const file = join(agentDir, "pi-microsandbox", "default.toml");
+  await mkdir(join(agentDir, "pi-microsandbox"), { recursive: true });
+  await writeFile(file, "auto_start = false\nallow_host_execution = true\n");
+  const target = await fs.realpath(file), read = fs.readFile;
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const deferred = new Promise<void>((resolve) => { release = resolve; });
+  t.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === target) {
+      enter(); await deferred;
+      return "auto_start = false\nallow_host_execution = true\n";
+    }
+    return read(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const obsolete = integration.control.reload();
+    const rejected = assert.rejects(obsolete, /context changed/);
+    await entered;
+    await integration.configureSession({ sessionId: "replacement", cwd, projectTrusted: true,
+      config: { config: { ...config, allowHostExecution: false }, provenance: {}, warnings: [] } });
+    const current: any = await integration.control.getDiagnostics!();
+    assert.equal(current.desired.validForSession, true);
+    assert.equal(current.desired.settings.allowHostExecution, false);
+    release();
+    await rejected;
+    forbidden = true;
+    const before = { envReads, stateChanges };
+    const after: any = await integration.control.getDiagnostics!();
+    assert.equal(integration.configRef.value.allowHostExecution, false);
+    assert.equal(after.desired.validForSession, true);
+    assert.equal(after.desired.settings.allowHostExecution, false);
+    assert.deepEqual(after, current);
+    assert.deepEqual({ envReads, stateChanges }, before);
+  } finally {
+    release();
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
 test("failure projection accepts only fixed codes and never adapter failure prose", () => {
   const hostile = "PRIVATE_TOKEN".repeat(100_000);
   for (const code of [hostile, "toString", "__proto__", {}, undefined]) {

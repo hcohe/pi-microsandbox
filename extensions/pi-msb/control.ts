@@ -14,7 +14,8 @@ import {
 import { boundDiagnosticsReport, type DiagnosticFailureCode } from "./diagnostics-tools.ts";
 import { projectSettingsJson } from "./settings-json.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
-import { classifySettingsEffect, LIVE_SETTINGS_KEYS, SettingsEditor } from "./settings.ts";
+import { classifySettingsEffect, LIVE_SETTINGS_KEYS } from "./settings-effect.ts";
+import { SettingsEditor } from "./settings.ts";
 import { buildSandboxLabels, decodeSessionState, normalizeSandboxRecord, encodeSessionState } from "./labels.ts";
 import { acquireOwnerLock, createLocksPort } from "./locks.ts";
 import { createBashOps, createFindOps, createGrepOps } from "./operations-exec.ts";
@@ -25,6 +26,7 @@ import { discoverWorkspace } from "./workspace.ts";
 import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } from "./sandbox-manager.ts";
 import {
   LOCKFILE_VERSION,
+  createSessionExecution,
   sandboxNameFor,
   type AgentRuntimePolicySnapshot,
   type BootRequest,
@@ -38,6 +40,7 @@ import {
   type RuntimePreparation,
   type RuntimeState,
   type RuntimePolicySnapshot,
+  type SessionExecutionIdentity,
   type ToolOperations,
   type ToolOpsProvider,
   type Workspace,
@@ -281,7 +284,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   let endingSession = false;
   const resolvedCommandSources = new Set<string>();
   let explicitOff = isDisabledByEnv(options.env ?? process.env);
-  let failureState: RuntimeState | null = explicitOff ? { status: "off", info: null } : { status: "unavailable", info: null, reason: "session has not started" };
+  let failureState: RuntimeState | null = { status: "unavailable", info: null, reason: "session has not started" };
   let sdkPromise: Promise<MicrosandboxModule> | null = null;
   let activeProjectRoot = cwd;
 
@@ -536,10 +539,17 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     persist: (state) => options.appendEntry?.(STATE_ENTRY, encodeSessionState(state)),
   };
 
-  let adopted: { sessionId: string; cwd: string; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot } | undefined;
+  const execution = createSessionExecution(options.sessionId, options.cwd);
+  // Manager preflights reuse the boot request. Retain its originating lifecycle
+  // identity so late boot/reconnect callbacks cannot publish obsolete metadata.
+  const requestExecutions = new WeakMap<BootRequest, SessionExecutionIdentity>();
+  let adopted: { identity: SessionExecutionIdentity; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot } | undefined;
+  const currentAdoption = () => adopted?.identity === execution.context.current() ? adopted : undefined;
   deps.adopted = (request, verification) => {
+    const identity = requestExecutions.get(request);
+    if (!identity || identity !== execution.context.current()) return;
     diagnosticFailure = "unknown";
-    const sameRuntime = adopted?.sessionId === request.sessionId && adopted.cwd === request.cwd;
+    const sameRuntime = adopted?.identity === identity;
     const knownFields = verification === "created" ? Object.keys(request.config) as Array<keyof Config>
       : verification === "live" && sameRuntime ? adopted!.policy.knownFields : [...LIVE_SETTINGS_KEYS];
     const safeConfig = Object.fromEntries(knownFields.map((key) => [key, key === "secrets"
@@ -560,10 +570,11 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       settings: projectSettingsJson(Object.fromEntries(knownFields.map((key) => [key, request.config[key]]))), knownFields: policy.knownFields,
       provenance: policy.provenance, verification: policy.verification, adoptedAt: policy.adoptedAt,
     }, [request.config]);
-    adopted = { sessionId: request.sessionId, cwd: request.cwd, policy, agentPolicy };
+    adopted = { identity, policy, agentPolicy };
   };
   const manager = createSandboxManager(deps);
   const boot = async (request: Parameters<typeof manager.boot>[0]) => {
+    requestExecutions.set(request, execution.context.current());
     diagnosticFailure = "runtime_start_failed";
     capturingBootFailure = true;
     try {
@@ -574,14 +585,26 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   const notifyState = (state: RuntimeState) => options.onState?.(state);
   const visibleState = (): RuntimeState => {
+    if (!execution.context.isReady()) return failureState?.status === "unavailable" ? failureState : { status: "booting", info: null };
     const state = failureState ?? manager.getState();
     if (explicitOff && (state.status === "disabled" || state.status === "off")) return { ...state, status: "off", info: null };
     return state;
   };
   const provider: ToolOpsProvider = {
-    isActive: () => manager.isActive(),
+    execution: execution.context,
+    isActive: () => execution.context.isReady() && visibleState().status === "active" && manager.isActive(),
     getState: visibleState,
-    withRuntime: (callback) => manager.withRuntime(callback),
+    withRuntime: async (callback) => {
+      const identity = execution.context.current();
+      execution.context.assertCurrent(identity);
+      if (visibleState().status !== "active") throw new Error("Sandbox is not available; tool execution is blocked.");
+      return manager.withRuntime((runtime) => {
+        // Acquisitions can queue behind boot/preflight. Recheck at callback entry,
+        // not exit: callbacks already using the old transport must drain normally.
+        execution.context.assertCurrent(identity);
+        return callback(runtime);
+      });
+    },
   };
   const effective = (): ResolvedConfig => resolved;
   const configSnapshot = (): Config => {
@@ -599,12 +622,13 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     }
     let sanitize!: SettingsSanitizer;
     const next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary() }, (captured) => { sanitize = captured; });
-    cacheDiagnosticConfig(next.config);
+    // Shared diagnostic state is committed by callers only after their lifecycle
+    // identity checks, never by a resolution that may have become obsolete.
     resolutionSanitizers.set(next, sanitize);
     return next;
   };
 
-  const configureSession = async (setup: SessionSetup): Promise<RuntimeState> => {
+  const configureSessionInternal = async (setup: SessionSetup, isCurrent: () => boolean): Promise<RuntimeState> => {
     sessionId = setup.sessionId;
     cwd = setup.cwd;
     configReady = false;
@@ -617,29 +641,34 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     if (explicitOff) {
       try {
-        workspace = await discoverWorkspace(cwd);
+        const selected = await discoverWorkspace(cwd);
+        if (!isCurrent()) return visibleState();
+        workspace = selected;
         cwd = workspace.cwd;
         activeProjectRoot = workspace.guestRoot;
         settings.configureSession(settingsInput(), sessionId);
         settingsReady = true;
         failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
       } catch {
-        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set; workspace discovery failed. Settings editing is blocked. Fix the working directory/Git discovery and restart Pi." };
+        if (!isCurrent()) return visibleState();
+        failureState = { status: "unavailable", info: null, reason: "PI_MSB_DISABLE is set; workspace discovery failed. Settings editing is blocked. Fix the working directory/Git discovery and restart Pi." };
       }
-      notifyState(failureState);
       return visibleState();
     }
     let next: ResolvedConfig;
     try {
-      workspace = await discoverWorkspace(cwd);
+      const selected = await discoverWorkspace(cwd);
+      if (!isCurrent()) return visibleState();
+      workspace = selected;
       cwd = workspace.cwd;
       activeProjectRoot = workspace.guestRoot;
       settings.configureSession(settingsInput(), sessionId);
       settingsReady = true;
       next = setup.config ?? await resolveForWorkspace(workspace);
+      if (!isCurrent()) return visibleState();
     } catch (error) {
+      if (!isCurrent()) return visibleState();
       failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
-      notifyState(failureState);
       return visibleState();
     }
     resolved = next;
@@ -650,13 +679,45 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     failureState = explicitOff ? { status: "off", info: null } : null;
     if (explicitOff || !configRef.value.autoStart) {
-      if (!explicitOff) { await manager.setEnabled(false); failureState = { status: "off", info: null }; }
+      if (!explicitOff) {
+        await manager.setEnabled(false);
+        if (!isCurrent()) return visibleState();
+        failureState = { status: "off", info: null };
+      }
       return visibleState();
     }
     const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: state });
+    if (!isCurrent()) return visibleState();
     if (result.status === "unavailable") failureState = result;
-    notifyState(visibleState());
     return visibleState();
+  };
+
+  // Supersede synchronously, then serialize setup so an obsolete discovery or
+  // boot cannot overwrite the replacement's shared config/settings/runtime.
+  let sessionSetup: Promise<unknown> = Promise.resolve();
+  const configureSession = (setup: SessionSetup): Promise<RuntimeState> => {
+    const previous = execution.context.current();
+    const identity = execution.begin(setup.sessionId, setup.cwd);
+    failureState = { status: "booting", info: null };
+    if (previous.sessionId !== setup.sessionId || previous.cwd !== setup.cwd) settings.endSession();
+    settingsReady = false;
+    configReady = false;
+    const isCurrent = () => execution.context.current() === identity;
+    const result = sessionSetup.then(async () => {
+      if (!isCurrent()) return visibleState();
+      try {
+        await configureSessionInternal(setup, isCurrent);
+      } catch (error) {
+        if (isCurrent()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+      }
+      if (isCurrent()) {
+        execution.finish(identity);
+        notifyState(visibleState());
+      }
+      return visibleState();
+    });
+    sessionSetup = result.catch(() => undefined);
+    return result;
   };
 
   const control: MsbControl = {
@@ -683,17 +744,26 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         failure: { phase, code },
         desired: { evidence: "last-known resolution; not live", validForSession: configReady,
           ...(configReady && diagnosticDesired ? { settings: { ...diagnosticDesired } } : {}) },
-        adoption: { evidence: "last-known; not live", known: adopted?.sessionId === sessionId && adopted.cwd === cwd,
-          verification: adopted?.sessionId === sessionId && adopted.cwd === cwd ? adopted.policy.verification : "unknown" },
+        adoption: { evidence: "last-known; not live", known: currentAdoption() !== undefined,
+          verification: currentAdoption()?.policy.verification ?? "unknown" },
         recovery: !settingsReady
           ? "Fix working-directory/Git identity on the host and restart Pi; settings editing is blocked until canonical workspace discovery succeeds."
           : "Use msb_config_get to inspect recovery constraints, then msb_config_set to propose a supported repair. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Never disable protection or use host fallback as an automatic repair.",
         notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "logs/stdout", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
       });
     },
-    getAgentRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.agentPolicy) : undefined,
-    getRuntimePolicy: () => adopted?.sessionId === sessionId && adopted.cwd === cwd ? structuredClone(adopted.policy) : undefined,
+    getAgentRuntimePolicy: () => {
+      const current = currentAdoption();
+      return current ? structuredClone(current.agentPolicy) : undefined;
+    },
+    getRuntimePolicy: () => {
+      const current = currentAdoption();
+      return current ? structuredClone(current.policy) : undefined;
+    },
     async setEnabled(enabled) {
+      const identity = execution.context.current();
+      const assertCurrent = () => execution.context.assertCurrent(identity);
+      assertCurrent();
       if (enabled && isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
         failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
@@ -711,23 +781,30 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       failureState = null;
       if (!enabled) {
         await manager.setEnabled(false);
+        assertCurrent();
         failureState = { status: "off", info: null };
       } else {
         try {
           workspace = null;
           settingsReady = false;
-          workspace = await discoverWorkspace(cwd);
+          const selected = await discoverWorkspace(cwd);
+          assertCurrent();
+          workspace = selected;
           settingsReady = true;
           cwd = workspace.cwd;
           activeProjectRoot = workspace.guestRoot;
           const next = await resolveForWorkspace(workspace);
+          assertCurrent();
           resolved = next;
+          cacheDiagnosticConfig(next.config);
           configReady = true;
           Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
           const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate: pendingRestart, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+          assertCurrent();
           if (result.status === "active") pendingRestart = false;
           if (result.status === "unavailable") failureState = result;
         } catch (error) {
+          assertCurrent();
           configReady = false;
           failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
         }
@@ -736,7 +813,11 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     previewSettings: (draft) => draft.preview(configSnapshot()),
     async reload(reloadOptions) {
+      const identity = execution.context.current();
+      const assertCurrent = () => execution.context.assertCurrent(identity);
+      assertCurrent();
       await reloadOptions?.guard?.();
+      assertCurrent();
       if (isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
         failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
@@ -748,29 +829,36 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       try {
         workspace = null;
         settingsReady = false;
-        workspace = await discoverWorkspace(cwd);
+        const selected = await discoverWorkspace(cwd);
+        assertCurrent();
+        workspace = selected;
         settingsReady = true;
         cwd = workspace.cwd;
         activeProjectRoot = workspace.guestRoot;
         next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
+        assertCurrent();
       } catch (error) {
+        assertCurrent();
         configReady = false;
         if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
         notifyState(visibleState());
         throw error;
       }
       await reloadOptions?.guard?.();
+      assertCurrent();
       pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
       if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
         throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
       }
       const forceRecreate = pendingRestart;
       resolved = next;
+      cacheDiagnosticConfig(next.config);
       configReady = true;
       Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
       failureState = null;
       if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
         const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+        assertCurrent();
         if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
         else if (result.status === "active") pendingRestart = false;
       }
@@ -816,7 +904,22 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
   };
 
-  return { control, manager, provider, configRef, configureSession, endSession: () => { settings.endSession(); settingsReady = false; configReady = false; workspace = null; diagnosticDesired = undefined; diagnosticFailure = "unknown"; adopted = undefined; endingSession = true; } };
+  return {
+    control, manager, provider, configRef, configureSession,
+    endSession: () => {
+      const identity = execution.context.current();
+      execution.begin(identity.sessionId, identity.cwd);
+      failureState = { status: "unavailable", info: null, reason: "session has ended" };
+      settings.endSession();
+      settingsReady = false;
+      configReady = false;
+      workspace = null;
+      diagnosticDesired = undefined;
+      diagnosticFailure = "unknown";
+      adopted = undefined;
+      endingSession = true;
+    },
+  };
 }
 
 export const createControl = createMsbIntegration;

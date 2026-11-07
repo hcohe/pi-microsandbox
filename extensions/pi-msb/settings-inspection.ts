@@ -1,11 +1,11 @@
 import { Type } from "typebox";
 import { normalizeConfigPath } from "./config.ts";
-import { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings.ts";
-import { safeText } from "./control-panel.ts";
+import { COLLECTION_REMOVALS, SETTINGS_PATHS, SETTINGS_SCHEMA_VERSION } from "./settings-metadata.ts";
+import { safeText } from "./settings-presentation.ts";
 import { effectiveNetworkPolicy, settingsCapabilities, settingsSchema } from "./settings-schema.ts";
 import { POLICY_VERIFICATION_GUIDANCE, RECONNECTED_POLICY_WARNING, SESSION_LIFETIME } from "./settings-safety.ts";
 
-export const SETTINGS_SCHEMA_VERSION = 5;
+export { SETTINGS_SCHEMA_VERSION } from "./settings-metadata.ts";
 export const INSPECTION_SECTIONS = ["summary", "desired", "layers", "origins", "runtime", "schema", "capabilities", "policy", "warnings", "recovery"] as const;
 const pathNames = [...SETTINGS_PATHS, "network", "docker"];
 export const inspectionParameters = Type.Object({

@@ -1,5 +1,5 @@
 import { DEFAULT_CONFIG, normalizeConfigPath } from "./config.ts";
-import { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings.ts";
+import { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings-metadata.ts";
 
 const REDACTED = "<redacted>";
 const snake = (key: string): string => key.replace(/MiB/g, "Mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);

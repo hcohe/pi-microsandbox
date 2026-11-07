@@ -1,6 +1,7 @@
 import { DEFAULT_CONFIG, normalizeConfigPath } from "./config.ts";
 import { SETTINGS_FIELDS, valueAt } from "./settings-fields.ts";
-import { COLLECTION_REMOVALS, LIVE_SETTINGS_KEYS } from "./settings.ts";
+import { COLLECTION_REMOVALS, SETTINGS_SCHEMA_VERSION } from "./settings-metadata.ts";
+import { LIVE_SETTINGS_KEYS } from "./settings-effect.ts";
 import { EXACT_DOMAIN_SCHEMA, SECRET_HOST_SCHEMA, networkDestinationKind } from "./network-domains.ts";
 import { DNS_EXCEPTION_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME } from "./settings-safety.ts";
 
@@ -90,7 +91,7 @@ export const networkSemantics = {
 };
 
 export const settingsCapabilities = {
-  version: 5, scopes, sessionLifetime: SESSION_LIFETIME,
+  version: SETTINGS_SCHEMA_VERSION, scopes, sessionLifetime: SESSION_LIFETIME,
   inspection: { sections: ["summary", "desired", "layers", "origins", "runtime", "schema", "capabilities", "policy", "warnings"],
     paths: "Supported leaves or network/docker groups; filters apply to setting-shaped sections. Policy/summary retain complete safety context.",
     format: "Human-readable text by default; json is indented. Structured details contain the selected JSON. Use knownSchemaVersion to omit unchanged schemas/capabilities.",

@@ -6,7 +6,9 @@ import { formatSettingsDiff, settingsDiff, settingsOutcome } from "./settings-di
 import { MAX_SETTINGS_OPERATIONS } from "./settings-schema.ts";
 import { inspectSettings, inspectionParameters, inspectionRequest, inspectionResult, inspectionText, SETTINGS_SCHEMA_VERSION } from "./settings-inspection.ts";
 import { diagnoseConfigError, operationProblem, SettingsValidationError, validationMessage } from "./settings-validation.ts";
-import { COLLECTION_REMOVALS, SETTINGS_PATHS, SettingsConflictError, type SettingsDraft } from "./settings.ts";
+import { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings-metadata.ts";
+import { SettingsConflictError } from "./settings-conflict.ts";
+import type { SettingsDraft } from "./settings.ts";
 import type { Config, MsbControl } from "./types.ts";
 
 type Operation = { path: string; operation: "set" | "inherit" | "upsert" | "remove"; value?: unknown; identity?: string; previousIdentity?: string };

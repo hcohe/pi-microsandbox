@@ -1,5 +1,5 @@
 import { DEFAULT_CONFIG, normalizeConfigPath } from "./config.ts";
-import { SETTINGS_PATHS } from "./settings.ts";
+import { SETTINGS_PATHS } from "./settings-metadata.ts";
 
 export const SECTIONS = ["Overview", "General", "Resources", "Network", "Secrets", "Variables", "Mounts", "Tools", "Image", "Advanced", "Sources", "Actions"] as const;
 export type Section = typeof SECTIONS[number];

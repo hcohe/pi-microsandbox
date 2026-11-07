@@ -1,4 +1,4 @@
-import { classifySettingsEffect } from "./settings.ts";
+import { classifySettingsEffect } from "./settings-effect.ts";
 import {
   displayId,
   sandboxNameFor,
@@ -180,6 +180,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   // wake/replacement cannot race another wake or shutdown.
   let lifecycle: Promise<unknown> = Promise.resolve();
   let transition: Promise<unknown> = Promise.resolve();
+  // Failed-generation cleanup must not hold the preflight queue: an active
+  // callback may be awaiting a reentrant preflight on that same queue.
+  let retirement: Promise<void> = Promise.resolve();
 
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const result = lifecycle.then(fn, fn);
@@ -239,6 +242,40 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     });
   }
 
+  function retireFailedRuntime(error: unknown): Promise<void> {
+    const current = runtime;
+    const held = lock;
+    runtime = null;
+    runtimeInvalid = false;
+    lock = null;
+    // The failed inspection/reconnect no longer proves cleanup authority for
+    // this name. Future boot/prune must reacquire ownership and validate it.
+    sandboxName = null;
+    setFailure(lastRequest, error);
+
+    // Detach ownership synchronously within the transition, but drain outside
+    // it. Later preflights reject immediately; only the original failing call
+    // and lifecycle operations wait for cleanup of these captured resources.
+    retirement = (async () => {
+      await waitForActiveUses();
+      if (current) {
+        try {
+          await current.transport.dispose();
+        } catch {
+          // Best effort, as in disposeRuntime; ownership must still be released.
+        }
+      }
+      if (held) {
+        try {
+          await held.release();
+        } catch {
+          // The next boot will fail closed if ownership cannot be reacquired.
+        }
+      }
+    })();
+    return retirement;
+  }
+
   function reserveUse(): void {
     activeUses += 1;
     pendingUses += 1;
@@ -285,6 +322,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     // Do not mutate or reconnect a resource while a concurrent tool preflight is
     // atomically replacing its runtime handle.
     await transition;
+    await retirement;
     const previousRequest = lastRequest;
     if (
       state.status === "active" &&
@@ -525,6 +563,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     // A preflight may be reconnecting while the lifecycle queue reaches
     // shutdown. Finish that atomic replacement before disposing its handle.
     await transition;
+    await retirement;
     const hadSandbox = Boolean(sandboxName);
     const name = sandboxName;
     const request = lastRequest;
@@ -535,7 +574,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     await disposeRuntime();
 
     let cleanupError: unknown = null;
-    if (hadSandbox && name && request) {
+    // Failed-generation retirement already released ownership. A later shutdown
+    // must not mutate that name: another process may now own the resource.
+    if (hadSandbox && name && request && lock) {
       try {
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
       } catch (error) {
@@ -608,33 +649,26 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       // transport immediately before the callback begins using it.
       reserveUse();
       let activated = false;
+      let ownRetirement: Promise<void> | undefined;
       let current: RuntimeExecution;
       try {
         current = await enqueueTransition(async () => {
-          const value = await wakeIfNeeded();
-          activateUse();
-          activated = true;
-          return value;
+          try {
+            const value = await wakeIfNeeded();
+            activateUse();
+            activated = true;
+            return value;
+          } catch (error) {
+            // Only the first failed active preflight owns retirement. A call
+            // queued before failure (including callback reentry) must also reject
+            // without waiting for the active callbacks that cleanup is draining.
+            if (state.status === "active") ownRetirement = retireFailedRuntime(error);
+            throw error;
+          }
         });
       } catch (error) {
-        if (activated) releaseUse(true);
-        else releaseUse(false);
-        // A wake/reconnect failure must not leave a dead transport owned by a
-        // runtime that is now being offered as host fallback. First wait for
-        // earlier callbacks, then dispose; their transport remains usable until
-        // their callbacks finish.
-        await waitForActiveUses();
-        await disposeRuntime();
-        const held = lock;
-        lock = null;
-        if (held) {
-          try {
-            await held.release();
-          } catch {
-            // The next boot will fail closed if ownership cannot be reacquired.
-          }
-        }
-        if (state.status === "active") setFailure(lastRequest, error);
+        releaseUse(activated);
+        await ownRetirement;
         throw error;
       }
       try {

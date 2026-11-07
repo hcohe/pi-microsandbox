@@ -2,11 +2,14 @@ import { visibleWidth, matchesKey, decodeKittyPrintable, isKeyRelease, truncateT
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { ConfigError, DEFAULT_CONFIG, normalizeConfigPath, parseTomlConfig } from "./config.ts";
 import { SettingsInput } from "./settings-input.ts";
+import { safeText, settingsSourceLabel } from "./settings-presentation.ts";
 import { MaskedInput } from "./masked-input.ts";
 import { SECTIONS, SETTINGS_FIELDS, valueAt, SECRET_HOST_HELP, MOUNT_OPTION_HELP, type FieldHelp, type SettingsField } from "./settings-fields.ts";
 import type { SettingsDraft, SettingsScope } from "./settings.ts";
 import type { MsbControl, Config } from "./types.ts";
 import { DNS_EXCEPTION_WARNING, HOST_SECRET_COMMAND_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
+
+export { safeText, settingsSourceLabel } from "./settings-presentation.ts";
 
 type Context = Pick<ExtensionCommandContext, "ui" | "waitForIdle">;
 type Row = { id: string; label: string; detail?: string; instructions?: string; action?: () => void | Promise<void>; parent?: string; depth?: number; children?: Row[]; value?: string; origin?: string; button?: boolean; disabled?: boolean; edit?: () => void | Promise<void>; add?: () => void | Promise<void>; remove?: () => void | Promise<void>; removeLabel?: string; readonly?: boolean };
@@ -20,11 +23,7 @@ type FormField = FieldHelp & { name: string; value: string; secret?: boolean; ch
 const SECRET_SOURCES = { "Literal value": "textValue", "Host environment variable": "hostEnv", "Host shell command": "hostCmd" } as const;
 type SecretSource = keyof typeof SECRET_SOURCES;
 const secretSource = (entry?: Partial<Record<(typeof SECRET_SOURCES)[SecretSource], string>>): SecretSource => entry?.hostEnv !== undefined ? "Host environment variable" : entry?.hostCmd !== undefined ? "Host shell command" : "Literal value";
-/** Display-only aliases keep historical reviews and resolver IDs on the same three scope labels. */
-export const settingsSourceLabel = (source: unknown): string => ({ global: "Global", "host-default": "Global", project: "Project", "host-project": "Project", session: "Session", ephemeral: "Session", temporary: "Session", env: "environment", defaults: "default" }[String(source)] ?? String(source));
 const fieldLabel = (path: string): string => ({ cpus: "Virtual CPUs", memory_mib: "Memory (MiB)", image: "Guest image", sandbox_name: "Sandbox name", "network.allow_hosts": "Allowed hosts", "network.mode": "Network mode", "docker.mode": "Docker mode" }[path] ?? path.split(".").pop()!.split("_").map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" "));
-/** Strip terminal controls from every external label, log, path and value. */
-export const safeText = (value: unknown): string => String(value ?? "").replace(/\x1b\][^\x07]*(?:\x07|$)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, " ");
 const display = (value: unknown): string => value === null ? "automatic session name" : value === undefined ? "inherit" : typeof value === "string" ? value : JSON.stringify(value);
 export const HOST_BOUNDARY_WARNINGS: Readonly<Record<string, string>> = {
   pass_through_tools: "HOST execution / sandbox bypass: tools allowed by pass_through_tools execute on the HOST outside the sandbox without per-call host approval.",

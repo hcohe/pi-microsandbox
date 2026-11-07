@@ -1,5 +1,5 @@
 import { ConfigError, normalizeConfigPath } from "./config.ts";
-import { SETTINGS_PATHS } from "./settings.ts";
+import { SETTINGS_PATHS } from "./settings-metadata.ts";
 import { settingsSchema } from "./settings-schema.ts";
 
 export interface ValidationProblem {

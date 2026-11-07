@@ -8,7 +8,10 @@ The default is fail-closed:
   resolved before a sandbox starts. A boot, image,
   configuration, or tool failure blocks the seven routed tools
   (`read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash`). Failure never
-  silently falls back to host execution.
+  silently falls back to host execution. A streamed command must provide an
+  explicit integer exit code; a truncated or malformed completion is an error,
+  even when partial output was received. Failed streams receive bounded,
+  best-effort handle/iterator cleanup and are never retried on the host.
 - `execution_target = "host"` is an opt-in escape for routed tool calls. While
   a sandbox is active it requires interactive approval for the exact tool,
   working directory, and recursively sorted arguments. It is unavailable in
@@ -25,10 +28,16 @@ The default is fail-closed:
   different from `fallback_mode = "host"`, which automatically uses host tools
   after a sandbox failure and is shown as `MSB host fallback`. Both are
   unsandboxed controls, not workspace settings.
+- Session or working-directory replacement immediately invalidates host
+  approvals and host-read grants. New routed calls stay blocked during setup;
+  successful setup admits them using the current directory. Already-admitted
+  sandbox calls may finish before their old transport is retired.
 - A project cannot replace another process's sandbox: ownership is a
   non-blocking kernel `flock` acquired before sandbox mutation. The small
   bundled POSIX addon is loaded lazily, has no install script, and never falls
-  back to a racy PID check.
+  back to a racy PID check. Failed runtime retirement relinquishes cleanup
+  authority: later shutdown must not remove a same-name resource now owned by
+  another process. Recovery or pruning must reacquire and validate ownership.
 
 Inside a Git worktree, pi-microsandbox bind-mounts the entire worktree root
 read/write at the same lexical guest path.

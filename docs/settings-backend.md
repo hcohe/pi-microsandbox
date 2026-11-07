@@ -5,6 +5,29 @@ This is the backend seam used by the full-screen `/msb` control panel and the
 the existing package manifest. No SDK import, configuration creation, or write
 occurs when constructing the editor.
 
+## Module boundaries
+
+- `settings.ts` owns private drafts, candidate resolution and guarded commits. Its
+  existing exports for leaf inventory, collection removals, effect classification,
+  live keys and `SettingsConflictError` remain compatibility reexports.
+- `settings-metadata.ts` owns the leaf inventory (derived from `DEFAULT_CONFIG`),
+  collection-removal mapping and single schema version shared by discovery and
+  inspection. JSON projection, fields, schema and validation do not import the
+  editor; the editor can consume the JSON projection without a value-import cycle.
+- `settings-effect.ts` is the shared runtime change policy. It imports only Config
+  types, so the sandbox manager does not load the filesystem editor or resolver
+  for classification. `settings-conflict.ts` provides shared error identity.
+- Internal `settings-storage.ts` owns source fingerprints, ancestor anchors and
+  guarded atomic replacement, retaining the existing checks, permissions and
+  ordering. Candidate validation, workspace boundaries and approval guards stay
+  with the editor; this is not a general repository storage API.
+- `settings-presentation.ts` contains display sanitization and scope aliases only.
+  The panel reexports them for compatibility; diff/inspection helpers consume the
+  small module directly rather than loading the interactive panel.
+
+Tool and native-panel transaction workflows remain separate, including their
+intentional approval, review and reload differences.
+
 ## Entry points
 
 - Native `MsbControl.settings` exposes a `SettingsEditor` (optional only to keep

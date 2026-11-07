@@ -44,6 +44,26 @@ function transport(onDispose?: () => void): SandboxTransport {
 
 const operations = {} as ToolOperations;
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function bounded<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timed out waiting for lifecycle test progress")), 1000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function owner(events: string[]): LockHandle {
   return { path: "/tmp/owner.lock", release: async () => { events.push("release"); } };
 }
@@ -377,6 +397,336 @@ test("replacement waits for an active callback before disposing its transport", 
   assert.equal(disposed, 2);
   await manager.shutdown();
   assert.equal(disposed, 3);
+});
+
+test("failed preflight retires its transport and lock before a replacement boot can acquire ownership", async () => {
+  const req = request();
+  const disposing = deferred();
+  const finishDisposal = deferred();
+  const releases: number[] = [];
+  const disposals: number[] = [];
+  let acquisitions = 0;
+  let transports = 0;
+  let inspections = 0;
+  const manager = createSandboxManager(depsFor([], {
+    acquireOwnerLock: async () => {
+      const generation = ++acquisitions;
+      return { path: `/tmp/owner-${generation}.lock`, release: async () => { releases.push(generation); } };
+    },
+    inspectSandbox: async () => ++inspections <= 3 ? null : {
+      name: sandboxNameFor(sessionId), status: "running", labels: labels(req),
+    },
+    createTransport: () => {
+      const generation = ++transports;
+      return {
+        ...transport(),
+        dispose: async () => {
+          disposals.push(generation);
+          if (generation === 1) {
+            disposing.resolve();
+            await finishDisposal.promise;
+          }
+        },
+      };
+    },
+  }));
+  await manager.boot(req);
+  const failed = assert.rejects(manager.withRuntime(async () => assert.fail("failed preflight must not execute")), /is unavailable/);
+  await disposing.promise;
+  const replacement = manager.boot({ ...req, forceRecreate: true });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const acquisitionsDuringDisposal = acquisitions;
+  finishDisposal.resolve();
+  await failed;
+  assert.equal((await replacement).status, "active");
+  assert.equal(acquisitionsDuringDisposal, 1, "replacement must wait for failed-generation retirement");
+  assert.deepEqual(releases, [1], "old cleanup must release only the old owner lock");
+  assert.deepEqual(disposals, [1], "replacement transport must remain owned and usable");
+  await manager.withRuntime(async () => undefined);
+  assert.equal(manager.getState().status, "active");
+  await manager.shutdown();
+  assert.deepEqual(releases, [1, 2]);
+  assert.deepEqual(disposals, [1, 2]);
+});
+
+test("failed preflight drains active callbacks without activating queued reservations or retrying them", async () => {
+  const req = request();
+  const callbackStarted = deferred();
+  const finishCallback = deferred();
+  const inspectionStarted = deferred();
+  const failInspection = deferred();
+  let inspections = 0;
+  let callbacks = 0;
+  let disposed = 0;
+  const events: string[] = [];
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => {
+      const inspection = ++inspections;
+      if (inspection === 1) return null;
+      if (inspection === 3) {
+        inspectionStarted.resolve();
+        await failInspection.promise;
+        return null;
+      }
+      return { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) };
+    },
+    createTransport: () => transport(() => { disposed++; }),
+  }));
+  await manager.boot(req);
+  const active = manager.withRuntime(async () => {
+    callbacks++;
+    callbackStarted.resolve();
+    await finishCallback.promise;
+    assert.equal(disposed, 0, "active callback retains its transport until it finishes");
+    assert.equal(events.includes("release"), false);
+  });
+  await callbackStarted.promise;
+  const failed = assert.rejects(manager.withRuntime(async () => { callbacks++; }), /is unavailable/);
+  await inspectionStarted.promise;
+  // Observe both outcomes immediately so the deliberately broken version does
+  // not produce an unhandled rejection while the active callback is draining.
+  const queued = manager.withRuntime(async () => { callbacks++; }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  failInspection.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const inspectionsDuringDrain = inspections;
+  const callbacksDuringDrain = callbacks;
+  finishCallback.resolve();
+  await Promise.all([active, failed]);
+  const queuedError = await queued;
+  assert.equal(inspectionsDuringDrain, 3, "queued preflight must not inspect the failed generation");
+  assert.equal(callbacksDuringDrain, 1, "pending reservations must not become active during retirement");
+  assert.ok(queuedError instanceof Error);
+  assert.match(queuedError.message, /sandbox is not available/);
+  assert.equal(callbacks, 1);
+  assert.equal(disposed, 1);
+  assert.equal(events.filter((event) => event === "release").length, 1);
+  assert.equal(manager.getState().status, "unavailable");
+});
+
+for (const timing of ["during retirement", "queued before failure"] as const) {
+  for (const fallbackMode of ["block", "host"] as const) {
+    test(`callback reentry ${timing} rejects without blocking retirement (${fallbackMode})`, { timeout: 5000 }, async () => {
+      const req = request({ config: config({ fallbackMode }) });
+      const callbackStarted = deferred();
+      const enterReentry = deferred();
+      const reentryQueued = deferred();
+      const abortReentry = deferred();
+      const inspectionStarted = deferred();
+      const failInspection = deferred();
+      const events: string[] = [];
+      const tasks: Promise<unknown>[] = [];
+      let inspections = 0;
+      let disposed = 0;
+      let nestedCallbacks = 0;
+      let nestedError: unknown;
+      const manager = createSandboxManager(depsFor(events, {
+        inspectSandbox: async () => {
+          const inspection = ++inspections;
+          if (inspection === 1) return null;
+          if (inspection === 3) {
+            inspectionStarted.resolve();
+            await failInspection.promise;
+            return null;
+          }
+          return { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) };
+        },
+        createTransport: () => transport(() => { disposed++; }),
+      }));
+      try {
+        await bounded(manager.boot(req));
+        const active = manager.withRuntime(async () => {
+          callbackStarted.resolve();
+          await enterReentry.promise;
+          const nested = manager.withRuntime(async () => { nestedCallbacks++; }).then(
+            () => null,
+            (error: unknown) => error,
+          );
+          tasks.push(nested);
+          reentryQueued.resolve();
+          // The escape gate is used only by finally, so even a deadlocked
+          // implementation cannot strand this callback or the test runner.
+          nestedError = await Promise.race([nested, abortReentry.promise]);
+          assert.equal(disposed, 0, "retirement must preserve the active callback's transport");
+          assert.equal(events.includes("release"), false);
+        }).then(() => null, (error: unknown) => error);
+        tasks.push(active);
+        await bounded(callbackStarted.promise);
+        const failed = manager.withRuntime(async () => assert.fail("failed preflight must not execute")).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        tasks.push(failed);
+        await bounded(inspectionStarted.promise);
+        if (timing === "queued before failure") {
+          enterReentry.resolve();
+          await bounded(reentryQueued.promise);
+        }
+        failInspection.resolve();
+        // In the other ordering, let B reach failure draining before A reenters.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        enterReentry.resolve();
+        const [activeError, failedError] = await bounded(Promise.all([active, failed]));
+        assert.equal(activeError, null);
+        assert.ok(failedError instanceof Error);
+        assert.match(failedError.message, /is unavailable/);
+        assert.ok(nestedError instanceof Error);
+        assert.match(nestedError.message, /sandbox is not available/);
+        assert.equal(nestedCallbacks, 0);
+        assert.equal(inspections, 3, "reentry must not inspect or retry the failed generation");
+        assert.equal(disposed, 1);
+        assert.equal(events.filter((event) => event === "release").length, 1);
+        assert.equal(manager.getState().status, fallbackMode === "host" ? "host-fallback" : "unavailable");
+      } finally {
+        enterReentry.resolve();
+        failInspection.resolve();
+        abortReentry.resolve();
+        await bounded(Promise.allSettled(tasks));
+        await bounded(manager.shutdown());
+      }
+    });
+  }
+}
+
+test("shutdown waits for failed-generation disposal without mutating a retired owner's sandbox", { timeout: 5000 }, async () => {
+  const disposing = deferred();
+  const finishDisposal = deferred();
+  const events: string[] = [];
+  const manager = createSandboxManager(depsFor(events, {
+    createTransport: () => ({
+      ...transport(),
+      dispose: async () => {
+        disposing.resolve();
+        await finishDisposal.promise;
+        events.push("disposed");
+      },
+    }),
+  }));
+  const tasks: Promise<unknown>[] = [];
+  try {
+    await bounded(manager.boot(request()));
+    const failed = assert.rejects(manager.withRuntime(async () => assert.fail("must not execute")), /is unavailable/);
+    tasks.push(failed);
+    await bounded(disposing.promise);
+    const shutdown = manager.shutdown();
+    tasks.push(shutdown);
+    // A later rejected preflight must not wait for even transport disposal.
+    await bounded(assert.rejects(manager.withRuntime(async () => assert.fail("must not execute")), /sandbox is not available/));
+    assert.equal(events.includes("stop-remove"), false);
+    assert.equal(events.includes("release"), false);
+    finishDisposal.resolve();
+    await bounded(Promise.all(tasks));
+    assert.ok(events.indexOf("disposed") < events.indexOf("release"));
+    assert.equal(events.includes("stop-remove"), false, "shutdown must not remove a resource after releasing its owner lock");
+    assert.equal(events.filter((event) => event === "release").length, 1);
+    assert.equal(manager.getState().status, "disabled");
+  } finally {
+    finishDisposal.resolve();
+    await bounded(Promise.allSettled(tasks));
+    await bounded(manager.shutdown());
+  }
+});
+
+for (const action of ["shutdown", "disable", "busy reboot then shutdown"] as const) test(`retired ${action} cannot remove another manager's sandbox`, async () => {
+  const req = request();
+  let heldBy: string | undefined;
+  let present = false;
+  let failedInspection = false;
+  const removals: string[] = [];
+  const releases: string[] = [];
+  const deps = (id: string): SandboxManagerDeps => depsFor([], {
+    acquireOwnerLock: async () => {
+      if (heldBy) return null;
+      heldBy = id;
+      return { path: "/tmp/shared-owner.lock", release: async () => {
+        releases.push(id);
+        assert.equal(heldBy, id, "only the current lock owner may release");
+        heldBy = undefined;
+      } };
+    },
+    inspectSandbox: async () => {
+      if (id === "A" && failedInspection) throw new Error("inspection unavailable");
+      return present ? { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) } : null;
+    },
+    createSandbox: async () => { present = true; return {}; },
+    stopAndRemove: async () => {
+      removals.push(id);
+      assert.equal(heldBy, id, "resource mutation requires the owner lock");
+      present = false;
+    },
+  });
+  const first = createSandboxManager(deps("A"));
+  const contender = createSandboxManager(deps("B"));
+  try {
+    assert.equal((await first.boot(req)).status, "active");
+    failedInspection = true;
+    await assert.rejects(first.withRuntime(async () => assert.fail("must not execute")), /inspection unavailable/);
+    assert.equal(heldBy, undefined);
+    assert.equal((await contender.boot(req)).status, "active");
+    if (action === "busy reboot then shutdown") assert.equal((await first.boot(req)).status, "unavailable");
+    if (action === "disable") await first.setEnabled(false);
+    else await first.shutdown();
+    assert.deepEqual(removals, []);
+    assert.deepEqual(releases, ["A"]);
+    assert.equal(heldBy, "B");
+    assert.equal(present, true);
+    await contender.withRuntime(async () => undefined);
+    assert.equal(contender.getState().status, "active");
+    await contender.shutdown();
+    assert.deepEqual(removals, ["B"]);
+    assert.deepEqual(releases, ["A", "B"]);
+  } finally {
+    await first.shutdown();
+    await contender.shutdown();
+  }
+});
+
+test("preflight rejected during boot cannot retire resources owned by the in-progress boot", async () => {
+  const preparing = deferred();
+  const finishPreparation = deferred();
+  const events: string[] = [];
+  let disposed = 0;
+  const manager = createSandboxManager(depsFor(events, {
+    createTransport: () => transport(() => { disposed++; }),
+    prepareRuntime: async () => {
+      preparing.resolve();
+      await finishPreparation.promise;
+      return { docker: { mode: "disabled", readiness: "disabled" } };
+    },
+  }));
+  const boot = manager.boot(request());
+  await preparing.promise;
+  await assert.rejects(manager.withRuntime(async () => assert.fail("boot is not ready")), /sandbox is not available/);
+  const disposalsDuringBoot = disposed;
+  const releasesDuringBoot = events.filter((event) => event === "release").length;
+  finishPreparation.resolve();
+  assert.equal((await boot).status, "active");
+  assert.equal(disposalsDuringBoot, 0);
+  assert.equal(releasesDuringBoot, 0);
+  await manager.shutdown();
+  assert.equal(disposed, 1);
+  assert.equal(events.filter((event) => event === "release").length, 1);
+});
+
+test("running callbacks remain concurrent outside the preflight transition queue", async () => {
+  const req = request();
+  const finishCallbacks = deferred();
+  let callbacks = 0;
+  const manager = createSandboxManager(depsFor([], {
+    inspectSandbox: async () => ({ name: sandboxNameFor(sessionId), status: "running", labels: labels(req) }),
+  }));
+  await manager.boot(req);
+  const run = () => manager.withRuntime(async () => { callbacks++; await finishCallbacks.promise; });
+  const first = run();
+  const second = run();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const concurrentCallbacks = callbacks;
+  finishCallbacks.resolve();
+  await Promise.all([first, second]);
+  assert.equal(concurrentCallbacks, 2);
+  await manager.shutdown();
 });
 
 test("reconnect failure switches to configured host fallback and releases the lock", async () => {

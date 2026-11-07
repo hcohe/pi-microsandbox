@@ -1,17 +1,24 @@
-import { constants, promises as fs } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
-import { dirname, join, normalize, parse, resolve } from "node:path";
+import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
+import { normalize, resolve } from "node:path";
 import {
-  applyOverride, assertPolicyOutsideWorkspace, canonicalPolicyLocation, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets,
+  applyOverride, assertPolicyOutsideWorkspace, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, legacyConfigSources,
   normalizeConfigPath, parseEnvConfig, parseTomlConfig, readRawConfig, removeOverride,
   resolveConfig, toEffectiveToml, validateConfig, type ResolveConfigInput,
 } from "./config.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { projectSettingsJson } from "./settings-json.ts";
+import { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings-metadata.ts";
+import { classifySettingsEffect, type SettingsEffect } from "./settings-effect.ts";
+import { SettingsConflictError } from "./settings-conflict.ts";
+import { assertAnchor, atomicWrite, captureAnchor, readSource, type Source } from "./settings-storage.ts";
 import type { Config, DeepPartial, ResolvedConfig } from "./types.ts";
 
+export { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings-metadata.ts";
+export { classifySettingsEffect, LIVE_SETTINGS_KEYS, type SettingsEffect } from "./settings-effect.ts";
+export { SettingsConflictError } from "./settings-conflict.ts";
+
 export type SettingsScope = "temporary" | "project" | "global";
-export type SettingsEffect = "none" | "live" | "restart";
 export interface SettingsChange { path: string; operation: "set" | "inherit"; before: unknown; after: unknown }
 export interface SettingsPreview {
   changes: SettingsChange[];
@@ -135,10 +142,6 @@ export interface SettingsApplyResult extends SettingsPreview {
 }
 
 const snake = (key: string): string => key.replace(/MiB/g, "Mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
-/** Complete schema leaf inventory. Arrays are edited as collections, never indexed paths. */
-export const SETTINGS_PATHS: readonly string[] = Object.freeze(Object.entries(DEFAULT_CONFIG).flatMap(([key, value]) =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? Object.keys(value).map((child) => `${snake(key)}.${snake(child)}`) : [snake(key)]));
 const canonical = (path: string): string => normalizeConfigPath(path).map(snake).join(".");
 const hash = (text: string): string => createHash("sha256").update(text).digest("hex");
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -204,13 +207,6 @@ function serializeRaw(raw: Record<string, unknown>): string {
   writeTable(raw);
   return blocks.filter(Boolean).join("\n\n") + "\n";
 }
-/** A deliberate authoritative collection edit wins over conflicting removals in that same scope. */
-export const COLLECTION_REMOVALS: Readonly<Record<string, string>> = Object.freeze({
-  route_tools: "remove_route_tools", pass_through_tools: "remove_pass_through_tools",
-  host_env: "remove_host_env",
-  secrets: "remove_secrets", mounts: "remove_mounts",
-  "network.allow_hosts": "network.remove_allow_hosts", "network.publish_ports": "network.remove_publish_ports",
-});
 function reconcileRemovals(layer: Record<string, unknown>, collection: string, entries: unknown[]): SettingsChange | undefined {
   const path = COLLECTION_REMOVALS[collection];
   if (!path) return;
@@ -384,101 +380,6 @@ function validateLayerValues(value: DeepPartial<Config>): void {
     if (issues.length) throw new ConfigError(issues);
   }
 }
-interface Source { text: string | null; version: string; raw: Record<string, unknown>; anchor?: SettingsAnchor }
-interface SettingsAnchor { path: string; canonical: string; ancestors: Array<{ path: string; identity?: string }> }
-const anchorIdentity = (stat: Awaited<ReturnType<typeof fs.lstat>>): string => `${stat.dev}:${stat.ino}:${stat.mode}${stat.isSymbolicLink() ? `:${stat.ctimeMs}:${stat.mtimeMs}` : ""}`;
-async function captureAnchor(path: string, canonical: string): Promise<SettingsAnchor> {
-  const entries: SettingsAnchor["ancestors"] = [];
-  for (const part of new Set([...await ancestors(path), ...await ancestors(canonical)])) {
-    try { entries.push({ path: part, identity: anchorIdentity(await fs.lstat(part)) }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; entries.push({ path: part }); }
-  }
-  const anchor = { path, canonical, ancestors: entries };
-  await assertAnchor(anchor);
-  return anchor;
-}
-/** Pin existing lexical ancestors (including the selected root link), but allow missing directories to be created. */
-async function assertAnchor(anchor: SettingsAnchor | undefined): Promise<void> {
-  if (!anchor) return;
-  for (const entry of anchor.ancestors) {
-    let stat;
-    try { stat = await fs.lstat(entry.path); }
-    catch (error) { if (!entry.identity && (error as NodeJS.ErrnoException).code === "ENOENT") continue; throw new ConfigError(["settings agent directory changed; reopen the panel"]); }
-    if (entry.identity ? anchorIdentity(stat) !== entry.identity : !stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new ConfigError(["settings agent directory changed; reopen the panel"]);
-    }
-  }
-  if (await canonicalPolicyLocation(anchor.path) !== anchor.canonical) throw new ConfigError(["settings agent directory changed; reopen the panel"]);
-}
-async function ancestors(path: string): Promise<string[]> {
-  const result: string[] = [];
-  for (let current = resolve(path); ; current = dirname(current)) {
-    result.unshift(current);
-    if (current === parse(current).root) return result;
-  }
-}
-async function inspectPath(path: string): Promise<string> {
-  const result: string[] = [];
-  for (const part of await ancestors(path)) {
-    try {
-      const stat = await fs.lstat(part);
-      if (stat.isSymbolicLink() || (part !== path && !stat.isDirectory()) || (part === path && !stat.isFile())) {
-        throw new ConfigError(["settings paths must use regular files and non-symlink directories"]);
-      }
-      result.push(`${part}:${stat.dev}:${stat.ino}${part === path ? `:${stat.size}:${stat.mode}:${stat.mtimeMs}:${stat.ctimeMs}` : ""}`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      result.push(`${part}:missing`);
-    }
-  }
-  return result.join("|");
-}
-async function readSource(path: string): Promise<Source> {
-  const location = await inspectPath(path);
-  let text: string | null = null;
-  try {
-    const file = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      if (!(await file.stat()).isFile()) throw new ConfigError(["settings target must be a regular file"]);
-      text = await file.readFile("utf8");
-    } finally { await file.close(); }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  if (location !== await inspectPath(path)) throw new ConfigError(["settings path changed while reading"]);
-  let raw: Record<string, unknown>;
-  try { raw = readRawConfig(text ?? ""); }
-  catch { throw new ConfigError(["Manual host edit required: malformed configuration syntax"]); }
-  return { text, version: hash(`${location}\n${text === null ? "missing" : text}`), raw };
-}
-async function atomicWrite(path: string, text: string, expected: Source, guard: () => Promise<void>): Promise<void> {
-  await guard();
-  if ((await readSource(path)).version !== expected.version) throw new ConfigError(["configuration changed externally; reopen the draft"]);
-  for (const part of (await ancestors(dirname(path))).slice(1)) {
-    try { await fs.mkdir(part, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-    const stat = await fs.lstat(part);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new ConfigError(["unsafe settings ancestor"]);
-  }
-  const stable = await inspectPath(path);
-  const temp = join(dirname(path), `.settings-${randomUUID()}.tmp`);
-  try {
-    const handle = await fs.open(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try { await handle.writeFile(text, "utf8"); await handle.sync(); } finally { await handle.close(); }
-    await guard();
-    if (stable !== await inspectPath(path) || (await readSource(path)).text !== expected.text) throw new ConfigError(["configuration changed externally; reopen the draft"]);
-    await fs.rename(temp, path);
-    const directory = await fs.open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { await directory.sync(); } finally { await directory.close(); }
-  } finally { await fs.unlink(temp).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
-}
-
-export const LIVE_SETTINGS_KEYS: readonly (keyof Config)[] = Object.freeze(["blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "showFooter", "autoStart"]);
-const LIVE_FIELDS = new Set<string>(LIVE_SETTINGS_KEYS);
-/** Conservative: only live routing/presentation and startup-only preferences avoid recreation. */
-export function classifySettingsEffect(before: Config, after: Config): SettingsEffect {
-  const changed = Object.keys(before).filter((key) => !equal(before[key as keyof Config], after[key as keyof Config]));
-  return !changed.length ? "none" : changed.every((key) => LIVE_FIELDS.has(key)) ? "live" : "restart";
-}
-
 /** Private raw/secret data stays in this object; snapshots and diffs are always masked. */
 export class SettingsDraft {
   #editor: SettingsEditor;
@@ -874,10 +775,6 @@ export class SettingsDraft {
   }
 }
 
-export class SettingsConflictError extends Error {
-  constructor() { super("Configuration changed; request a fresh review."); }
-}
-
 /** One instance per integration, not per UI. Never serializes temporary state. */
 export class SettingsEditor {
   #input: ResolveConfigInput;
@@ -1031,8 +928,7 @@ export class SettingsEditor {
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
     });
     const env = this.#input.env ?? process.env;
-    const legacy = join(this.#input.xdgConfigHome ?? env.XDG_CONFIG_HOME ?? join(this.#input.homedir ?? env.HOME ?? "", ".config"), "pi-msb", "config.toml");
-    const files = [...Object.entries(targets.paths), ["legacy", legacy], ...(env.PI_MSB_CONFIG_FILE ? [["environment file", resolve(this.#input.cwd, env.PI_MSB_CONFIG_FILE)]] : [])];
+    const files = [...Object.entries(targets.paths), ...legacyConfigSources(this.#input).map(({ name, path }) => [name, path])];
     for (const [scope, file] of files) {
       try {
         const text = await read(file!);

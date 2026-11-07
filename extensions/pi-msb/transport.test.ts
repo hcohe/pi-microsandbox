@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 
 import {
@@ -37,6 +38,39 @@ class FakeHandle {
       },
     };
   }
+}
+
+// Import the installed SDK's JS wrapper directly, not its native-loading entrypoint.
+async function sdkHandle(
+  events: Array<Record<string, unknown> | Error | null>,
+  hooks: { kill?: () => Promise<void>; close?: () => Promise<void> } = {},
+) {
+  const { ExecHandle } = await import(new URL("./exec.js", import.meta.resolve("microsandbox")).href);
+  const state = { kills: 0, closes: 0, receives: 0 };
+  const handle = new ExecHandle({
+    async recv() {
+      state.receives++;
+      const event = events.shift() ?? null;
+      if (event instanceof Error) throw event;
+      return event;
+    },
+    async kill() {
+      state.kills++;
+      await hooks.kill?.();
+    },
+  });
+  const iterate = handle[Symbol.asyncIterator].bind(handle);
+  handle[Symbol.asyncIterator] = () => {
+    const iterator = iterate();
+    const close = iterator.return.bind(iterator);
+    iterator.return = async () => {
+      state.closes++;
+      await hooks.close?.();
+      return await close();
+    };
+    return iterator;
+  };
+  return { handle, state, events };
 }
 
 function builderRecorder(calls: string[]): any {
@@ -183,6 +217,215 @@ test("routes stdout and stderr independently and captures exit after output", as
   assert.deepEqual(Buffer.concat(stdout), Buffer.from([0, 255, 1]));
   assert.equal(Buffer.concat(stderr).toString(), "warning\n");
   assert.deepEqual(calls, ['args:["needle"]', "cwd:/work"]);
+});
+
+test("requires an exit event even when the stream produced output", async () => {
+  for (const events of [[], [{ kind: "stdout", data: "partial output" }]]) {
+    const handle = new FakeHandle();
+    for (const event of events) handle.push(event);
+    handle.ended = true;
+    const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => handle }));
+    await assert.rejects(transport.execStream("truncated", []), (error: unknown) => {
+      return error instanceof SandboxTransportError && error.code === "INVALID";
+    });
+  }
+});
+
+test("rejects malformed exit codes rather than reporting successful completion", async (t) => {
+  for (const code of [undefined, null, "0", false, {}, NaN, Infinity, -Infinity, 0.5]) {
+    await t.test(`exit code ${String(code)}`, async () => {
+      const handle = new FakeHandle();
+      handle.push({ kind: "exited", code });
+      const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => handle }));
+      await assert.rejects(transport.execStream("malformed", []), (error: unknown) => {
+        return error instanceof SandboxTransportError && error.code === "INVALID";
+      });
+    });
+  }
+});
+
+test("a valid exit event does not hide a subsequent malformed completion", async () => {
+  const handle = new FakeHandle();
+  handle.push({ kind: "exited", code: 0 });
+  handle.push({ kind: "exited", code: "0" });
+  const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => handle }));
+  await assert.rejects(transport.execStream("malformed", []), (error: unknown) => {
+    return error instanceof SandboxTransportError && error.code === "INVALID";
+  });
+});
+
+test("accepts finite integer stream exit codes including zero", async () => {
+  for (const code of [0, 127, -1]) {
+    const handle = new FakeHandle();
+    handle.push({ kind: "exited", code });
+    const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => handle }));
+    assert.deepEqual(await transport.execStream("complete", []), { exitCode: code });
+  }
+});
+
+test("abort and dispose take precedence over missing or malformed completion", async (t) => {
+  for (const completion of ["missing", "malformed"]) {
+    for (const cancellation of ["abort", "dispose", "both"]) {
+      await t.test(`${cancellation} with ${completion} completion`, async () => {
+        const controller = new AbortController();
+        const reason = new Error("cancelled");
+        let killed = false;
+        const handle = {
+          kill: async () => { killed = true; },
+          async *[Symbol.asyncIterator]() {
+            yield { kind: "stdout", data: "partial output" };
+            if (completion === "malformed") yield { kind: "exited", code: NaN };
+          },
+        };
+        const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => handle }));
+        let disposing: Promise<void> | undefined;
+        const pending = transport.execStream("cancelled", [], {
+          signal: controller.signal,
+          onStdout: () => {
+            if (cancellation !== "dispose") controller.abort(reason);
+            if (cancellation !== "abort") disposing = transport.dispose();
+          },
+        });
+        await assert.rejects(pending, (error: unknown) => {
+          assert.ok(error instanceof SandboxTransportError);
+          assert.equal(error.code, cancellation === "dispose" ? "SANDBOX_DOWN" : "ABORTED");
+          if (cancellation !== "dispose") assert.equal(error.cause, reason);
+          return true;
+        });
+        await disposing;
+        assert.equal(killed, true);
+      });
+    }
+  }
+});
+
+test("SDK wrapper requires an explicit valid completion and cleans up failures", async (t) => {
+  const cases = [
+    { name: "empty", events: [], code: "INVALID" },
+    { name: "output then EOF", events: [{ eventType: "stdout", data: Buffer.from("partial") }], code: "INVALID" },
+    ...[NaN, Infinity, -Infinity, 0.5].map((code) => ({
+      name: `malformed ${code}`,
+      events: [{ eventType: "exited", code }],
+      code: "INVALID",
+    })),
+    ...[undefined, null, "0"].map((code) => ({
+      name: `normalizer rejects ${code}`,
+      events: [{ eventType: "exited", code }],
+      // The installed SDK throws an untyped Error before transport validation.
+      code: "UNKNOWN",
+    })),
+    {
+      name: "recv rejects after valid exit",
+      events: [{ eventType: "exited", code: 0 }, new Error("[ExecTimeout] timed out")],
+      code: "TIMEOUT",
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const wrapped = await sdkHandle([...scenario.events]);
+      const controller = new AbortController();
+      const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+      await assert.rejects(transport.execStream("broken", [], { signal: controller.signal }), (error: unknown) => {
+        assert.ok(error instanceof SandboxTransportError);
+        assert.equal(error.code, scenario.code);
+        if (scenario.code === "UNKNOWN") {
+          assert.ok(error.cause instanceof Error);
+          assert.match(error.cause.message, /missing code on Exited/);
+        }
+        return true;
+      });
+      assert.equal(wrapped.state.kills, 1);
+      assert.equal(wrapped.state.closes, 1);
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+      controller.abort();
+      await transport.dispose();
+      assert.equal(wrapped.state.kills, 1);
+    });
+  }
+});
+
+test("SDK wrapper preserves normal nonzero exits without cleanup kills", async () => {
+  for (const code of [0, 23, 127, -1]) {
+    const wrapped = await sdkHandle([{ eventType: "exited", code }]);
+    const controller = new AbortController();
+    const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+    assert.deepEqual(await transport.execStream("complete", [], { signal: controller.signal }), { exitCode: code });
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    await transport.dispose();
+    assert.equal(wrapped.state.kills, 0);
+  }
+});
+
+test("failed consumption closes its SDK iterator without draining unread events", async () => {
+  const wrapped = await sdkHandle([
+    { eventType: "exited", code: NaN },
+    { eventType: "stdout", data: Buffer.from("must not deliver") },
+  ]);
+  const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+  await assert.rejects(transport.execStream("broken", [], {
+    onStdout: () => assert.fail("cleanup must not deliver more output"),
+  }), { code: "INVALID" });
+  assert.deepEqual(wrapped.state, { kills: 1, closes: 1, receives: 1 });
+  assert.equal(wrapped.events.length, 1);
+});
+
+test("cleanup errors preserve the primary stream error", async () => {
+  const wrapped = await sdkHandle([{ eventType: "exited", code: NaN }], {
+    kill: async () => { throw new Error("[Io] kill failed"); },
+    close: async () => { throw new Error("close failed"); },
+  });
+  const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+  await assert.rejects(transport.execStream("broken", []), { code: "INVALID" });
+  assert.deepEqual(wrapped.state, { kills: 1, closes: 1, receives: 1 });
+  await transport.dispose();
+});
+
+test("dispose waits for failed-stream cleanup without a kill/done cycle", async (t) => {
+  for (const abort of [false, true]) {
+    await t.test(`abort during cleanup: ${abort}`, async () => {
+      let releaseKill!: () => void;
+      let startedKill!: () => void;
+      const killing = new Promise<void>((resolve) => { startedKill = resolve; });
+      const gate = new Promise<void>((resolve) => { releaseKill = resolve; });
+      const wrapped = await sdkHandle([{ eventType: "exited", code: NaN }], {
+        kill: async () => { startedKill(); await gate; },
+      });
+      const controller = new AbortController();
+      const reason = new Error("cancel during cleanup");
+      const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+      const pending = transport.execStream("broken", [], { signal: controller.signal });
+      await killing;
+      let disposed = false;
+      const disposing = transport.dispose().then(() => { disposed = true; });
+      if (abort) controller.abort(reason);
+      await Promise.resolve();
+      assert.equal(disposed, false);
+      releaseKill();
+      await assert.rejects(pending, (error: unknown) => {
+        assert.ok(error instanceof SandboxTransportError);
+        assert.equal(error.code, abort ? "ABORTED" : "SANDBOX_DOWN");
+        if (abort) assert.equal(error.cause, reason);
+        return true;
+      });
+      await disposing;
+      assert.equal(wrapped.state.kills, 1);
+      assert.equal(wrapped.state.closes, 1);
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    });
+  }
+});
+
+test("uncooperative cleanup is bounded and does not mask the stream error", { timeout: 5000 }, async () => {
+  const never = () => new Promise<void>(() => undefined);
+  const wrapped = await sdkHandle([{ eventType: "exited", code: NaN }], { kill: never, close: never });
+  const controller = new AbortController();
+  const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+  const pending = transport.execStream("broken", [], { signal: controller.signal });
+  await assert.rejects(pending, { code: "INVALID" });
+  await transport.dispose();
+  assert.equal(wrapped.state.kills, 1);
+  assert.equal(wrapped.state.closes, 1);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 });
 
 test("keeps concurrent stream handles isolated", async () => {

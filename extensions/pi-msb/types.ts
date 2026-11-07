@@ -260,7 +260,46 @@ export interface RuntimeExecution {
   transport: SandboxTransport;
   operations: ToolOperations;
 }
+export interface SessionExecutionIdentity {
+  readonly sessionId: string;
+  readonly cwd: string;
+}
+/** Reference identity changes on every lifecycle replacement, even for the same cwd. */
+export interface SessionExecutionContext {
+  current(): SessionExecutionIdentity;
+  isReady(): boolean;
+  assertCurrent(identity: SessionExecutionIdentity): void;
+  onChange(listener: () => void): void;
+}
+/** One lifecycle boundary shared by runtime acquisition, routing and host grants. */
+export function createSessionExecution(sessionId: string, cwd: string) {
+  let identity: SessionExecutionIdentity = Object.freeze({ sessionId, cwd });
+  let ready = false;
+  const listeners = new Set<() => void>();
+  const context: SessionExecutionContext = {
+    current: () => identity,
+    isReady: () => ready,
+    assertCurrent(expected) {
+      if (!ready || identity !== expected) throw new Error("Session execution context changed or is not ready; tool execution is blocked.");
+    },
+    onChange(listener) { listeners.add(listener); },
+  };
+  return {
+    context,
+    begin(nextSessionId: string, nextCwd: string) {
+      ready = false;
+      identity = Object.freeze({ sessionId: nextSessionId, cwd: nextCwd });
+      for (const listener of listeners) listener();
+      return identity;
+    },
+    finish(expected: SessionExecutionIdentity) {
+      if (identity === expected) ready = true;
+    },
+  };
+}
 export interface ToolOpsProvider {
+  /** Optional for existing test/third-party adapters with a fixed execution context. */
+  readonly execution?: SessionExecutionContext;
   isActive(): boolean;
   getState(): RuntimeState;
   withRuntime<T>(callback: (runtime: RuntimeExecution) => Promise<T>): Promise<T>;

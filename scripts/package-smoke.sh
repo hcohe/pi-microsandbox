@@ -60,6 +60,11 @@ extensions/pi-msb/control.ts required
 extensions/pi-msb/diagnostics-tools.ts required
 extensions/pi-msb/control-panel.ts required
 extensions/pi-msb/settings.ts required
+extensions/pi-msb/settings-conflict.ts required
+extensions/pi-msb/settings-effect.ts required
+extensions/pi-msb/settings-metadata.ts required
+extensions/pi-msb/settings-presentation.ts required
+extensions/pi-msb/settings-storage.ts required
 extensions/pi-msb/settings-diff.ts required
 extensions/pi-msb/settings-json.ts required
 extensions/pi-msb/settings-redaction.ts required

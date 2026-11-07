@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,11 +14,14 @@ import {
   withExecutionTarget,
   withoutExecutionTarget,
 } from "./tools.ts";
+import { createSessionExecution } from "./types.ts";
+import { createHostReadAccess } from "./skill-access.ts";
 import type {
   Config,
   HostReadAccess,
   RuntimeExecution,
   RuntimeState,
+  SessionExecutionContext,
   ToolOpsProvider,
 } from "./types.ts";
 
@@ -116,6 +119,12 @@ function createHarness(options: {
   cancel?: boolean;
   mode?: ExtensionContext["mode"];
   configToolSource?: string | null;
+  execution?: SessionExecutionContext;
+  hostReads?: HostReadAccess;
+  createHostReads?: () => HostReadAccess;
+  grepResult?: unknown;
+  select?: () => Promise<string | undefined>;
+  operations?: RuntimeExecution["operations"];
 } = {}) {
   const cwd = process.cwd();
   let current = options.runtimeState ?? state();
@@ -124,16 +133,18 @@ function createHarness(options: {
   const confirmations: Array<{ title: string; choices: string[] }> = [];
   const allowedReads: string[] = [];
   const skillUpdates: unknown[][] = [];
-  const hostReads: HostReadAccess = {
+  const grepCwds: string[] = [];
+  const hostReads: HostReadAccess = options.hostReads ?? {
     updateSkills: (skills) => { skillUpdates.push([...skills]); },
     allowGeneratedFile: async (filePath) => { allowedReads.push(filePath); },
     resolve: async () => undefined,
     clear: () => {},
   };
   const provider: ToolOpsProvider = {
+    execution: options.execution,
     isActive: () => current.status === "active",
     getState: () => current,
-    withRuntime: async (callback) => callback({ transport: {} as any, operations: operations() }),
+    withRuntime: async (callback) => callback({ transport: {} as any, operations: options.operations ?? operations() }),
   };
   const ctx = {
     cwd,
@@ -143,7 +154,7 @@ function createHarness(options: {
       theme: approvalTheme,
       select: async (title: string, choices: string[]) => {
         confirmations.push({ title, choices });
-        return options.cancel ? undefined : options.confirm === false ? "No" : "Yes";
+        return options.select ? options.select() : options.cancel ? undefined : options.confirm === false ? "No" : "Yes";
       },
     },
   } as unknown as ExtensionContext;
@@ -166,8 +177,12 @@ function createHarness(options: {
     config: config(options.config),
     cwd,
     hostReads,
+    createHostReads: options.createHostReads,
     ownedConfigToolEntry: fileURLToPath(new URL("./index.ts", import.meta.url)),
-    createGrepExecute: () => async () => ({ content: [{ type: "text", text: "sandbox" }] }),
+    createGrepExecute: ({ cwd }) => async () => {
+      grepCwds.push(cwd);
+      return options.grepResult ?? { content: [{ type: "text", text: "sandbox" }] };
+    },
     grepHelpers: {
       DEFAULT_MAX_BYTES: 1000,
       DEFAULT_MAX_LINES: 100,
@@ -182,6 +197,7 @@ function createHarness(options: {
     confirmations,
     allowedReads,
     skillUpdates,
+    grepCwds,
     ctx,
     emit: async (name: string, event: any) => {
       const results = [];
@@ -394,6 +410,134 @@ test("third-party gate exempts only the exact owned configuration and diagnostic
   }
 });
 
+
+function readyExecution(cwd: string) {
+  const execution = createSessionExecution("one", cwd);
+  execution.finish(execution.context.current());
+  return execution;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("fresh built-ins, grep and approval paths follow workspace and same-session cwd replacements", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "pi-msb-current-cwd-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = path.join(root, "first"), second = path.join(root, "second"), nested = path.join(second, "nested");
+  await mkdir(first); await mkdir(nested, { recursive: true });
+  const execution = readyExecution(first);
+  const h = createHarness({ execution: execution.context });
+  for (const [cwd, text] of [[first, "first"], [second, "second"], [nested, "nested"]]) {
+    execution.finish(execution.begin("one", cwd!));
+    await writeFile(path.join(cwd!, "value.txt"), text!);
+    const read = (id: string, params: unknown) => h.tools.get("read").execute(id, params, undefined, undefined, h.ctx);
+    assert.match((await read("guest", { path: "value.txt" })).content[0].text, new RegExp(text!));
+    await h.tools.get("write").execute("write", { path: "written.txt", content: text }, undefined, undefined, h.ctx);
+    assert.equal(await readFile(path.join(cwd!, "written.txt"), "utf8"), text);
+    const input = { path: "value.txt", execution_target: "host" };
+    await h.emit("tool_call", { toolName: "read", toolCallId: "host", input });
+    assert.ok(h.confirmations.at(-1)!.title.includes(`Working directory: ${cwd}`));
+    assert.match((await read("host", input)).content[0].text, new RegExp(text!));
+    await h.tools.get("grep").execute("grep", { pattern: "x" }, undefined, undefined, h.ctx);
+  }
+  assert.deepEqual(h.grepCwds, [first, second, nested]);
+});
+
+test("one-shot host approvals do not survive replacement even with identical session/cwd and arguments", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "pi-msb-stale-approval-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, "value.txt"), "host");
+  const execution = readyExecution(root), h = createHarness({ execution: execution.context });
+  const input = { path: "value.txt", execution_target: "host" };
+  const call = { toolName: "read", toolCallId: "host", input };
+  const read = () => h.tools.get("read").execute("host", input, undefined, undefined, h.ctx);
+  await h.emit("tool_call", call);
+  execution.finish(execution.begin("one", root));
+  await assert.rejects(read(), /not approved/);
+  await h.emit("tool_call", call);
+  assert.match((await read()).content[0].text, /host/);
+  await assert.rejects(read(), /not approved/);
+});
+
+test("deferred host approval is blocked after replacement and cannot authorize the new context", async () => {
+  const execution = readyExecution(process.cwd()), choice = deferred<string>();
+  const h = createHarness({ execution: execution.context, select: () => choice.promise });
+  const input = { path: "README.md", execution_target: "host" };
+  const pending = h.emit("tool_call", { toolName: "read", toolCallId: "host", input });
+  execution.finish(execution.begin("two", process.cwd()));
+  choice.resolve("Yes");
+  const [gate] = await pending;
+  assert.equal(gate.block, true);
+  await assert.rejects(h.tools.get("read").execute("host", input, undefined, undefined, h.ctx), /not approved/);
+});
+
+test("replacement invalidates discovered skill reads and already-captured user bash operations", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "pi-msb-stale-skill-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const skill = path.join(root, "SKILL.md"); await writeFile(skill, "host skill");
+  const execution = readyExecution(root), ops = operations();
+  ops.read.access = async () => { throw new Error("sandbox-only sentinel"); };
+  const h = createHarness({ execution: execution.context, hostReads: createHostReadAccess(), operations: ops });
+  await h.emit("before_agent_start", { systemPrompt: "base", systemPromptOptions: { skills: [{ filePath: skill, baseDir: root }] } });
+  const read = () => h.tools.get("read").execute("read", { path: "SKILL.md" }, undefined, undefined, h.ctx);
+  assert.match((await read()).content[0].text, /host skill/);
+  const [bash] = await h.emit("user_bash", {});
+  execution.finish(execution.begin("two", root));
+  await assert.rejects(read(), /sandbox-only sentinel/);
+  await assert.rejects(bash.operations.exec("true", root, { onData() {} }), /context changed/);
+});
+
+test("a skill resolution deferred across replacement cannot perform a host read", async () => {
+  const execution = readyExecution(process.cwd()), skill = deferred<string | undefined>(), entered = deferred<void>();
+  const h = createHarness({ execution: execution.context, hostReads: {
+    updateSkills() {}, clear() {}, allowGeneratedFile: async () => {},
+    resolve: () => { entered.resolve(); return skill.promise; },
+  } });
+  const pending = h.tools.get("read").execute("skill", { path: "README.md" }, undefined, undefined, h.ctx);
+  await entered.promise;
+  execution.finish(execution.begin("two", process.cwd()));
+  skill.resolve(path.join(process.cwd(), "README.md"));
+  await assert.rejects(pending, /context changed/);
+});
+
+test("deferred output grants stay in the retired host-read store without clearing replacement skills", async () => {
+  const execution = readyExecution(process.cwd()), entered = deferred<void>(), release = deferred<void>();
+  const stores: Array<{ skills: unknown[]; generated: string[]; access: HostReadAccess }> = [];
+  const createHostReads = () => {
+    const store = { skills: [] as unknown[], generated: [] as string[], access: undefined as unknown as HostReadAccess };
+    store.access = {
+      updateSkills(skills) { store.skills = [...skills]; },
+      clear() { store.skills = []; store.generated = []; },
+      resolve: async () => undefined,
+      allowGeneratedFile: async (file) => { entered.resolve(); await release.promise; store.generated.push(file); },
+    };
+    stores.push(store);
+    return store.access;
+  };
+  const h = createHarness({ execution: execution.context, hostReads: createHostReads(), createHostReads, grepResult: { content: [], details: { fullOutputPath: "/tmp/old-output" } } });
+  const pending = h.tools.get("grep").execute("grep", { pattern: "x" }, undefined, undefined, h.ctx);
+  await entered.promise;
+  execution.finish(execution.begin("two", process.cwd()));
+  await h.emit("before_agent_start", { systemPrompt: "base", systemPromptOptions: { skills: [{ filePath: "/tmp/new/SKILL.md", baseDir: "/tmp/new" }] } });
+  release.resolve(); await pending;
+  assert.deepEqual(stores[0]!.generated, []);
+  assert.deepEqual(stores[1]!.generated, []);
+  assert.deepEqual(stores[1]!.skills, [{ filePath: "/tmp/new/SKILL.md", baseDir: "/tmp/new" }]);
+});
+
+test("unready execution boundary blocks old off mode, including user bash and tool-call hooks", async () => {
+  const execution = readyExecution(process.cwd()), h = createHarness({ execution: execution.context, runtimeState: state("off") });
+  execution.begin("two", process.cwd());
+  const [gate] = await h.emit("tool_call", { toolName: "read", toolCallId: "read", input: { path: "README.md" } });
+  assert.equal(gate.block, true);
+  await assert.rejects(h.tools.get("read").execute("read", { path: "README.md" }, undefined, undefined, h.ctx), /not ready/);
+  const [bash] = await h.emit("user_bash", {});
+  assert.ok(bash.operations);
+  await assert.rejects(bash.operations.exec("true", process.cwd(), { onData() {} }), /unavailable/);
+});
 
 test("management tools with missing or mismatched registration provenance receive no exemption", async () => {
   for (const configToolSource of [null, fileURLToPath(new URL("./settings-tools.ts", import.meta.url)), "/tmp/nonexistent/index.ts"]) {

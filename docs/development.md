@@ -54,6 +54,23 @@ settings.
 
 Run `just dev-image` by itself when you only need to refresh the local image.
 
+### Internal module boundaries
+
+Keep the runtime ports (`SandboxManager`, `SandboxTransport`, and tool operations)
+independent of the settings editor and presentation code. The integration owns
+session identity/readiness; the manager owns serialized runtime acquisition and
+retirement, while admitted tool callbacks may run concurrently. The same execution
+identity scopes host grants and cached adoption/diagnostic state: obsolete async
+operations must not publish into a replacement session lifetime.
+
+Settings have separate seams for static metadata, pure live/restart classification,
+guarded file storage, private draft intent, and sanitized presentation. The editor
+remains the shared backend for the panel and configuration tools. Preserve their
+intentional approval differences and the distinction between saving settings and
+activating them; do not replace security checks with schema discovery alone.
+Module-boundary tests prevent lightweight discovery and runtime policy from
+pulling in the editor or full control panel.
+
 ### Configuration-tool integration and testing
 
 `settings-tools.ts` registers `msb_config_get` and `msb_config_set`; the latter

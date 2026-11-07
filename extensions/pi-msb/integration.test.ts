@@ -443,13 +443,193 @@ test("disabled Git subdirectory settings use canonical worktree identity without
   assert.match(await readFile(expected, "utf8"), /cpus/); await assert.rejects(stat(join(agentDir, "pi-microsandbox/default.toml")), { code: "ENOENT" });
 });
 
-test("disabled workspace discovery failure stays off and blocks wrong-identity editing", async (t) => {
+test("disabled workspace discovery failure blocks execution and wrong-identity editing", async (t) => {
   const root = await realpath(await temp(t, "disabled-failed-settings")); const cwd = join(root, "missing"); let loads = 0;
   const integration = createMsbIntegration({ sessionId: "disabled-failed", cwd, agentDir: join(root, "agent"), configDirName: ".pi", env: { PI_MSB_DISABLE: "1" }, sdkLoader: async () => { loads++; return fakeSdk([]); } });
   const state = await integration.configureSession({ sessionId: "disabled-failed", cwd, projectTrusted: true });
-  assert.equal(state.status, "off"); assert.match(state.reason!, /Settings editing is blocked/);
+  assert.equal(state.status, "unavailable"); assert.match(state.reason!, /Settings editing is blocked/);
   assert.throws(() => integration.control.settings, /canonical workspace discovery/); assert.equal(loads, 0);
   await assert.rejects(stat(join(root, "agent")), { code: "ENOENT" });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const boundary of ["end", "supersede"] as const) test(`a deferred boot cannot restore adoption after session ${boundary}`, async (t) => {
+  const root = await temp(t, `obsolete-adoption-${boundary}`);
+  const entered = deferred<void>(), release = deferred<void>();
+  const integration = createMsbIntegration({
+    sessionId: "same", cwd: root, configDirName: ".pi", env: {}, sdkLoader: async () => fakeSdk([]),
+    acquireOwnerLock: async () => {
+      entered.resolve(); await release.promise;
+      return { path: "unused", release: async () => {} };
+    },
+  });
+  t.after(() => integration.manager.shutdown());
+  const obsolete = integration.configureSession({ sessionId: "same", cwd: root, projectTrusted: true, config: resolved(config()) });
+  await entered.promise;
+  // Superseding the very same session/cwd must still create a new identity.
+  const replacement = boundary === "supersede"
+    ? integration.configureSession({ sessionId: "same", cwd: root, projectTrusted: true, config: resolved(config({ autoStart: false })) })
+    : (integration.endSession(), undefined);
+  release.resolve();
+  await obsolete;
+  await replacement;
+  assert.equal(integration.control.getRuntimePolicy!(), undefined);
+  assert.equal(integration.control.getAgentRuntimePolicy!(), undefined);
+  const report: any = await integration.control.getDiagnostics!();
+  assert.equal(report.adoption.known, false);
+  assert.equal(report.adoption.verification, "unknown");
+  assert.equal(integration.provider.isActive(), false);
+  await assert.rejects(integration.provider.withRuntime(async () => { assert.fail("obsolete runtime used"); }));
+});
+
+test("direct same-session replacement invalidates adopted snapshots synchronously", async (t) => {
+  const root = await temp(t, "adoption-visibility");
+  const integration = createMsbIntegration({
+    sessionId: "same", cwd: root, configDirName: ".pi", env: {}, sdkLoader: async () => fakeSdk([]),
+    acquireOwnerLock: async () => ({ path: "unused", release: async () => {} }),
+  });
+  t.after(() => integration.manager.shutdown());
+  const setup = { sessionId: "same", cwd: root, projectTrusted: true };
+  await integration.configureSession({ ...setup, config: resolved(config()) });
+  assert.ok(integration.control.getRuntimePolicy!());
+  assert.ok(integration.control.getAgentRuntimePolicy!());
+  const replacement = integration.configureSession({ ...setup, config: resolved(config({ autoStart: false })) });
+  assert.equal(integration.control.getRuntimePolicy!(), undefined);
+  assert.equal(integration.control.getAgentRuntimePolicy!(), undefined);
+  assert.equal((await integration.control.getDiagnostics!() as any).adoption.known, false);
+  await replacement;
+});
+
+test("an ended session rejects adoption from a deferred manager preflight", async (t) => {
+  const root = await temp(t, "preflight-adoption"), sdk = fakeSdk([]);
+  const integration = createMsbIntegration({
+    sessionId: "same", cwd: root, configDirName: ".pi", env: {}, sdkLoader: async () => sdk,
+    acquireOwnerLock: async () => ({ path: "unused", release: async () => {} }),
+  });
+  t.after(() => integration.manager.shutdown());
+  await integration.configureSession({ sessionId: "same", cwd: root, projectTrusted: true, config: resolved(config()) });
+  const entered = deferred<void>(), release = deferred<void>(), get = sdk.Sandbox.get;
+  sdk.Sandbox.get = async (name: string) => { entered.resolve(); await release.promise; return get(name); };
+  const queued = integration.provider.withRuntime(async () => { assert.fail("ended preflight entered callback"); });
+  const rejected = assert.rejects(queued, /context changed/);
+  await entered.promise;
+  integration.endSession();
+  release.resolve();
+  await rejected;
+  assert.equal(integration.control.getRuntimePolicy!(), undefined);
+  assert.equal(integration.control.getAgentRuntimePolicy!(), undefined);
+  assert.equal((await integration.control.getDiagnostics!() as any).adoption.known, false);
+});
+
+for (const initialMode of ["active", "off"] as const) test(`deferred and failed session replacement cannot reuse old ${initialMode} execution`, async (t) => {
+  const root = await temp(t, `replace-${initialMode}`), first = join(root, "first"), second = join(root, "second");
+  await mkdir(first); await mkdir(second);
+  const entered = deferred<void>(), release = deferred<void>(), calls: string[] = [];
+  const integration = createMsbIntegration({
+    sessionId: "one", cwd: first, configDirName: ".pi", env: {}, sdkLoader: async () => fakeSdk(calls),
+    acquireOwnerLock: async (request) => {
+      if (request.sessionId === "two") { entered.resolve(); await release.promise; throw new Error("replacement failed"); }
+      return { path: "unused", release: async () => {} };
+    },
+  });
+  t.after(() => integration.manager.shutdown());
+  await integration.configureSession({ sessionId: "one", cwd: first, projectTrusted: true, config: resolved(config({ autoStart: initialMode === "active" })) });
+  assert.equal(integration.provider.getState().status, initialMode);
+  const oldIdentity = integration.provider.execution!.current();
+  const replacement = integration.configureSession({ sessionId: "two", cwd: second, projectTrusted: true, config: resolved(config()) });
+  assert.notEqual(integration.provider.execution!.current(), oldIdentity);
+  assert.equal(integration.provider.execution!.current().cwd, second);
+  assert.equal(integration.provider.getState().status, "booting");
+  let executions = 0;
+  await assert.rejects(integration.provider.withRuntime(async () => { executions++; }), /not ready/);
+  await entered.promise;
+  assert.equal(integration.provider.isActive(), false);
+  await assert.rejects(integration.provider.withRuntime(async () => { executions++; }), /not ready/);
+  release.resolve();
+  assert.equal((await replacement).status, "unavailable");
+  await assert.rejects(integration.provider.withRuntime(async () => { executions++; }), /not available/);
+  assert.equal(executions, 0);
+});
+
+test("failed workspace replacement and session end block the still-live previous manager", async (t) => {
+  const root = await temp(t, "old-manager"), calls: string[] = [];
+  const integration = createMsbIntegration({ sessionId: "one", cwd: root, configDirName: ".pi", env: {}, sdkLoader: async () => fakeSdk(calls), acquireOwnerLock: async () => ({ path: "unused", release: async () => {} }) });
+  t.after(() => integration.manager.shutdown());
+  await integration.configureSession({ sessionId: "one", cwd: root, projectTrusted: true, config: resolved(config()) });
+  integration.endSession();
+  assert.equal(integration.manager.isActive(), true);
+  await assert.rejects(integration.provider.withRuntime(async () => { assert.fail("ended runtime used"); }), /not ready/);
+  const state = await integration.configureSession({ sessionId: "two", cwd: join(root, "missing"), projectTrusted: true, config: resolved(config()) });
+  assert.equal(state.status, "unavailable");
+  assert.equal(integration.manager.isActive(), true);
+  assert.equal(integration.provider.isActive(), false);
+  await assert.rejects(integration.provider.withRuntime(async () => { assert.fail("old runtime used"); }), /not available/);
+});
+
+test("queued acquisitions cannot cross session/cwd replacement while entered callbacks drain normally", async (t) => {
+  const root = await temp(t, "queued-session"), first = join(root, "first"), second = join(root, "second");
+  await mkdir(first); await mkdir(second);
+  const calls: string[] = [], sdk = fakeSdk(calls);
+  const integration = createMsbIntegration({ sessionId: "one", cwd: first, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: "unused", release: async () => {} }) });
+  t.after(() => integration.manager.shutdown());
+  await integration.configureSession({ sessionId: "one", cwd: first, projectTrusted: true, config: resolved(config()) });
+  const entered = deferred<void>(), releaseCallback = deferred<void>();
+  const activeCall = integration.provider.withRuntime(async (runtime) => {
+    entered.resolve(); await releaseCallback.promise;
+    // An entered callback is still entitled to its old transport until it returns.
+    assert.equal((await runtime.transport.exec("draining-callback", [])).exitCode, 0);
+    return "drained";
+  });
+  await entered.promise;
+  const acquired = deferred<void>(), releaseAcquire = deferred<void>(), get = sdk.Sandbox.get;
+  let holdNext = true;
+  sdk.Sandbox.get = async (name: string) => {
+    if (holdNext) { holdNext = false; acquired.resolve(); await releaseAcquire.promise; }
+    return get(name);
+  };
+  const queued = integration.provider.withRuntime(async () => { assert.fail("queued old-session callback executed"); });
+  const rejected = assert.rejects(queued, /context changed/);
+  await acquired.promise;
+  const replacement = integration.configureSession({ sessionId: "two", cwd: second, projectTrusted: true, config: resolved(config()) });
+  releaseAcquire.resolve();
+  await rejected;
+  assert.equal(calls.some((call) => call.startsWith("stop:")), false);
+  assert.equal(integration.provider.getState().status, "booting");
+  releaseCallback.resolve();
+  assert.equal(await activeCall, "drained");
+  assert.equal((await replacement).status, "active");
+  assert.equal(integration.provider.getState().info?.cwd, second);
+  assert.equal(await integration.provider.withRuntime(async () => "new session"), "new session");
+  assert.ok(calls.indexOf("exec:draining-callback:[]") < calls.findIndex((call) => call.startsWith("stop:")));
+});
+
+test("a newer setup supersedes deferred setup without exposing its stale configuration", async (t) => {
+  const root = await temp(t, "superseded-setup"), first = join(root, "first"), second = join(root, "second");
+  await mkdir(first); await mkdir(second);
+  const entered = deferred<void>(), release = deferred<void>(), calls: string[] = [];
+  const integration = createMsbIntegration({
+    sessionId: "one", cwd: first, configDirName: ".pi", env: {}, sdkLoader: async () => fakeSdk(calls),
+    acquireOwnerLock: async (request) => {
+      if (request.sessionId === "one") { entered.resolve(); await release.promise; }
+      return { path: "unused", release: async () => {} };
+    },
+  });
+  t.after(() => integration.manager.shutdown());
+  const obsolete = integration.configureSession({ sessionId: "one", cwd: first, projectTrusted: true, config: resolved(config({ cpus: 8 })) });
+  await entered.promise;
+  const replacement = integration.configureSession({ sessionId: "two", cwd: second, projectTrusted: true, config: resolved(config({ cpus: 2 })) });
+  assert.equal(integration.provider.getState().status, "booting");
+  release.resolve();
+  await obsolete;
+  assert.equal((await replacement).status, "active");
+  assert.equal(integration.configRef.value.cpus, 2);
+  assert.equal(integration.provider.execution!.current().cwd, second);
+  assert.equal(integration.provider.getState().info?.cwd, second);
 });
 
 test("recent logs redact actual boot-time secret bytes even if an environment reference changes", async (t) => {

@@ -231,6 +231,25 @@ function eventData(value: unknown): Buffer {
     : Buffer.from([]);
 }
 
+// Cleanup must not turn a rejected stream into an indefinitely pending call.
+const STREAM_CLEANUP_TIMEOUT_MS = 1000;
+
+async function boundedCleanup(operation: () => Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new SandboxTransportError("Execution stream cleanup timed out", "TIMEOUT"));
+        }, STREAM_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function killHandle(handle: ExecHandle): Promise<void> {
   if (typeof handle.kill !== "function") return;
   await handle.kill();
@@ -402,7 +421,9 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
       let killPromise: Promise<void> | undefined;
       const kill = (): Promise<void> => {
         if (!killPromise) {
-          killPromise = killHandle(handle).catch((error) => {
+          // This promise only waits for the SDK kill, never for entry.done:
+          // consume() also awaits it on failure while dispose() awaits both.
+          killPromise = boundedCleanup(() => killHandle(handle)).catch((error) => {
             throw mapSdkError(error, "kill");
           });
         }
@@ -419,8 +440,9 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
           void kill().catch(() => undefined);
         };
         signal?.addEventListener("abort", onAbort, { once: true });
+        let iterator: AsyncIterator<StreamEvent> | undefined;
         try {
-          const iterator = handle[Symbol.asyncIterator]!();
+          iterator = handle[Symbol.asyncIterator]!();
           while (true) {
             const next = await iterator.next();
             if (next.done) break;
@@ -429,7 +451,10 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
               options?.onStdout?.(eventData(event.data));
             } else if (event.kind === "stderr") {
               options?.onStderr?.(eventData(event.data));
-            } else if (event.kind === "exited" && typeof event.code === "number") {
+            } else if (event.kind === "exited") {
+              if (typeof event.code !== "number" || !Number.isInteger(event.code)) {
+                throw new SandboxTransportError("Invalid execution exit code", "INVALID");
+              }
               exitCode = event.code;
             }
           }
@@ -439,10 +464,25 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
           if (disposed) {
             throw new SandboxTransportError("Sandbox transport was disposed", "SANDBOX_DOWN");
           }
-          return { exitCode: exitCode ?? 0 };
+          if (exitCode === undefined) {
+            throw new SandboxTransportError("Execution stream ended without an exit event", "INVALID");
+          }
+          return { exitCode };
         } catch (error) {
+          // Keep ownership until cleanup has been attempted, including SDK
+          // normalization/recv failures and exceptions from output callbacks.
+          // Close the original iterator; starting a new drain can hang forever
+          // after kill or compete with the SDK's failed iterator. Neither a
+          // cleanup failure nor a timeout may replace the primary stream error.
+          await kill().catch(() => undefined);
+          await boundedCleanup(async () => {
+            await iterator?.return?.();
+          }).catch(() => undefined);
           if (aborted) {
             throw new SandboxTransportError("Sandbox execution aborted", "ABORTED", signal?.reason);
+          }
+          if (disposed) {
+            throw new SandboxTransportError("Sandbox transport was disposed", "SANDBOX_DOWN", error);
           }
           throw mapSdkError(error, "execStream");
         } finally {

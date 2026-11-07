@@ -53,7 +53,6 @@ export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "
  * control.ts calls import("microsandbox") only when a session actually boots.
  */
 export default function registerPiMsb(pi: ExtensionAPI): void {
-  const hostReads = createHostReadAccess();
   const integration = createMsbIntegration({
     sessionId: "uninitialized",
     cwd: process.cwd(),
@@ -67,8 +66,6 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
   const currentProvider = integration.provider;
   let currentContext: ExtensionContext | undefined;
-  let currentSessionId: string | undefined;
-  let currentCwd: string | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
   let customFooterInstalled = false;
@@ -122,7 +119,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     provider: currentProvider,
     config: integration.configRef.value,
     cwd: process.cwd(),
-    hostReads,
+    hostReads: createHostReadAccess(),
+    createHostReads: createHostReadAccess,
     ownedConfigToolEntry: fileURLToPath(import.meta.url),
     createGrepExecute: ({ provider, cwd, grepHelpers }) =>
       createSandboxGrepExecute({ provider, cwd, helpers: grepHelpers }),
@@ -136,18 +134,19 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     stopBootAnimation();
     currentContext = ctx;
-    currentSessionId = ctx.sessionManager.getSessionId();
-    currentCwd = ctx.cwd;
     updateStatus(ctx, { status: "booting", info: null });
     try {
       // Discover the workspace before host config bootstrap/resolution, then
       // pass that same identity through sandbox boot. Bare loads never write.
-      const state = await integration.configureSession({
+      const pending = integration.configureSession({
         sessionId: ctx.sessionManager.getSessionId(),
         cwd: ctx.cwd,
         projectTrusted: ctx.isProjectTrusted(),
         restored: undefined,
       });
+      const identity = currentProvider.execution!.current();
+      const state = await pending;
+      if (currentProvider.execution!.current() !== identity) return;
       lastConfig = integration.control.getEffectiveConfig();
       updateStatus(ctx, state);
       for (const warning of lastConfig.warnings) ctx.ui.notify(`pi-microsandbox: ${warning}`, "warning");
@@ -160,17 +159,18 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
 
   const warnSessionReset = (ctx: ExtensionContext): void => {
-    if (ctx.hasUI && Object.keys(integration.control.settings?.temporary() ?? {}).length) {
-      try { ctx.ui.notify(`Session sandbox overrides are being cleared. ${SESSION_LIFETIME_WARNING}`, "warning"); } catch { /* Notification failure must not prevent teardown. */ }
-    }
+    try {
+      if (ctx.hasUI && Object.keys(integration.control.settings?.temporary() ?? {}).length) {
+        ctx.ui.notify(`Session sandbox overrides are being cleared. ${SESSION_LIFETIME_WARNING}`, "warning");
+      }
+    } catch { /* Missing settings or notification failure must not prevent teardown. */ }
   };
   pi.on("session_shutdown", async (_event, ctx) => {
-    await closeControlPanel();
     warnSessionReset(ctx);
     integration.endSession();
+    await closeControlPanel();
     stopBootAnimation();
     await integration.manager.shutdown();
-    hostReads.clear();
     ctx.ui.setStatus("pi-msb", undefined);
     // Pi tears down extension-owned UI after this hook. Do not call
     // setFooter(undefined): another extension may have replaced our footer.
@@ -181,16 +181,22 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   // temporary settings before routing tools under the replacement session.
   pi.on("session_info_changed", async (_event, ctx) => {
     if (!currentContext) return;
-    if (ctx.sessionManager.getSessionId() !== currentSessionId || ctx.cwd !== currentCwd) {
-      await closeControlPanel();
+    const identity = currentProvider.execution!.current();
+    if (ctx.sessionManager.getSessionId() !== identity.sessionId || ctx.cwd !== identity.cwd) {
       warnSessionReset(ctx);
       integration.endSession();
       currentContext = ctx;
-      currentSessionId = ctx.sessionManager.getSessionId();
-      currentCwd = ctx.cwd;
       stopBootAnimation();
       updateStatus(ctx, { status: "booting", info: null });
-      await integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+      const pending = integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+      const replacement = currentProvider.execution!.current();
+      await closeControlPanel();
+      try {
+        await pending;
+        if (currentProvider.execution!.current() !== replacement) return;
+      } catch (error) {
+        ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
     }
     updateStatus(ctx, integration.control.getState());
   });

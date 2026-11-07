@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { safeText, settingsSourceLabel } from "./control-panel.ts";
+import { safeText, settingsSourceLabel } from "./settings-presentation.ts";
 import type { SettingsCollectionIntent, SettingsReviewDelta, SettingsReviewFocus } from "./settings.ts";
 import { DNS_EXCEPTION_WARNING, HOST_SECRET_COMMAND_WARNING, NETWORK_IDENTITY_WARNING, SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 

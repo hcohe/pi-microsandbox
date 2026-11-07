@@ -118,6 +118,47 @@ for (const event of ["session_shutdown", "session_info_changed"]) for (const thr
   assert.match(output, /PASS session-warning/);
 });
 
+test("lifecycle cwd replacement routes fresh host-mode tools to the current cwd and fails closed on discovery failure", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-index-cwd-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { mkdir, writeFile } from 'node:fs/promises';
+    import { join } from 'node:path';
+    const first = join(process.cwd(), 'first'), second = join(process.cwd(), 'second');
+    await mkdir(first); await mkdir(second);
+    await writeFile(join(first, 'value.txt'), 'first workspace');
+    await writeFile(join(second, 'value.txt'), 'second workspace');
+    const { default: register } = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const tools = new Map(), hooks = new Map();
+    register({ registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
+      on(event, handler) { hooks.set(event, [...(hooks.get(event) ?? []), handler]); } });
+    let sessionId = 'one';
+    const ctx = { cwd: first, mode: 'rpc', hasUI: true, isProjectTrusted: () => true,
+      sessionManager: { getSessionId: () => sessionId, getEntries: () => [] },
+      ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, notify() {} } };
+    const read = () => tools.get('read').execute('read', {path:'value.txt'}, undefined, undefined, ctx);
+    const info = () => hooks.get('session_info_changed').at(-1)({}, ctx);
+    await hooks.get('session_start').at(-1)({}, ctx);
+    assert.match((await read()).content[0].text, /first workspace/);
+    ctx.cwd = second;
+    const pending = info();
+    await assert.rejects(read(), /not ready|unavailable/);
+    await pending;
+    assert.match((await read()).content[0].text, /second workspace/);
+    sessionId = 'two'; await info();
+    assert.match((await read()).content[0].text, /second workspace/);
+    ctx.cwd = join(process.cwd(), 'missing'); await info();
+    await assert.rejects(read(), /unavailable/);
+    const diagnostic = await tools.get('msb_diagnostics').execute('diag', {}, undefined, undefined, ctx);
+    assert.equal(diagnostic.details.runtime.status, 'unavailable');
+    assert.equal(diagnostic.details.runtime.execution, 'blocked');
+    for (const hook of hooks.get('session_shutdown')) await hook({}, ctx);
+    console.log('PASS current-cwd');
+  `], { cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "1" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS current-cwd/);
+});
+
 test("footer status follows the visibility setting", () => {
   assert.equal(footerStatus(active, false), undefined);
   assert.equal(footerStatus(active, true), "msb-bf9379");
