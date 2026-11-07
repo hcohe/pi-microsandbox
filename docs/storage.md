@@ -4,23 +4,23 @@
 
 ## One read/write workspace
 
-There are no workspace modes. pi-microsandbox selects one workspace root when
-it starts:
+There are no workspace modes. pi-microsandbox bind-mounts only the current
+working directory: the host source is canonical `realpath(cwd)`, and both the
+guest root and command cwd use the lexically resolved cwd path. The bind is
+read/write. Writes are immediately visible in the host directory; there is no
+export or synchronization step.
 
-- If the current working directory is inside a Git worktree, it mounts the
-  entire worktree root.
-- Otherwise, it mounts the current working directory itself.
+Git root discovery is not used. Starting Pi in a Git subdirectory exposes that
+directory, not its Git ancestors or siblings outside cwd. Files within cwd,
+including `.git`, untracked files, and secrets such as `.env`, remain exposed.
+Sessions with overlapping cwd binds can read or overwrite the same host files.
+Use separate host worktrees or checkouts when tasks need independent files.
 
-The selected root is bind-mounted read/write at the same lexical path inside
-the guest. Commands still start in the original current working directory.
-Writes are immediately visible in the host directory; there is no export or
-synchronization step.
-
-Starting Pi below a Git worktree root does not narrow the boundary. The sandbox
-can see the whole worktree, including `.git`, untracked files, sibling
-directories, and files such as `.env`. Separate Pi sessions that use the same
-checkout also use the same files, so their edits can conflict. Use separate
-host worktrees or checkouts when tasks need independent workspaces.
+Canonical cwd also determines the Project configuration identity and shared
+session boundary. A nested cwd has its own identity and may need new explicit
+Project overrides; parent overrides are not inherited. Symlink aliases of the
+same canonical cwd share that identity. Global settings are unchanged. See
+[project overrides](configuration.md#host-owned-project-overrides).
 
 Local-file security is up to you: pi-microsandbox does not hide `.env` files or
 other sensitive information in that read/write mount. We recommend
@@ -29,10 +29,12 @@ preparing a dedicated `.env` per project or worktree. Include only credentials
 the agent may access; neither worktree separation nor Git ignore rules protect
 secrets placed inside the mounted tree. See the [safety model](safety.md#local-files-and-secrets-are-your-responsibility).
 
-The extension creates one project bind mount. Linked-worktree or submodule Git
-metadata stored outside the selected worktree root is not mounted separately.
-An unsupported path or symlink layout fails startup instead of silently
-mounting a narrower directory.
+Git metadata inside cwd remains exposed, but never selects the bind root.
+Linked-worktree or submodule metadata outside cwd is not mounted separately;
+Git commands in the guest may require explicit setup or mounts. Extra mounts
+and user-approved host controls are separate from the cwd bind and can widen
+access. An unsupported path or symlink layout fails startup instead of silently
+selecting a different root or host execution.
 
 ## Inner Docker state
 

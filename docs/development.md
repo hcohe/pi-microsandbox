@@ -63,6 +63,15 @@ retirement, while admitted tool callbacks may run concurrently. The same executi
 identity scopes host grants and cached adoption/diagnostic state: obsolete async
 operations must not publish into a replacement session lifetime.
 
+Workspace resolution has no Git discovery: canonical `realpath(cwd)` is the
+host bind source, while the lexically resolved cwd is guest root and command
+cwd. Canonical cwd determines Project config identity and the shared session
+boundary. Nested directories have distinct identities with no parent Project
+inheritance; Global is unchanged. Cwd replacement invalidates prior host
+approvals and read grants. Git metadata within cwd does not select the bind,
+and external linked-worktree/submodule metadata is not separately mounted.
+Explicit mounts and user-approved host controls remain separate access paths.
+
 Settings have separate seams for static metadata, pure live/restart classification,
 guarded file storage, private draft intent, and sanitized presentation. The editor
 remains the shared backend for the panel and configuration tools. Preserve their
@@ -301,10 +310,16 @@ The prepared-image scenario boots all six latest variant tags under
 legacy singular `PI_MSB_LIVE_PREPARED_IMAGE` to test one image. The live matrix
 uses `pull_policy = "always"` intentionally so mutable development tags cannot
 remain stale on the self-hosted runner. Review the output to confirm that every scenario reports `PASS`, not `SKIP`.
-The workspace scenarios must show that a Git subdirectory mounts the whole
-worktree, a non-Git cwd mounts itself, and routed writes appear immediately on
-the host. They also cover off/on and reload, stale-sandbox pruning, fail-closed
-boot errors, and approved host execution. Docker release validation must cover
+The workspace scenarios must show that only canonical `realpath(cwd)` is
+bound read/write, with the lexically resolved cwd as guest root and command cwd,
+for both Git and non-Git directories. A Git subdirectory must not automatically
+expose Git ancestors or siblings outside cwd; routed writes must appear
+immediately on the host. Git metadata inside cwd must not select the bind, and
+external linked-worktree/submodule metadata must not be separately mounted.
+Validate canonical-cwd Project identity and shared session boundaries, distinct
+nested-cwd overrides with no parent inheritance, unchanged Global settings,
+and approval invalidation on cwd replacement. They also cover off/on and
+reload, stale-sandbox pruning, fail-closed boot errors, and approved host execution. Docker release validation must cover
 daemon readiness, bridge DNS and HTTPS, user-defined networking, Buildx,
 Compose, idle wake, double port publishing, nested-container access to the
 workspace, and network enforcement for deny and allowlist policies. A skipped

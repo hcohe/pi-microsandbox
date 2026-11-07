@@ -87,9 +87,20 @@ configuration directories, and managed-resource labels.
 
 ## Workspace mounting
 
-Starting inside Git mounts the entire worktree root read/write; starting
-elsewhere mounts the cwd. The mount uses the same
-lexical guest path, commands retain their original cwd, and writes reach the
-host immediately. This exposes `.git`, secrets, untracked files, and sibling
-directories. Concurrent sessions share a checkout, and nested containers can
-reach the mount.
+Only canonical `realpath(cwd)` is bind-mounted read/write, at the lexically
+resolved cwd as both guest root and command cwd. Git root discovery is not
+used; Git ancestors and siblings outside cwd are never automatically exposed.
+Writes reach the host immediately. Within cwd, `.git`, secrets, and untracked
+files remain exposed. Sessions with overlapping binds share host files, and
+nested containers can reach the mount.
+
+Canonical cwd determines Project configuration identity and the shared session
+boundary. Starting in a nested cwd may need new explicit Project overrides;
+parent overrides are not inherited and Global is unchanged. See
+[configuration](configuration.md#host-owned-project-overrides).
+
+External linked-worktree/submodule Git metadata is not separately mounted, so
+Git in the guest may need explicit setup or mounts. Git metadata within cwd
+remains exposed but never selects the bind. Explicit extra mounts and
+user-approved host controls are separate from the cwd bind. See the
+[safety model](safety.md).

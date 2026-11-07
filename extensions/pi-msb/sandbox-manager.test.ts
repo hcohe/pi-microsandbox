@@ -7,7 +7,7 @@ import { sandboxNameFor, STATE_SCHEMA_VERSION, type BootRequest, type Config, ty
 
 const sessionId = "session-manager-test";
 const cwd = "/tmp/project/packages/app";
-const workspace = { hostRoot: "/canonical/project", guestRoot: "/tmp/project", cwd, fromGit: true };
+const workspace = { hostRoot: "/canonical/project/packages/app", guestRoot: cwd, cwd };
 
 function config(overrides: Partial<Config> = {}): Config {
   return { ...(structuredClone(DEFAULT_CONFIG) as Config), bootstrapTools: false, stopTimeoutMs: 10, pruneOnStart: true, ...overrides };
@@ -266,6 +266,37 @@ test("stale current-schema cwd, root, or image is replaced but a different sessi
   assert.equal((await manager.boot(request())).status, "unavailable");
   assert.equal(events.includes("stop-remove"), false);
   assert.equal(events.includes("create"), false);
+});
+
+test("an active wider-root workspace cannot be reused or live-adopted when narrowing to cwd", async () => {
+  for (const liveChange of [false, true]) {
+    const events: string[] = [];
+    const adopted: Array<{ request: BootRequest; verification: string }> = [];
+    const wider = request({ workspace: { hostRoot: "/canonical/project", guestRoot: "/tmp/project", cwd } });
+    let inspected: InspectedSandbox | null = null;
+    const manager = createSandboxManager(depsFor(events, {
+      inspectSandbox: async () => inspected,
+      createSandbox: async (req) => {
+        events.push("create");
+        inspected = { name: sandboxNameFor(sessionId), status: "running", labels: labels(req) };
+        return {};
+      },
+      stopAndRemove: async () => { events.push("stop-remove"); inspected = null; },
+      adopted: (request, verification) => adopted.push({ request, verification }),
+    }));
+    assert.equal((await manager.boot(wider)).status, "active");
+    events.length = 0;
+    adopted.length = 0;
+    const narrowed = request({ config: config(liveChange ? { showFooter: false } : {}) });
+    assert.equal((await manager.boot(narrowed)).status, "active");
+    assert.ok(events.indexOf("stop-remove") < events.indexOf("create"));
+    assert.equal(events.includes("create"), true);
+    assert.equal(events.includes("connect"), false);
+    assert.equal(events.includes("start"), false);
+    assert.deepEqual(adopted, [{ request: narrowed, verification: "created" }]);
+    assert.equal(manager.getState().info?.root, cwd);
+    await manager.shutdown();
+  }
 });
 
 test("wake revalidates name, session, schema, image, cwd, and root", async () => {

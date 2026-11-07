@@ -13,7 +13,7 @@ const failureSummaries = {
   runtime_preparation_failed: "Guest runtime preparation failed. Check required image tools, bootstrap configuration and required Docker readiness.",
   runtime_start_failed: "Sandbox startup failed. Check host Microsandbox runtime setup and configuration before retrying activation.",
   invalid_configuration: "No valid configuration is cached. Inspect configuration with msb_config_get; invalid syntax may require manual host repair.",
-  workspace_unavailable: "Workspace or session identity is unavailable. Check the host working directory/Git setup and restart Pi.",
+  workspace_unavailable: "Workspace or session identity is unavailable. Check the host working directory and restart Pi.",
 } as const;
 export type DiagnosticFailureCode = keyof typeof failureSummaries;
 const parameters = Type.Object({
@@ -46,7 +46,7 @@ export function boundDiagnosticsReport(report: Record<string, unknown>): Record<
       desired: { evidence: "last-known resolution; not live", validForSession: readiness.configReady === true && desired.validForSession === true, ...(readiness.configReady === true && desired.validForSession === true ? { settings: safeSettings } : {}) },
       adoption: { evidence: "last-known; not live", known: adoption.known === true, verification: pick(adoption.verification, ["created", "reconnected"]) },
     } : { reason: outcome === "rejected" ? "Only optional format=text/json is accepted. No changes made." : "Safe diagnostics unavailable from this adapter. Error details withheld; no changes made." }),
-    recovery: "Use msb_config_get to inspect constraints and msb_config_set to propose supported repairs, even while blocked. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Workspace identity failure requires host working-directory/Git repair and Pi restart before editing. Never automatically disable protection or enable host fallback.",
+    recovery: "Use msb_config_get to inspect constraints and msb_config_set to propose supported repairs, even while blocked. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Workspace identity failure requires host working-directory repair and Pi restart before editing. Never automatically disable protection or enable host fallback.",
     notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "logs/stdout", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
   };
 }

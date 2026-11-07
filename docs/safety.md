@@ -39,18 +39,21 @@ The default is fail-closed:
   authority: later shutdown must not remove a same-name resource now owned by
   another process. Recovery or pruning must reacquire and validate ownership.
 
-Inside a Git worktree, pi-microsandbox bind-mounts the entire worktree root
-read/write at the same lexical guest path.
-Outside Git, it bind-mounts the current directory. Commands start in the
-original current directory, but their path boundary is the selected root.
+pi-microsandbox bind-mounts only canonical `realpath(cwd)` read/write, with the
+lexically resolved cwd as both guest root and command cwd. It does not discover
+Git roots or automatically expose Git ancestors or siblings outside cwd.
 
-This mount deliberately exposes host files. A Git worktree mount includes
-`.git`, untracked files, secrets such as `.env`, and sibling directories even
-when Pi starts in a subdirectory. Writes are immediately visible on the host,
-and separate sessions using the same checkout can read or overwrite one
-another's work. Use separate host worktrees or checkouts for isolation between
-sessions. Unsafe root mappings fail startup rather than falling back to a
-narrower mount.
+This mount deliberately exposes host files within cwd, including `.git`,
+untracked files, and secrets such as `.env`. Writes are immediately visible on
+the host, and sessions with overlapping binds can read or overwrite the same
+files. Use separate host worktrees or checkouts for independent files. Unsafe
+root mappings fail startup rather than silently selecting another root.
+
+Git metadata within cwd remains exposed but never selects the bind. External
+linked-worktree/submodule metadata is not separately mounted; Git in the guest
+may need explicit setup or mounts. Explicit extra mounts and user-approved host
+controls can widen access separately from the cwd bind. This boundary is not a
+guarantee against every sandbox escape.
 
 ### Local files and secrets are your responsibility
 
@@ -91,7 +94,7 @@ third-party tool gate, not other host tools or `msb_*` prefixes. See
 
 Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
 under Pi's agent directory to pin security-sensitive fields. Keep configuration
-outside the mounted worktree and all writable mounts.
+outside the mounted cwd and all writable mounts.
 Setup, reload and inspection do not create configuration files or directories.
 A missing `default.toml` is created only when saving Global settings; Project saves
 create only their override, and Session changes create no files. Existing files
@@ -125,8 +128,10 @@ Keep policy files and their symlink targets outside the mounted workspace. Extra
 writable mounts may not overlap the policy directory, even when no policy files
 exist, including locations for other projects' future overrides. Keep policy and
 credential files outside writable mounts. A project override applies to one
-canonical workspace identity, not to arbitrary other workspaces or host
-processes. Explicit user host-mode controls remain available. Project trust also permits Pi to load project-local extensions;
+canonical cwd identity, which also determines the shared session boundary,
+not to arbitrary other directories or host processes. Nested cwd may need new
+explicit Project overrides; parent overrides are not inherited and Global is
+unchanged. Explicit user host-mode controls remain available. Project trust also permits Pi to load project-local extensions;
 this configuration layer does not sandbox such host-side code.
 
 ## Docker inside the guest

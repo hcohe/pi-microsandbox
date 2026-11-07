@@ -647,7 +647,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
       } catch {
         if (!isCurrent()) return visibleState();
-        failureState = { status: "unavailable", info: null, reason: "PI_MSB_DISABLE is set; workspace discovery failed. Settings editing is blocked. Fix the working directory/Git discovery and restart Pi." };
+        failureState = { status: "unavailable", info: null, reason: "PI_MSB_DISABLE is set; workspace discovery failed. Settings editing is blocked. Fix the working directory and restart Pi." };
       }
       return visibleState();
     }
@@ -743,7 +743,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         adoption: { evidence: "last-known; not live", known: currentAdoption() !== undefined,
           verification: currentAdoption()?.policy.verification ?? "unknown" },
         recovery: !settingsReady
-          ? "Fix working-directory/Git identity on the host and restart Pi; settings editing is blocked until canonical workspace discovery succeeds."
+          ? "Fix working-directory identity on the host and restart Pi; settings editing is blocked until canonical workspace discovery succeeds."
           : "Use msb_config_get to inspect recovery constraints, then msb_config_set to propose a supported repair. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Never disable protection or use host fallback as an automatic repair.",
         notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "logs/stdout", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
       });

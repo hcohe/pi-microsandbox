@@ -193,7 +193,7 @@ export class ControlPanel implements Component, Focusable {
       status,
       { id: "configuration/sources", label: "Sources", children: [
         ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${settingsSourceLabel(scope)} target`, value: path })),
-        { id: "precedence", label: "Inheritance", value: "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host worktree is read/write." },
+        { id: "precedence", label: "Inheritance", value: "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host cwd is read/write." },
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
@@ -454,7 +454,7 @@ export class ControlPanel implements Component, Focusable {
       { id: "config", label: "Effective configuration (redacted)", action: () => this.#text("Effective configuration", this.#control.getEffectiveConfigToml()) },
       { id: "seal", label: "Seal network", detail: "Set deny mode after choosing where it applies.", action: () => this.#set("network.mode", "deny") },
       dangerous("Reset Session overrides", "Discard only Session overrides; Project/Global defaults are unchanged. Reconfigure automatically. Restart may lose guest state.", async () => { try { await this.#control.resetOverrides(); } finally { if (!this.#closed) await this.#reopenDraft(); } }),
-      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Resources, Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General and Advanced start collapsed directly below MICROSANDBOX, with Resources selected. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers Session, Project, Global, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins and warnings. Host worktree is read/write. Restart loses guest state. Project/Global policy stays outside the workspace.") },
+      { id: "help", label: "Help", action: () => this.#text("Using /msb", "Resources, Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General and Advanced start collapsed directly below MICROSANDBOX, with Resources selected. Settings edit desired policy; Status shows read-only [runtime] metadata and adoption time (or last known when inactive), not a duplicate policy. j/k or arrows move; h/l collapse/parent or expand/child. Enter or e edits an editable item; a adds to collections; d removes an entry or inherits a scalar at the chosen scope. Each edit offers Session, Project, Global, or Cancel. Apply automatically reloads this sandbox; other sandboxes pick up defaults on next start/reload. Higher overrides may shadow changes. q closes (proposal discard defaults to cancel); in text inputs q is literal and Esc cancels. Entry edits never export unrelated credentials. Sources show committed origins and warnings. Host cwd is read/write. Restart loses guest state. Project/Global policy stays outside the workspace.") },
     ];
   }
   #text(title: string, text: string): void {
@@ -628,7 +628,7 @@ export class ControlPanel implements Component, Focusable {
 
 export type PanelLaunchStage = "settings access" | "Session settings" | "Project settings" | "Global settings" | "interactive overlay" | "panel construction";
 const launchHelp: Record<PanelLaunchStage, string> = {
-  "settings access": "Check working directory/Git discovery and restart Pi.",
+  "settings access": "Check the working directory and restart Pi.",
   "Session settings": "Check host-owned settings and policy boundaries.",
   "Project settings": "Check the host-owned Project settings target and its directory permissions/symlinks.",
   "Global settings": "Check the host-owned Global settings target and its directory permissions/symlinks.",

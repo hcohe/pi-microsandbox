@@ -6,9 +6,9 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 SCENARIOS=(
-  "Git subdirectory mounts the whole host repository"
-  "Non-Git cwd is mounted read/write"
-  "Reload and off/on reconnect safely"
+  "Git subdirectory exposes only cwd with ancestor isolation"
+  "Non-Git and symlink cwd preserve lexical paths and read/write"
+  "Reload and off/on ignore malicious Git core.worktree"
   "Duplicate owner is blocked before mutation"
   "Orphaned sandbox is pruned"
   "Idle timeout wakes before execution"
@@ -96,9 +96,9 @@ const PREPARED_IMAGES = process.env.PI_MSB_LIVE_PREPARED_IMAGES
     ? [process.env.PI_MSB_LIVE_PREPARED_IMAGE]
     : declaredPreparedImages;
 const names = [
-  "Git subdirectory mounts the whole host repository",
-  "Non-Git cwd is mounted read/write",
-  "Reload and off/on reconnect safely",
+  "Git subdirectory exposes only cwd with ancestor isolation",
+  "Non-Git and symlink cwd preserve lexical paths and read/write",
+  "Reload and off/on ignore malicious Git core.worktree",
   "Duplicate owner is blocked before mutation",
   "Orphaned sandbox is pruned",
   "Idle timeout wakes before execution",
@@ -136,9 +136,12 @@ async function repo() {
     await fs.mkdir(join(root, "sibling"));
     await writeFile(join(root, "tracked.txt"), "committed\n");
     await writeFile(join(root, "sibling", "visible.txt"), "sibling\n");
+    await writeFile(join(root, "nested", "cwd", "local.txt"), "local\n");
+    await writeFile(join(root, "nested", "parent.txt"), "parent\n");
+    await writeFile(join(root, "ancestor-write.txt"), "unchanged\n");
     check(await sh("git", ["add", "tracked.txt", "sibling/visible.txt"], root), "git add");
     check(await sh("git", ["-c", "commit.gpgSign=false", "commit", "-q", "-m", "initial"], root), "git commit");
-    await writeFile(join(root, ".env"), "LIVE_SECRET=host-visible-by-contract\n");
+    await writeFile(join(root, ".env"), "LIVE_SECRET=must-stay-outside-cwd\n");
     return root;
   } catch (error) {
     await rm(root, { recursive: true, force: true });
@@ -207,23 +210,52 @@ async function removeSandboxIfPresent(name) {
   } catch {}
 }
 
+async function assertCwdBoundary(value, root, cwd) {
+  assert.equal(value.control.getState().info?.root, cwd, "sandbox identity escaped lexical cwd");
+  const pwd = await guest(value, "pwd", []);
+  assert.equal(pwd.exitCode, 0, pwd.stderr.toString());
+  assert.equal(pwd.stdout.toString().trim(), cwd, "sandbox workdir changed from lexical cwd");
+  const local = await guest(value, "cat", [join(cwd, "local.txt")]);
+  assert.equal(local.exitCode, 0, local.stderr.toString());
+  assert.equal(local.stdout.toString(), "local\n");
+  for (const path of [
+    join(root, ".git"), join(root, ".git", "config"), join(root, ".env"),
+    join(root, "tracked.txt"), join(root, "sibling", "visible.txt"),
+    join(root, "nested", "parent.txt"), "../../.env", "../../sibling/visible.txt",
+  ]) {
+    assert.equal((await guest(value, "test", ["!", "-e", path])).exitCode, 0, `host ancestor exposed: ${path}`);
+    assert.notEqual((await guest(value, "cat", [path])).exitCode, 0, `host ancestor readable: ${path}`);
+  }
+}
+
 async function scenario1() {
   const root = await repo();
   const cwd = join(root, "nested", "cwd");
   let value;
   try {
     value = await boot(cwd);
-    assert.equal(value.state.info?.root, root, "sandbox identity did not use the repository root");
-    assert.equal((await guest(value, "pwd", [])).stdout.toString().trim(), cwd, "sandbox workdir changed from the original cwd");
-    assert.equal((await guest(value, "cat", [join(root, "tracked.txt")])).stdout.toString(), "committed\n");
-    assert.equal((await guest(value, "cat", [join(root, "sibling", "visible.txt")])).stdout.toString(), "sibling\n");
-    assert.equal((await guest(value, "test", ["-d", join(root, ".git")])).exitCode, 0, ".git was not mounted");
-    assert.match((await guest(value, "cat", [join(root, ".env")])).stdout.toString(), /host-visible-by-contract/);
-    const write = await guest(value, "sh", ["-lc", "printf 'from guest\\n' > ../../guest-root-write.txt"]);
+    await assertCwdBoundary(value, root, cwd);
+    const write = await guest(value, "sh", ["-c", "printf 'from guest\\n' > guest-write.txt"]);
     assert.equal(write.exitCode, 0, write.stderr.toString());
     await runtimeCall(value, (runtime) => runtime.operations.write.writeFile(join(cwd, "routed-write.txt"), "routed\n"));
-    assert.equal(await readFile(join(root, "guest-root-write.txt"), "utf8"), "from guest\n");
+    assert.equal(await readFile(join(cwd, "guest-write.txt"), "utf8"), "from guest\n");
     assert.equal(await readFile(join(cwd, "routed-write.txt"), "utf8"), "routed\n");
+
+    // Guest scaffold ancestors may be writable; only the host cwd is shared.
+    // Try both overwriting host fixtures and creating new ancestor files.
+    for (const path of [
+      "../parent.txt", "../../ancestor-write.txt", "../../sibling/visible.txt",
+      "../guest-parent-write.txt", "../../guest-root-write.txt",
+      join(root, "ancestor-write.txt"), join(root, "guest-absolute-write.txt"),
+    ]) {
+      await guest(value, "sh", ["-c", 'printf overwritten > "$1"', "sh", path]);
+    }
+    assert.equal(await readFile(join(root, "nested", "parent.txt"), "utf8"), "parent\n");
+    assert.equal(await readFile(join(root, "ancestor-write.txt"), "utf8"), "unchanged\n");
+    assert.equal(await readFile(join(root, "sibling", "visible.txt"), "utf8"), "sibling\n");
+    for (const path of [join(root, "nested", "guest-parent-write.txt"), join(root, "guest-root-write.txt"), join(root, "guest-absolute-write.txt")]) {
+      await assert.rejects(() => fs.lstat(path), { code: "ENOENT" });
+    }
   } finally {
     if (value) await close(value);
     await rm(root, { recursive: true, force: true });
@@ -241,6 +273,24 @@ async function scenario2() {
     assert.equal((await guest(value, "cat", [join(root, "host.txt")])).stdout.toString(), "host\n");
     assert.equal((await guest(value, "sh", ["-lc", "printf guest > guest.txt"])).exitCode, 0);
     assert.equal(await readFile(join(root, "guest.txt"), "utf8"), "guest");
+    await close(value);
+    value = undefined;
+
+    // Resolve the host bind source, but retain the caller's lexical guest path.
+    const alias = `${root}-alias`;
+    try {
+      await symlink(await fs.realpath(root), alias);
+      value = await boot(alias);
+      assert.equal(value.state.info?.root, alias, "symlink cwd identity was canonicalized");
+      assert.equal((await guest(value, "pwd", [])).stdout.toString().trim(), alias);
+      assert.equal((await guest(value, "cat", [join(alias, "host.txt")])).stdout.toString(), "host\n");
+      const write = await guest(value, "sh", ["-c", 'printf alias > "$1"', "sh", join(alias, "alias-write.txt")]);
+      assert.equal(write.exitCode, 0, write.stderr.toString());
+      assert.equal(await readFile(join(root, "alias-write.txt"), "utf8"), "alias");
+    } finally {
+      if (value) { await close(value); value = undefined; }
+      await rm(alias, { force: true });
+    }
   } finally {
     if (value) await close(value);
     await rm(root, { recursive: true, force: true });
@@ -266,6 +316,8 @@ async function scenario3() {
     const name = value.state.info?.name;
     const createdAt = value.state.info?.createdAt;
     await guest(value, "sh", ["-lc", "printf kept > reconnect.txt; printf same-runtime > /tmp/pi-msb-reload-marker"]);
+    // A hostile parent Git config must not change the bind source on reload.
+    check(await sh("git", ["config", "core.worktree", join(root, "sibling")], root), "set malicious core.worktree");
     await value.control.reload();
     assert.equal(value.control.getState().status, "active");
     assert.equal(value.control.getState().info?.name, name, "reload changed the session sandbox identity");
@@ -273,12 +325,14 @@ async function scenario3() {
     assert.equal(value.control.getState().info?.image, IMAGE, "reload did not preserve the configured live image");
     assert.equal((await guest(value, "cat", ["/tmp/pi-msb-reload-marker"])).stdout.toString(), "same-runtime");
     assert.equal((await guest(value, "cat", [join(cwd, "reconnect.txt")])).stdout.toString(), "kept");
+    await assertCwdBoundary(value, root, cwd);
     await value.control.setEnabled(false);
     assert.equal(value.control.getState().status, "off");
     await value.control.setEnabled(true);
     assert.equal(value.control.getState().status, "active");
     assert.equal(value.control.getState().info?.name, name, "off/on changed the session sandbox identity");
     assert.equal((await guest(value, "cat", [join(cwd, "reconnect.txt")])).stdout.toString(), "kept");
+    await assertCwdBoundary(value, root, cwd);
   } finally {
     if (value) await close(value);
     await rm(root, { recursive: true, force: true });
@@ -288,14 +342,14 @@ async function scenario3() {
 async function scenario4() {
   const root = await repo();
   const cwd = join(root, "nested", "cwd");
-  const lockDir = join(root, ".locks");
+  const lockDir = join(cwd, ".locks");
   const sessionId = "same-live-session";
   const info = {
     version: LOCKFILE_VERSION,
     sessionId,
     sandboxName: sandboxNameFor(sessionId),
     cwd,
-    root,
+    root: cwd,
     pid: process.pid,
     createdAt: Date.now(),
   };
@@ -310,7 +364,7 @@ async function scenario4() {
       env,
       sdkLoader: async () => { sdkLoads++; return await import("microsandbox"); },
     });
-    const state = await value.configureSession({ sessionId, cwd, projectTrusted: true, config: { config: config(root), provenance: {}, warnings: [] } });
+    const state = await value.configureSession({ sessionId, cwd, projectTrusted: true, config: { config: config(cwd), provenance: {}, warnings: [] } });
     assert.equal(state.status, "unavailable");
     assert.match(state.reason || "", /another process owns/);
     assert.equal(sdkLoads, 0, "owner lock must precede SDK mutation");
@@ -324,7 +378,7 @@ async function scenario5() {
   const root = await repo();
   const cwd = join(root, "nested", "cwd");
   const staleSession = `stale-${Date.now()}`;
-  const ready = join(root, "ready");
+  const ready = join(cwd, "ready");
   const child = spawn(process.execPath, [process.argv[1], "--hold", cwd, staleSession, ready], {
     env: { ...process.env, PI_MSB_LIVE_IMAGE: IMAGE, PI_MSB_DISABLE: "" },
     stdio: ["ignore", "pipe", "pipe"],

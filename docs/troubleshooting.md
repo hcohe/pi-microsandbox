@@ -30,13 +30,26 @@
    command list or allow the configured network policy to reach the package
    repositories. Deny mode cannot bootstrap an image missing those commands.
 
-There are no workspace modes. A cwd inside Git mounts the entire worktree root
-read/write at the same guest path; any other cwd mounts itself. If startup fails
-because the selected root or symlink layout cannot be represented safely, fix
-the host path rather than expecting a narrower mount. Remember that writes are
-immediate, `.git`, secrets, untracked files, and sibling directories are
-visible, concurrent sessions share a checkout, and nested containers can reach
-the mount.
+There are no workspace modes. Only canonical `realpath(cwd)` is bind-mounted
+read/write, at the lexically resolved cwd as both guest root and command cwd.
+Git root discovery is not used; Git ancestors/siblings outside cwd are never
+automatically exposed. If startup fails because the cwd or symlink layout cannot
+be represented safely, fix the host path rather than expecting another root.
+Writes are immediate; `.git`, secrets, and untracked files within cwd are
+visible. Overlapping sessions share host files, and nested containers can reach
+the mount. Explicit mounts and user-approved host controls are separate.
+
+If Project settings appear missing after starting in a nested cwd, inspect that
+canonical cwd's exact [override location](configuration.md#host-owned-project-overrides).
+Canonical cwd determines Project identity and the shared session boundary;
+parent Project overrides are not inherited, so new explicit overrides may be
+needed. Global settings are unchanged. Replacing cwd invalidates host approvals
+and host-read grants; old approval is not permission for the new directory.
+
+If Git fails in a linked worktree or submodule, check whether its metadata lies
+outside cwd. Such metadata is not separately mounted, and guest Git may require
+explicit setup or mounts. Metadata inside cwd remains exposed but never selects
+the bind root.
 
 ## Legacy named volumes
 

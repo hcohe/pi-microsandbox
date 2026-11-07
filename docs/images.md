@@ -30,7 +30,7 @@ rather than a language toolchain, so all six variants built from this version
 contain it. The extension's digest-pinned default changes only after that cohort
 has been published and verified.
 
-Select a variant in host-owned configuration outside the mounted worktree:
+Select a variant in host-owned configuration outside the mounted cwd:
 
 ```toml
 # ~/.pi/agent/pi-microsandbox/default.toml (or a host-owned project override)

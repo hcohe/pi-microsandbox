@@ -8,7 +8,7 @@ import test from "node:test";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createMsbIntegration } from "./control.ts";
-import { sandboxNameFor, STATE_SCHEMA_VERSION, type Config, type ResolvedConfig } from "./types.ts";
+import { sandboxNameFor, STATE_SCHEMA_VERSION, type Config, type PersistedSandboxState, type ResolvedConfig } from "./types.ts";
 
 function config(overrides: Partial<Config> = {}): Config {
   return {
@@ -144,7 +144,9 @@ function initRepo(repo: string): void {
 test("creates exactly one project bind plus configured extras and keeps the original workdir", async (t) => {
   const root = await temp(t, "mounts");
   const cwd = join(root, "plain", "nested");
+  const extra = join(root, "extra");
   await mkdir(cwd, { recursive: true });
+  await mkdir(extra);
   const calls: string[] = [];
   const integration = createMsbIntegration({
     sessionId: "mount-session", cwd, configDirName: ".pi", sdkLoader: async () => fakeSdk(calls),
@@ -152,17 +154,20 @@ test("creates exactly one project bind plus configured extras and keeps the orig
   });
   const state = await integration.configureSession({
     sessionId: "mount-session", cwd, projectTrusted: true,
-    config: resolved(config({ mounts: [{ type: "tmpfs", guestPath: "/mnt/cache", readonly: false, options: [] }] })),
+    config: resolved(config({ mounts: [
+      { type: "tmpfs", guestPath: "/mnt/cache", readonly: false, options: [] },
+      { type: "dir", hostPath: extra, guestPath: "/mnt/extra", readonly: true, options: ["noexec", "nosuid", "nodev"] },
+    ] })),
   });
   assert.equal(state.status, "active");
-  assert.deepEqual(calls.filter((call) => call.startsWith("volume:")), [`volume:${cwd}`, "volume:/mnt/cache"]);
-  assert.deepEqual(calls.filter((call) => call.startsWith("bind:")), [`bind:${await realpath(cwd)}`]);
-  assert.ok(calls.includes("tmpfs"));
+  assert.deepEqual(calls.filter((call) => call.startsWith("volume:")), [`volume:${cwd}`, "volume:/mnt/cache", "volume:/mnt/extra"]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("bind:")), [`bind:${await realpath(cwd)}`, `bind:${extra}`]);
+  for (const flag of ["tmpfs", "readonly", "noexec", "nosuid", "nodev"]) assert.ok(calls.includes(flag));
   assert.ok(calls.includes(`workdir:${cwd}`));
   await integration.manager.shutdown();
 });
 
-test("a Git subdirectory binds the canonical repository at the lexical root", async (t) => {
+test("a Git subdirectory binds only canonical cwd at lexical cwd through a symlink", async (t) => {
   const root = await temp(t, "git-mount");
   const repo = join(root, "repo");
   const nested = join(repo, "packages", "app");
@@ -178,11 +183,99 @@ test("a Git subdirectory binds the canonical repository at the lexical root", as
   });
   const state = await integration.configureSession({ sessionId: "git-session", cwd, projectTrusted: true, config: resolved(config()) });
   assert.equal(state.info?.cwd, cwd);
-  assert.equal(state.info?.root, alias);
-  assert.deepEqual(calls.filter((call) => call.startsWith("volume:")), [`volume:${alias}`]);
-  assert.deepEqual(calls.filter((call) => call.startsWith("bind:")), [`bind:${await realpath(repo)}`]);
+  assert.equal(state.info?.root, cwd);
+  assert.deepEqual(calls.filter((call) => call.startsWith("volume:")), [`volume:${cwd}`]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("bind:")), [`bind:${await realpath(nested)}`]);
   assert.ok(calls.includes(`workdir:${cwd}`));
   await integration.manager.shutdown();
+});
+
+for (const poisonedAtSetup of [false, true]) test(`Git config cannot widen SDK binds at setup/reload (initially poisoned: ${poisonedAtSetup})`, async (t) => {
+  const root = await temp(t, "git-poison");
+  const cwd = join(root, "repo");
+  const agentDir = join(root, "agent");
+  const defaultFile = join(agentDir, "pi-microsandbox", "default.toml");
+  await mkdir(cwd);
+  await mkdir(dirname(defaultFile), { recursive: true });
+  initRepo(cwd);
+  const poison = async () => {
+    // .git/config is inside the read/write guest mount, unlike host policy.
+    execFileSync("git", ["-C", cwd, "config", "core.worktree", root]);
+    assert.equal(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(), await realpath(root));
+  };
+  if (poisonedAtSetup) await poison();
+  const calls: string[] = [];
+  const sdk = fakeSdk(calls);
+  const integration = createMsbIntegration({
+    sessionId: "git-poison", cwd, configDirName: ".pi", agentDir,
+    env: { HOME: root, PI_MSB_BOOTSTRAP_TOOLS: "false", PI_MSB_PRUNE_ON_START: "false", PI_MSB_DOCKER__MODE: "disabled" },
+    sdkLoader: async () => sdk,
+    acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
+  });
+  t.after(() => integration.manager.shutdown());
+  const assertBind = async () => {
+    assert.equal(integration.control.getState().status, "active");
+    assert.equal(integration.control.getState().info?.root, cwd);
+    assert.deepEqual(calls.filter((call) => call.startsWith("volume:")), [`volume:${cwd}`]);
+    assert.deepEqual(calls.filter((call) => call.startsWith("bind:")), [`bind:${await realpath(cwd)}`]);
+    const labels = JSON.parse(calls.find((call) => call.startsWith("labels:"))!.slice("labels:".length));
+    assert.equal(labels["pi-msb.root"], await realpath(cwd));
+    assert.equal(labels["pi-msb.guest-root"], cwd);
+    calls.length = 0;
+  };
+  await integration.configureSession({ sessionId: "git-poison", cwd, projectTrusted: true });
+  await assertBind();
+  await poison();
+  await integration.control.reload();
+  assert.equal(integration.control.getState().status, "active");
+  assert.equal(calls.some((call) => /^(create|volume|bind):/.test(call)), false, "unchanged cwd/config may safely reuse the cwd-only runtime");
+  calls.length = 0;
+  // Force real builder execution on reload, not just the unchanged-request fast path.
+  await writeFile(defaultFile, "cpus = 2\n");
+  await integration.control.reload();
+  await assertBind();
+  await writeFile(join(cwd, ".git", "config"), "[invalid Git config\n");
+  await writeFile(defaultFile, "cpus = 3\n");
+  await integration.control.reload();
+  await assertBind();
+  await integration.control.setEnabled(false);
+  await integration.control.setEnabled(true);
+  await assertBind();
+});
+
+for (const status of ["running", "stopped"]) test(`a restored wider-root Git sandbox is replaced, never adopted (${status})`, async (t) => {
+  const root = await temp(t, "wider-root");
+  const repo = join(root, "repo");
+  const cwd = join(repo, "packages", "app");
+  await mkdir(cwd, { recursive: true });
+  initRepo(repo);
+  const sessionId = "wider-root";
+  const name = sandboxNameFor(sessionId);
+  const restored: PersistedSandboxState = {
+    version: STATE_SCHEMA_VERSION, sessionId, sandboxName: name, cwd,
+    root: await realpath(repo), guestRoot: repo, image: DEFAULT_CONFIG.image, enabled: true, createdAt: 1,
+  };
+  const calls: string[] = [];
+  const sdk = fakeSdk(calls, { name, status, labels: {
+    "pi-msb.managed": "true", "pi-msb.schema": String(STATE_SCHEMA_VERSION), "pi-msb.session": sessionId,
+    "pi-msb.cwd": cwd, "pi-msb.root": restored.root, "pi-msb.guest-root": repo, "pi-msb.image": DEFAULT_CONFIG.image,
+  } });
+  const entries: any[] = [];
+  const integration = createMsbIntegration({
+    sessionId, cwd, configDirName: ".pi", sdkLoader: async () => sdk,
+    acquireOwnerLock: async () => { calls.push("owner-lock"); return { path: join(root, "owner.lock"), release: async () => undefined }; },
+    appendEntry: (_kind, data) => entries.push(data),
+  });
+  t.after(() => integration.manager.shutdown());
+  assert.equal((await integration.configureSession({ sessionId, cwd, projectTrusted: true, config: resolved(config()), restored })).status, "active");
+  assert.ok(calls.indexOf("owner-lock") < calls.indexOf(`remove:${name}`));
+  assert.ok(calls.indexOf(`remove:${name}`) < calls.indexOf(`create:${name}`));
+  assert.equal(calls.some((call) => /^(connect|start):/.test(call)), false);
+  assert.deepEqual(calls.filter((call) => call.startsWith("volume:")), [`volume:${cwd}`]);
+  assert.deepEqual(calls.filter((call) => call.startsWith("bind:")), [`bind:${await realpath(cwd)}`]);
+  assert.equal(entries.at(-1).root, await realpath(cwd));
+  assert.equal(entries.at(-1).guestRoot, cwd);
+  assert.equal(integration.control.getRuntimePolicy!()?.verification, "created");
 });
 
 test("current labels and persisted state carry schema, session, image, cwd, and canonical root", async (t) => {
@@ -214,22 +307,16 @@ test("current labels and persisted state carry schema, session, image, cwd, and 
   await integration.manager.shutdown();
 });
 
-test("unsafe workspace discovery fails closed before the SDK loads", async (t) => {
+test("unsafe or missing cwd fails closed before the SDK loads", async (t) => {
   const root = await temp(t, "unsafe");
-  const repo = join(root, "repo");
-  const nested = join(repo, "nested");
-  const outside = join(root, "outside");
-  const alias = join(outside, "alias");
-  await mkdir(nested, { recursive: true });
-  await mkdir(outside);
-  initRepo(repo);
-  await symlink(nested, alias, "dir");
-  let loads = 0;
-  const integration = createMsbIntegration({ sessionId: "unsafe", cwd: alias, configDirName: ".pi", sdkLoader: async () => { loads++; return fakeSdk([]); } });
-  const state = await integration.configureSession({ sessionId: "unsafe", cwd: alias, projectTrusted: true });
-  assert.equal(state.status, "unavailable");
-  assert.match(state.reason ?? "", /cannot preserve|symlink topology/);
-  assert.equal(loads, 0);
+  for (const cwd of ["/", join(root, "missing")]) {
+    let loads = 0;
+    const integration = createMsbIntegration({ sessionId: "unsafe", cwd, configDirName: ".pi", sdkLoader: async () => { loads++; return fakeSdk([]); } });
+    const state = await integration.configureSession({ sessionId: "unsafe", cwd, projectTrusted: true });
+    assert.equal(state.status, "unavailable");
+    assert.match(state.reason ?? "", /cannot safely be mounted|cannot be canonicalized/);
+    assert.equal(loads, 0);
+  }
 });
 
 test("guest runtime probes do not require Git", async (t) => {
@@ -480,14 +567,14 @@ test("preview compares privately to adopted runtime and late resource changes ca
   await integration.manager.shutdown();
 });
 
-test("disabled Git subdirectory settings use canonical worktree identity without bootstrap/SDK/adoption", async (t) => {
+test("disabled Git subdirectory settings use canonical cwd identity without bootstrap/SDK/adoption", async (t) => {
   const root = await realpath(await temp(t, "disabled-settings")); const repo = join(root, "repo"); const cwd = join(repo, "packages/app"); await mkdir(cwd, { recursive: true }); initRepo(repo);
   const agentDir = join(root, "agent"); let loads = 0;
   const integration = createMsbIntegration({ sessionId: "disabled", cwd, agentDir, configDirName: ".pi", env: { PI_MSB_DISABLE: "1", PI_MSB_CPUS: "3" }, sdkLoader: async () => { loads++; return fakeSdk([]); } });
   const state = await integration.configureSession({ sessionId: "disabled", cwd, projectTrusted: true }); assert.equal(state.status, "off"); assert.match(state.reason!, /PI_MSB_DISABLE/);
   await assert.rejects(stat(agentDir), { code: "ENOENT" }); assert.equal(loads, 0); assert.equal(integration.configRef.value.cpus, 4);
   const draft = await integration.control.settings!.open("project");
-  const expected = join(agentDir, "pi-microsandbox/projects-absolute", repo.slice(1), "config.toml"); assert.equal(draft.path, expected); assert.ok(!draft.path!.includes("packages/app/config.toml"));
+  const expected = join(agentDir, "pi-microsandbox/projects-absolute", cwd.slice(1), "config.toml"); assert.equal(draft.path, expected);
   draft.set("cpus", 2); await draft.apply(); await integration.control.reload();
   assert.equal(integration.control.getState().status, "off"); assert.equal(integration.configRef.value.cpus, 4); assert.equal(loads, 0);
   assert.match(await readFile(expected, "utf8"), /cpus/); await assert.rejects(stat(join(agentDir, "pi-microsandbox/default.toml")), { code: "ENOENT" });

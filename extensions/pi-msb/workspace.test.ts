@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import test from "node:test";
 
 import { discoverWorkspace } from "./workspace.ts";
-import type { ExecFn } from "./types.ts";
 
 async function fixture(t: test.TestContext, name: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), `pi-msb-workspace-${name}-`));
@@ -14,8 +13,8 @@ async function fixture(t: test.TestContext, name: string): Promise<string> {
   return root;
 }
 
-function git(cwd: string, args: string[]): void {
-  execFileSync("git", ["-C", cwd, ...args], { stdio: "ignore" });
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 function initRepo(path: string): void {
@@ -25,34 +24,32 @@ function initRepo(path: string): void {
   git(path, ["-c", "commit.gpgSign=false", "commit", "--allow-empty", "-qm", "initial"]);
 }
 
-test("a nested Git cwd mounts the canonical repository at its lexical path and retains cwd", async (t) => {
+async function assertCwdOnly(cwd: string): Promise<void> {
+  const lexicalCwd = resolve(cwd);
+  assert.deepEqual(await discoverWorkspace(cwd), {
+    hostRoot: await realpath(lexicalCwd), guestRoot: lexicalCwd, cwd: lexicalCwd,
+  });
+}
+
+test("a nested Git cwd mounts exactly cwd, not the repository root", async (t) => {
   const root = await fixture(t, "git");
   const repo = join(root, "repo");
   const cwd = join(repo, "packages", "app");
   await mkdir(cwd, { recursive: true });
   initRepo(repo);
-
-  assert.deepEqual(await discoverWorkspace(cwd), {
-    hostRoot: await realpath(repo),
-    guestRoot: repo,
-    cwd,
-    fromGit: true,
-  });
+  await assertCwdOnly(cwd);
 });
 
-test("a non-Git cwd mounts only its canonical directory at the lexical cwd", async (t) => {
+test("a non-Git cwd mounts only its canonical directory at the resolved lexical cwd", async (t) => {
   const root = await fixture(t, "plain");
   const cwd = join(root, "plain");
   await mkdir(cwd);
-  assert.deepEqual(await discoverWorkspace(cwd), {
-    hostRoot: await realpath(cwd),
-    guestRoot: cwd,
-    cwd,
-    fromGit: false,
-  });
+  await assertCwdOnly(cwd);
+  await assertCwdOnly(relative(process.cwd(), cwd));
+  await assertCwdOnly(join(cwd, "unused") + "/../.");
 });
 
-test("symlinked repository namespaces preserve lexical guest paths", async (t) => {
+test("symlinked repository namespaces preserve only the lexical cwd", async (t) => {
   const root = await fixture(t, "symlink");
   const repo = join(root, "repo");
   const nested = join(repo, "src", "nested");
@@ -60,16 +57,11 @@ test("symlinked repository namespaces preserve lexical guest paths", async (t) =
   await mkdir(nested, { recursive: true });
   initRepo(repo);
   await symlink(repo, alias, "dir");
-
-  const cwd = join(alias, "src", "nested");
-  const workspace = await discoverWorkspace(cwd);
-  assert.equal(workspace.hostRoot, await realpath(repo));
-  assert.equal(workspace.guestRoot, alias);
-  assert.equal(workspace.cwd, cwd);
+  await assertCwdOnly(join(alias, "src", "nested"));
 });
 
-test("a root that cannot be represented in the lexical namespace is rejected", async (t) => {
-  const root = await fixture(t, "unrepresentable");
+test("a symlink directly into a nested repository directory is supported without exposing its ancestors", async (t) => {
+  const root = await fixture(t, "nested-alias");
   const repo = join(root, "repo");
   const nested = join(repo, "nested");
   const outside = join(root, "outside");
@@ -78,36 +70,92 @@ test("a root that cannot be represented in the lexical namespace is rejected", a
   await mkdir(outside);
   initRepo(repo);
   await symlink(nested, alias, "dir");
-
-  await assert.rejects(discoverWorkspace(alias), /cannot preserve the cwd guest path|unsupported symlink topology/);
+  await assertCwdOnly(alias);
 });
 
-test("missing, interrupted, and malformed Git discovery fail closed", async (t) => {
-  const cwd = await fixture(t, "failures");
-  const cases: Array<[ExecFn, RegExp]> = [
-    [async () => ({ stdout: "", stderr: "spawn git ENOENT", code: 127 }), /Git workspace discovery failed.*ENOENT/],
-    [async () => ({ stdout: "", stderr: "", code: 1, killed: true }), /interrupted/],
-    [async () => ({ stdout: "relative/root\n", stderr: "", code: 0 }), /invalid repository root/],
-    [async () => ({ stdout: `${cwd}\n/second-root\n`, stderr: "", code: 0 }), /invalid repository root/],
-    [async () => ({ stdout: "\n", stderr: "", code: 0 }), /invalid repository root/],
-    [async () => ({ stdout: "", stderr: "fatal: not a git repository", code: 1 }), /Git workspace discovery failed/],
+test("guest-writable core.worktree pointing to an ancestor cannot widen workspace selection", async (t) => {
+  const root = await fixture(t, "malicious-config");
+  const repo = join(root, "repo");
+  const nested = join(repo, "packages", "app");
+  await mkdir(nested, { recursive: true });
+  initRepo(repo);
+  git(repo, ["config", "core.worktree", root]);
+  // Prove this is a real widening attack against Git-based discovery.
+  assert.equal(git(nested, ["rev-parse", "--show-toplevel"]), await realpath(root));
+  await assertCwdOnly(repo);
+  await assertCwdOnly(nested);
+});
+
+test("invalid repository config and gitdir files cannot influence selection", async (t) => {
+  const root = await fixture(t, "invalid-config");
+  const repo = join(root, "repo");
+  const cwd = join(repo, "nested");
+  await mkdir(cwd, { recursive: true });
+  initRepo(repo);
+  await writeFile(join(repo, ".git", "config"), "[invalid Git config\n");
+  assert.throws(() => git(cwd, ["rev-parse", "--show-toplevel"]));
+  await assertCwdOnly(repo);
+  await assertCwdOnly(cwd);
+  await writeFile(join(cwd, ".git"), "gitdir: /nonexistent/pi-msb-gitdir\n");
+  await assertCwdOnly(cwd);
+});
+
+test("Git environment, global config, and missing Git cannot influence selection", async (t) => {
+  const root = await fixture(t, "git-env");
+  const repo = join(root, "repo");
+  const cwd = join(repo, "nested");
+  const emptyPath = join(root, "empty-path");
+  const invalidConfig = join(root, "invalid-gitconfig");
+  await mkdir(cwd, { recursive: true });
+  await mkdir(emptyPath);
+  await writeFile(invalidConfig, "[invalid Git config\n");
+  initRepo(repo);
+  const cases: NodeJS.ProcessEnv[] = [
+    { GIT_DIR: join(repo, ".git"), GIT_WORK_TREE: root },
+    { GIT_DIR: join(root, "missing"), GIT_COMMON_DIR: root, GIT_CEILING_DIRECTORIES: root },
+    { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.worktree", GIT_CONFIG_VALUE_0: root },
+    { GIT_CONFIG_GLOBAL: invalidConfig, GIT_CONFIG_SYSTEM: invalidConfig, GIT_CONFIG_NOSYSTEM: "0" },
+    { GIT_CONFIG_COUNT: "not-a-number" },
+    { PATH: emptyPath },
   ];
-  for (const [exec, pattern] of cases) await assert.rejects(discoverWorkspace(cwd, exec), pattern);
+  for (const env of cases) {
+    const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+    try {
+      Object.assign(process.env, env);
+      if (env.PATH) assert.throws(() => git(cwd, ["--version"]), { code: "ENOENT" });
+      await assertCwdOnly(cwd);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
 });
 
-test("only an ordinary not-a-repository result falls back to cwd", async (t) => {
-  const cwd = await fixture(t, "not-repo");
-  const exec: ExecFn = async () => ({ stdout: "", stderr: "fatal: not a git repository", code: 128 });
-  assert.equal((await discoverWorkspace(cwd, exec)).fromGit, false);
+test("missing cwd, dangling symlinks, and symlink loops fail closed with canonicalization errors", async (t) => {
+  const root = await fixture(t, "failures");
+  const missing = join(root, "missing");
+  const dangling = join(root, "dangling");
+  const loop = join(root, "loop");
+  await symlink(missing, dangling, "dir");
+  await symlink(loop, loop, "dir");
+  for (const cwd of [missing, dangling, loop]) {
+    await assert.rejects(discoverWorkspace(cwd), (error: Error) => {
+      assert.equal(error.message, `workspace cwd cannot be canonicalized: ${cwd}`);
+      assert.ok(error.cause instanceof Error);
+      return true;
+    });
+  }
 });
 
 test("workspace roots that overlap guest runtime paths are rejected", async () => {
-  const exec: ExecFn = async () => ({ stdout: "", stderr: "fatal: not a git repository", code: 128 });
-  await assert.rejects(discoverWorkspace("/", exec), /cannot safely be mounted/);
-  await assert.rejects(discoverWorkspace("/usr/local", exec), /cannot safely be mounted/);
+  for (const cwd of ["/", "/usr", "/bin", "/etc"]) {
+    await assert.rejects(discoverWorkspace(cwd), /cannot safely be mounted/);
+  }
 });
 
-test("linked worktrees select the linked worktree root", async (t) => {
+test("linked worktrees bind exactly cwd, including nested directories", async (t) => {
   const root = await fixture(t, "linked");
   const repo = join(root, "main");
   const linked = join(root, "linked");
@@ -116,14 +164,11 @@ test("linked worktrees select the linked worktree root", async (t) => {
   git(repo, ["worktree", "add", "-q", "-b", "linked-branch", linked]);
   const cwd = join(linked, "nested");
   await mkdir(cwd);
-
-  const workspace = await discoverWorkspace(cwd);
-  assert.equal(workspace.hostRoot, await realpath(linked));
-  assert.equal(workspace.guestRoot, linked);
-  assert.equal(workspace.cwd, cwd);
+  await assertCwdOnly(linked);
+  await assertCwdOnly(cwd);
 });
 
-test("submodule cwd selects the submodule worktree only", async (t) => {
+test("submodules bind exactly cwd, including nested directories", async (t) => {
   const root = await fixture(t, "submodule");
   const source = join(root, "source");
   const parent = join(root, "parent");
@@ -131,12 +176,11 @@ test("submodule cwd selects the submodule worktree only", async (t) => {
   await mkdir(parent);
   initRepo(source);
   initRepo(parent);
-  execFileSync("git", ["-c", "protocol.file.allow=always", "-C", parent, "submodule", "add", "-q", source, "vendor/sub"]);
+  git(parent, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "vendor/sub"]);
   git(parent, ["-c", "commit.gpgSign=false", "commit", "-qm", "add submodule"]);
   const submodule = join(parent, "vendor", "sub");
-
-  const workspace = await discoverWorkspace(submodule);
-  assert.equal(workspace.hostRoot, await realpath(submodule));
-  assert.equal(workspace.guestRoot, submodule);
-  assert.equal(workspace.fromGit, true);
+  const cwd = join(submodule, "nested");
+  await mkdir(cwd);
+  await assertCwdOnly(submodule);
+  await assertCwdOnly(cwd);
 });

@@ -2,7 +2,7 @@
 
 ## Project
 
-`pi-microsandbox` is a TypeScript Pi extension that routes file and shell tools through Microsandbox microVMs. It bind-mounts the enclosing Git worktree (or a non-Git cwd) read/write, supports configurable safety boundaries, and includes prebuilt native file-locking addons for supported macOS and Linux targets.
+`pi-microsandbox` is a TypeScript Pi extension that routes file and shell tools through Microsandbox microVMs. It bind-mounts only canonical `realpath(cwd)` read/write at the lexically resolved cwd guest path, supports configurable safety boundaries, and includes prebuilt native file-locking addons for supported macOS and Linux targets.
 
 ## Development workflow
 
@@ -13,10 +13,17 @@
 - Keep generated native binaries out of Git. Changes to the flock addon should also pass `npm run build:flock` and `npm run smoke:flock` on a supported host.
 - Live VM tests are opt-in and require virtualization: `PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh`. Never treat a skipped run as validation.
 - Update user-facing documentation with behavior or configuration changes. Preserve secure defaults: sandbox failures must not silently fall back to host execution.
-- There are no workspace modes. A Git cwd exposes the whole worktree at the
-  same lexical guest path; a non-Git cwd exposes itself. Treat this read/write
-  host mount, shared sessions, and nested-container access as part of the
-  security boundary.
+- There are no workspace modes or Git root discovery. Guest root and command
+  cwd are the lexically resolved cwd; Git ancestors/siblings outside cwd are
+  never automatically exposed. Canonical cwd determines Project config identity
+  and the shared session boundary; nested cwd may need new explicit Project
+  overrides, with Global unchanged and no parent-policy inheritance.
+- Git metadata inside cwd is exposed but never selects the bind. External
+  linked-worktree/submodule metadata is not separately mounted; guest Git may
+  need explicit setup or mounts. Treat the read/write cwd bind (including secrets
+  and `.git` within it), overlapping sessions, and nested-container access as
+  part of the security boundary. Explicit mounts and user-approved host controls
+  are separate; cwd replacement must invalidate prior approvals.
 
 ## Pull requests and releases
 

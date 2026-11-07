@@ -44,10 +44,15 @@ not include:
   private user data that is not essential to the report.
 
 If a real secret may have been exposed, revoke or rotate it first. The selected
-workspace is mounted read/write: inside Git it includes the entire worktree,
-including `.git`, secrets, untracked files, and sibling directories; outside
-Git it is the current directory. Writes reach the host immediately, concurrent
-sessions share the checkout, and nested containers can access the mount. Use
+workspace is only canonical `realpath(cwd)`, mounted read/write at the lexically
+resolved cwd as both guest root and command cwd. Git discovery never selects
+the bind or automatically exposes Git ancestors/siblings outside cwd. Within
+cwd, `.git`, secrets, and untracked files remain exposed. External linked-worktree
+or submodule metadata is not separately mounted; guest Git may need explicit
+setup or mounts. Writes reach the host immediately, overlapping sessions share
+host files, and nested containers can access the mount. Explicit mounts and
+user-approved host controls can widen access separately; this is not a guarantee
+against every sandbox escape. Use
 synthetic values in the reproduction and describe omitted material rather than
 attaching it. Remember that GitHub advisory participants can read uploaded
 artifacts, so a private report is not a reason to include unnecessary secrets.

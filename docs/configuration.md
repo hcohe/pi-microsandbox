@@ -61,7 +61,7 @@ allow_hosts = ["registry.npmjs.org"]
 ## Host-owned project overrides
 
 Keep settings protected from unapproved sandbox writes outside the mounted
-worktree. Configuration tools can change them only after explicit user approval:
+cwd. Configuration tools can change them only after explicit user approval:
 
 ```text
 <agent-dir>/pi-microsandbox/default.toml
@@ -83,10 +83,13 @@ For a project at `~/Code/pi-microsandbox`, the project override location is:
 ~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/config.toml
 ```
 
-The project identity is the canonical Git worktree root, or the canonical cwd
-outside Git. Starting inside a Git subdirectory or through a symlink uses the
-same host file. Linked worktrees have separate identities. Projects outside
-home use `<agent-dir>/pi-microsandbox/projects-absolute/<absolute-project-path-without-leading-slash>/config.toml`
+The project identity and shared session boundary are determined by canonical
+`realpath(cwd)`, independent of Git. Symlink aliases of the same cwd use the
+same host file, but a nested cwd has a distinct identity and may need new
+explicit Project overrides. Parent Project overrides are not inherited; Global
+settings are unchanged. For example, `~/Code/app/subdir` uses
+`projects/Code/app/subdir/config.toml`, not `projects/Code/app/config.toml`.
+Projects outside home use `<agent-dir>/pi-microsandbox/projects-absolute/<absolute-project-path-without-leading-slash>/config.toml`
 instead, so `/srv/app` cannot collide with `~/srv/app`. There is no parent-policy
 search: each workspace has one exact host override location. A project whose
 root is home itself uses `projects/config.toml`.
@@ -229,9 +232,13 @@ from host code you independently choose to load or execute.
 
 ## Other configuration behavior
 
-- Inside a Git worktree, the whole worktree root is mounted read/write at the
-  same lexical guest path; elsewhere, the current directory is mounted. Commands retain the
-  original cwd, and writes reach the host immediately.
+- Only canonical `realpath(cwd)` is bind-mounted read/write, with the lexically
+  resolved cwd as both guest root and command cwd. Writes reach the host
+  immediately. Git discovery never selects the root or automatically exposes
+  Git ancestors/siblings outside cwd. Git metadata within cwd remains exposed;
+  external linked-worktree/submodule metadata is not separately mounted, so
+  guest Git may need explicit setup or mounts. Explicit extra mounts and
+  user-approved host controls are separate from this cwd boundary.
 - `show_footer = true` uses Pi's single custom-footer slot so the MSB status can
   appear in the upper-right corner. It replaces Pi's built-in footer (or another
   extension's custom footer), preserves the standard location, usage, model,

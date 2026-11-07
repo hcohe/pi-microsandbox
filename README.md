@@ -81,7 +81,7 @@ are memory-only and reset on **Pi `/reload`**, session/workspace switch or shutd
 Inherited defaults then return and may allow broader access. Ordinary settings
 reload preserves Session overrides; choose Project/Global explicitly to persist restrictions. The panel
 requires a running sandbox for Session. Project settings for `~/Code/app`
-live outside the worktree:
+live outside the mounted cwd:
 
 ```text
 ~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml
@@ -89,7 +89,10 @@ live outside the worktree:
 
 `PI_MSB_*` environment variables work too. Settings take precedence in this order:
 built-ins < environment < Global < Project < Session.
-Lists in host-owned files replace lower-layer lists.
+Lists in host-owned files replace lower-layer lists. Canonical cwd determines
+Project identity and the shared session boundary. Starting in a nested cwd may
+need new explicit Project overrides; parent overrides are not inherited.
+Global settings are unchanged.
 
 Keep configuration and credentials outside the workspace and all writable mounts.
 [Configuration](docs/configuration.md) covers project paths, Pi's custom agent
@@ -97,11 +100,18 @@ directory, networking, secrets, and read-only mounts.
 
 ## A sandbox, not a spare checkout
 
-The **whole Git worktree** is mounted read/write; outside Git, the cwd is mounted.
-That includes `.git`, `.env`, untracked files, and sibling directories within the
-worktree—even when Pi starts in a subdirectory. Writes reach the host immediately.
-Sessions sharing a checkout share its files, and nested containers can reach the
-mount too. Use separate host worktrees when you need independent changes.
+**Only the cwd** is bind-mounted read/write: canonical `realpath(cwd)` on the
+host, at the lexically resolved cwd path as both guest root and command cwd.
+Git root discovery is not used; Git ancestors and siblings outside cwd are
+never automatically exposed. Within cwd, `.git`, `.env`, and untracked files
+remain exposed, and writes reach the host immediately. Sessions with overlapping
+binds share host files; nested containers can reach the mount too. Use separate
+host worktrees when you need independent changes.
+
+Git metadata inside cwd never selects the bind. External linked-worktree or
+submodule metadata is not separately mounted; guest Git may need explicit setup
+or mounts. Explicit extra mounts and user-approved host controls remain separate
+ways to widen access.
 
 **Local secrets are your responsibility.** The extension does not hide or protect
 `.env` files or other sensitive information in the mounted directory. We recommend

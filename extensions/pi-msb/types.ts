@@ -188,15 +188,14 @@ export interface LocksPort {
 
 // -------------------------------------------------------------- workspace ----
 
-/** One path-preserving read/write bind used by every sandbox. */
+/** One cwd-only, path-preserving read/write bind used by every sandbox. */
 export interface Workspace {
   /** Canonical host directory supplied to the bind mount. */
   hostRoot: string;
-  /** Lexical absolute path used as the guest mount point. */
+  /** Lexical absolute cwd used as the guest mount point. */
   guestRoot: string;
   /** Original lexical absolute cwd retained as the sandbox workdir. */
   cwd: string;
-  fromGit: boolean;
 }
 
 // ------------------------------------------------------------- transport ----
@@ -388,14 +387,6 @@ export interface PruneReport {
   kept: string[];
   errors: string[];
 }
-
-// --------------------------------------------------------------- host exec ----
-
-export type ExecFn = (
-  command: string,
-  args: string[],
-  options?: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv },
-) => Promise<{ stdout: string; stderr: string; code: number; killed?: boolean }>;
 
 // ------------------------------------------------------- command/control ----
 
