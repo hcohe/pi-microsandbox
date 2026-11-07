@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -75,6 +75,60 @@ const batch = (scope = "session", operations: unknown[] = [
   { path: "network.allow_hosts", operation: "set", value: ["registry.npmjs.org", "github.com"] },
   { path: "network.mode", operation: "set", value: "allowlist" },
 ]) => ({ scope, operations });
+
+test("first approved Global save creates only private, minimal actual settings, never a template", async (t) => {
+  const f = await fixture(t, true);
+  await f.get();
+  await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+  f.choose(async () => {
+    // Merely reviewing a proposed save must not create its target or directories.
+    await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+    return "Yes";
+  });
+  const result = await f.call(set("global"));
+  assert.equal(result.details.outcome, "applied");
+  assert.equal(f.reviews.length, 1);
+  assert.equal(f.reloads(), 1);
+  assert.equal(await readFile(f.paths.global, "utf8"), "show_footer = false\n");
+  assert.equal((await stat(f.paths.global)).mode & 0o777, 0o600);
+  for (const directory of [f.input.agentDir!, dirname(f.paths.global)]) assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.deepEqual(await readdir(dirname(f.paths.global)), ["default.toml"]);
+  await assert.rejects(stat(f.paths.project), { code: "ENOENT" });
+});
+
+for (const scope of ["project", "session"] as const) test(`approved ${scope} save does not create global default.toml`, async (t) => {
+  const f = await fixture(t, true);
+  assert.equal((await f.call(set(scope))).details.outcome, "applied");
+  assert.equal(f.reviews.length, 1);
+  await assert.rejects(stat(f.paths.global), { code: "ENOENT" });
+  if (scope === "project") assert.equal(await readFile(f.paths.project, "utf8"), "show_footer = false\n");
+  else {
+    assert.equal(f.editor.temporary().showFooter, false);
+    await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+  }
+});
+
+for (const scope of ["global", "project", "session"] as const) test(`inspection, abandoned, cancelled, rejected and no-op ${scope} edits create no files or directories`, async (t) => {
+  const f = await fixture(t, true);
+  await f.get();
+  const draft = await f.editor.open(scope === "session" ? "temporary" : scope);
+  draft.set("show_footer", false);
+  await draft.preview();
+  await draft.reviewForApproval("restart");
+  draft.discard();
+  await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+  for (const choice of [undefined, "No"] as const) {
+    f.choose(async () => choice);
+    assert.equal((await f.call(set(scope))).details.outcome, "cancelled");
+    await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+  }
+  f.choose(async () => "Yes");
+  assert.equal((await f.call(set(scope, "cpus", 0))).details.outcome, "rejected");
+  await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+  assert.equal((await f.call({ scope, path: "cpus", operation: "inherit" })).details.outcome, "no_op");
+  await assert.rejects(stat(f.input.agentDir!), { code: "ENOENT" });
+  assert.equal(f.reloads(), 0);
+});
 
 test("inspection filters select sections and leaves after redaction; default text and optional JSON are readable", async (t) => {
   const f = await fixture(t);

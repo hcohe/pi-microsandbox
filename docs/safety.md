@@ -92,9 +92,11 @@ third-party tool gate, not other host tools or `msb_*` prefixes. See
 Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
 under Pi's agent directory to pin security-sensitive fields. Keep configuration
 outside the mounted worktree and all writable mounts.
-The first enabled session creates a missing `default.toml` as a fully commented
-reference, not an active policy; existing files (even empty ones) are preserved.
-New files use mode `0600`, new directories `0700`, and setup errors block startup.
+Setup, reload and inspection do not create configuration files or directories.
+A missing `default.toml` is created only when saving Global settings; Project saves
+create only their override, and Session changes create no files. Existing files
+(even empty ones) are preserved until explicitly edited. New saved files use mode
+`0600` and new directories `0700`; configuration errors still fail closed.
 `pi-microsandbox/default.toml` supplies Global defaults; a host-owned per-project
 file supplies Project overrides. Both take precedence over launch environment/CLI settings;
 deliberate Session changes sit above both files, last only for the current
@@ -119,9 +121,9 @@ logs may contain other sensitive data. Do not share logs blindly.
 Unspecified settings are **not** locked. Missing overrides preserve the usual
 configuration behavior; unreadable or invalid overrides fail closed.
 
-Keep policy files and their symlink targets outside the mounted workspace. While a
-host policy is active, extra writable mounts may not overlap its directory,
-including locations for project overrides not yet created. Keep policy and
+Keep policy files and their symlink targets outside the mounted workspace. Extra
+writable mounts may not overlap the policy directory, even when no policy files
+exist, including locations for other projects' future overrides. Keep policy and
 credential files outside writable mounts. A project override applies to one
 canonical workspace identity, not to arbitrary other workspaces or host
 processes. Explicit user host-mode controls remain available. Project trust also permits Pi to load project-local extensions;

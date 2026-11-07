@@ -2,8 +2,8 @@
 
 [Back to README](../README.md)
 
-Configure host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml`,
-created if missing as a fully commented reference on the first enabled session.
+Configure host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml`.
+The file is created when you save a Global setting, not during setup or reload.
 Use host-owned per-project files for project-specific overrides, `PI_MSB_*`
 environment variables for launch settings, and the [`/msb` control panel](commands.md)
 to apply each change to Session, Project or Global, or cancel. Collapsed settings
@@ -204,22 +204,20 @@ sandbox creation/recreation, not during inspection, validation or saving; tokens
 are not refreshed automatically in a running sandbox. `/msb` → Actions shows
 redacted configuration and re-reads policy with Reload settings.
 
-On the first enabled session (and on reload), setup creates `default.toml`
-**exclusively if missing**, with a comprehensive fully commented reference:
-setting defaults, valid values/ranges, secret sources, mount examples, merge
-behavior, and per-project creation instructions. It does not activate any
-settings. Existing files, including empty files, are never overwritten or
-chmodded. Newly created directories use mode `0700` and the file uses `0600`
-(subject to a more restrictive umask). No configuration is written by a bare
-extension import, factory registration, or the model-list smoke command;
-`PI_MSB_DISABLE=1` also skips setup. Creation failures block sandbox startup
-rather than falling back to host execution. Per-project files are created by the
-project apply action or manually from the host;
-without one, host defaults still apply.
+Setup, reload and inspection do not create configuration files or their parent
+directories. Missing files use the built-in and environment defaults; existing
+files, including empty ones, are not rewritten or chmodded by setup. Saving a
+Global setting creates `default.toml` with the explicitly saved settings, without
+a commented template. Saving a Project setting creates only its project override;
+Session settings remain in memory and create no files. You can also create either
+host-owned file manually. New saved files use mode `0600` and new directories
+`0700` (subject to a more restrictive umask). Saving errors are reported rather
+than silently falling back to host execution. Without a project override, host
+defaults still apply.
 An unreadable or invalid host file fails closed rather than silently dropping
 that layer. Both host files must remain outside the workspace, including through
-symlinks. While a host policy is active, writable extra mounts may not overlap
-the host policy directory, including paths for project overrides not yet created.
+symlinks. Writable extra mounts may not overlap the host policy directory,
+even when no policy files exist, including paths for other projects' future overrides.
 Keep the agent directory and secret files outside all writable mounts. Setting only `secrets` does **not** lock other
 permissions: pin those fields explicitly, as above. This feature does not disable
 explicit user controls such as Actions → Turn off or `PI_MSB_DISABLE`, and is not isolation

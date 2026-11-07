@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -297,11 +297,91 @@ test("writable mounts must not expose the host policy", async () => {
   }
 });
 
-test("a workspace inside the host policy directory cannot create new overrides", async () => {
+test("absent host policies still reserve only the policy-directory boundary", async () => {
+  const policyRoot = `${agentDir}/pi-microsandbox`;
+  for (const hostPath of [agentDir, policyRoot, `${policyRoot}/projects/OTHER-project`, `${policyRoot}/projects-absolute/srv/other`]) {
+    const input = fixture(new Map(), {
+      temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/policy", readonly: false, options: [] }] },
+    });
+    await assert.rejects(resolveConfig(input), /writable host mounts must not expose host configuration/);
+    input.temporaryOverrides!.mounts![0]!.readonly = true;
+    assert.equal((await resolveConfig(input)).config.mounts[0]?.readonly, true);
+  }
+  const sibling = `${agentDir}/unrelated`;
+  const result = await resolveConfig(fixture(new Map(), {
+    temporaryOverrides: { mounts: [{ type: "dir", hostPath: sibling, guestPath: "/mnt/sibling", readonly: false, options: [] }] },
+  }));
+  assert.equal(result.config.mounts[0]?.readonly, false);
+});
+
+test("a workspace inside the host policy directory cannot create new overrides even without policy files", async () => {
   const cwd = `${agentDir}/pi-microsandbox/projects/other`;
-  await assert.rejects(resolveConfig(fixture(new Map([[defaultFile, "cpus = 3"]]), {
-    cwd, repoRoot: cwd,
-  })), /outside the mounted workspace/);
+  for (const files of [new Map<string, string>(), new Map([[defaultFile, "cpus = 3"]])]) {
+    await assert.rejects(resolveConfig(fixture(files, {
+      cwd, repoRoot: cwd,
+    })), /outside the mounted workspace/);
+  }
+});
+
+test("absent policies stay absent after rejected and valid resolution, including symlink aliases", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-msb-absent-policy-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const layout of ["missing-root", "direct", "agent-alias", "policy-alias"]) {
+    const base = join(dir, layout);
+    const home = join(base, "home");
+    const project = join(home, "Code/app");
+    const physicalAgent = join(base, "agent");
+    const agent = layout === "agent-alias" ? join(base, "agent-link") : physicalAgent;
+    const policyRoot = join(agent, "pi-microsandbox");
+    const physicalPolicy = layout === "policy-alias" ? join(base, "policy-store") : join(physicalAgent, "pi-microsandbox");
+    await mkdir(project, { recursive: true });
+    await mkdir(physicalAgent);
+    if (layout === "agent-alias") await symlink(physicalAgent, agent);
+    if (layout === "policy-alias") {
+      await mkdir(physicalPolicy);
+      await symlink(physicalPolicy, policyRoot);
+    }
+    const sibling = join(agent, "unrelated");
+    await mkdir(sibling);
+    const other = join(policyRoot, "projects/OTHER-project");
+    const alias = join(base, "other-link");
+    if (layout !== "missing-root") {
+      await mkdir(other, { recursive: true });
+      await symlink(other, alias);
+    }
+    const input: ResolveConfigInput = { cwd: project, repoRoot: project, projectTrusted: true, configDirName: ".pi", homedir: home, agentDir: agent, env: {} };
+    const snapshot = await readdir(base, { recursive: true });
+    const assertUnchanged = async () => {
+      for (const path of [join(policyRoot, "default.toml"), join(policyRoot, "projects/Code"), join(policyRoot, "projects-absolute")]) {
+        await assert.rejects(lstat(path), { code: "ENOENT" });
+      }
+      assert.deepEqual(await readdir(base, { recursive: true }), snapshot);
+    };
+    const mount = (hostPath: string, readonly = false): ResolveConfigInput => ({
+      ...input,
+      temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/policy", readonly, options: [] }] },
+    });
+    if (layout === "missing-root") {
+      await assert.rejects(resolveConfig(mount(agent)), /writable host mounts must not expose host configuration/);
+      await assertUnchanged();
+      await assert.rejects(lstat(policyRoot), { code: "ENOENT" });
+    } else {
+      for (const hostPath of [other, alias, join(physicalPolicy, "projects/OTHER-project")]) {
+        await assert.rejects(resolveConfig(mount(hostPath)), /writable host mounts must not expose host configuration/);
+        await assertUnchanged();
+        assert.equal((await resolveConfig(mount(hostPath, true))).config.mounts[0]?.readonly, true);
+        await assertUnchanged();
+      }
+      await assert.rejects(resolveConfig({ ...input, cwd: alias, repoRoot: alias }), /outside the mounted workspace/);
+      await assertUnchanged();
+    }
+    assert.equal((await resolveConfig(mount(agent, true))).config.mounts[0]?.readonly, true);
+    await assertUnchanged();
+    assert.equal((await resolveConfig(mount(sibling))).config.mounts[0]?.readonly, false);
+    await assertUnchanged();
+    assert.equal((await resolveConfig(input)).config.cpus, DEFAULT_CONFIG.cpus);
+    await assertUnchanged();
+  }
 });
 
 test("missing project overrides cannot be created through writable symlinked policy directories", async (t) => {

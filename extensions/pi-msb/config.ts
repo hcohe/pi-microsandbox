@@ -4,7 +4,6 @@ import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
-import { defaultConfigTemplate } from "./config-template.ts";
 import { isSecretHost, networkDestinationKind } from "./network-domains.ts";
 import type {
   Config,
@@ -794,33 +793,6 @@ export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots:
   }
 }
 
-/** Session setup only: never call this from the extension factory or bare import. */
-export async function ensureDefaultHostConfig(workspaceRoot: string, agentDir = getAgentDir()): Promise<void> {
-  const lexicalFile = join(resolve(agentDir), "pi-microsandbox/default.toml");
-  const directory = join(await canonicalPolicyLocation(resolve(agentDir)), "pi-microsandbox");
-  const file = join(directory, "default.toml");
-  const root = await defaultRealpath(workspaceRoot);
-  await assertPolicyOutsideWorkspace(lexicalFile, [root, resolve(workspaceRoot)]);
-  await assertPolicyOutsideWorkspace(file, [root, resolve(workspaceRoot)]);
-  const policyRoot = await canonicalPolicyLocation(directory);
-  if (isInside(root, policyRoot)) {
-    throw new ConfigError(["host configuration must be outside the mounted workspace"]);
-  }
-  try {
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    let handle;
-    try { handle = await fs.open(file, "wx", 0o600); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
-      throw error;
-    }
-    try { await handle.writeFile(defaultConfigTemplate(DEFAULT_CONFIG), "utf8"); }
-    finally { await handle.close(); }
-  } catch {
-    throw new ConfigError(["host default configuration could not be created"]);
-  }
-}
-
 /** Canonical I/O targets and lexical reference origins must stay distinct across an agent-root symlink. */
 export async function hostConfigTargets(input: ResolveConfigInput) {
   const realpath = input.realpath ?? defaultRealpath;
@@ -906,16 +878,14 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     hostLayers.push(policy);
   }
   hostPolicyPaths.push(...await hostPolicyAncestorLocations(Object.values(targets.lexicalPaths), realpath));
-  // Reserve the whole policy directory while any host policy is active. A
-  // writable child mount must not be able to create a higher-priority project
-  // override that does not exist yet.
-  const hostPolicyRoot = hostLayers.length ? await canonicalPolicyLocation(join(targets.canonicalAgentDir, "pi-microsandbox"), realpath) : undefined;
-  if (hostPolicyRoot) {
-    if (isInside(projectRoot, hostPolicyRoot) || hostPolicyPaths.some((path) => isInside(path, projectRoot))) {
-      throw new ConfigError(["host configuration must be outside the mounted workspace"]);
-    }
-    hostPolicyPaths.push(hostPolicyRoot, join(targets.agentDir, "pi-microsandbox"));
+  // Reserve the policy directory even before any policy files exist. Writable
+  // descendants could otherwise create host-owned overrides for other projects.
+  const hostPolicyRoot = await canonicalPolicyLocation(join(targets.canonicalAgentDir, "pi-microsandbox"), realpath);
+  const hostPolicyRoots = [hostPolicyRoot, join(targets.agentDir, "pi-microsandbox")];
+  if (isInside(projectRoot, hostPolicyRoot) || hostPolicyPaths.some((path) => isInside(path, projectRoot))) {
+    throw new ConfigError(["host configuration must be outside the mounted workspace"]);
   }
+  hostPolicyPaths.push(...hostPolicyRoots);
   const environment = parseEnvConfig(env);
   layers.push(environment);
   if (captureSanitizer) privateSources.push(environment.value);
@@ -957,7 +927,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   for (const [index, mount] of config.mounts.entries()) {
     if (mount.type === "named" || mount.type === "tmpfs" || typeof mount.hostPath !== "string") continue;
     const host = resolve(mount.hostPath);
-    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || (hostPolicyRoot && [hostPolicyRoot, join(targets.agentDir, "pi-microsandbox")].some((root) => isInside(host, root))))) {
+    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || hostPolicyRoots.some((root) => isInside(host, root)))) {
       policyIssues.push("writable host mounts must not expose host configuration");
     }
     let unsafe = basename(host) === "docker.sock" || knownHostDockerSockets.some((socket) => isInside(socket, host));

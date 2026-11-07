@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_CONFIG,
-  ensureDefaultHostConfig,
   isDisabledByEnv,
   resolveConfig,
   resolveSecretValue,
@@ -616,10 +615,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     configReady = false;
     const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
     if (approvedSettingsReload) settings.assertSession(input, sessionId);
-    else {
-      settings.configureSession(input, sessionId);
-      await ensureDefaultHostConfig(selected.guestRoot, options.agentDir);
-    }
+    else settings.configureSession(input, sessionId);
     let sanitize!: SettingsSanitizer;
     const next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary() }, (captured) => { sanitize = captured; });
     // Shared diagnostic state is committed by callers only after their lifecycle

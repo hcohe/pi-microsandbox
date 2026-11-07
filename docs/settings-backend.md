@@ -239,8 +239,8 @@ revision captured at open. It returns a strict masked JSON before/after review.
 through the existing atomic-write guards; stale approval conflicts without retry.
 Successful approved applies return a private `assertUnchanged` activation guard.
 Pass it through native `reload({allowRestart, guard})`, which checks before/after
-resolution, preserves the established settings context and skips bootstrap. This
-prevents adopting newly changed unreviewed live policy after saving. Disabled
+resolution and preserves the established settings context without configuration
+writes. This prevents adopting newly changed unreviewed live policy after saving. Disabled
 environment reloads fail explicitly for this guarded path. Ordinary panel/reload
 behavior is unchanged. Portable final rename races remain subject to the bounded
 filesystem guarantees above; target metadata necessarily changes on our save,

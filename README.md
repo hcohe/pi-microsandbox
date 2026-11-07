@@ -69,10 +69,10 @@ red. Colors follow your theme; only the booting circle flashes.
 
 ## Your project, your sandbox
 
-The first enabled session creates
-`~/.pi/agent/pi-microsandbox/default.toml`: a fully commented template of defaults,
-examples, and safety guidance. Uncomment what you need; existing files are left
-alone.
+Setup and reload do not create configuration files.
+Saving a **Global** setting creates `~/.pi/agent/pi-microsandbox/default.toml`
+with the settings you save, not a commented template. Existing files are left
+alone until you explicitly save changes.
 
 Each edit offers **Session**, **Project**, **Global**, or **Cancel**. Apply reloads
 this sandbox automatically; others pick up persisted defaults on next start/reload.

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Check } from "typebox/value";
 import { applyOverride, ConfigError, DEFAULT_CONFIG, validateConfig } from "./config.ts";
@@ -6,6 +7,19 @@ import { valueAt } from "./settings-fields.ts";
 import { effectiveNetworkPolicy, settingsSchema } from "./settings-schema.ts";
 import { SETTINGS_PATHS } from "./settings.ts";
 import { diagnoseConfigError, operationProblem, validationMessage } from "./settings-validation.ts";
+
+test("documentation uses the same three human scope names and session tool contract", async () => {
+  for (const file of ["README.md", "docs/commands.md", "docs/configuration.md", "docs/development.md", "docs/getting-started.md", "docs/safety.md", "docs/settings-backend.md", "docs/tools.md"]) {
+    const text = await readFile(new URL(`../../${file}`, import.meta.url), "utf8");
+    for (const label of ["Global", "Project", "Session"]) assert.ok(text.includes(label), `${file}: ${label}`);
+    assert.doesNotMatch(text, /(?:ephemeral|temporary) (?:settings|changes|panel)|ephemeral\/project|current-running-only|Current-only|Apply for current running|Apply for all sandboxes|layers\.ephemeral|\.ephemeral`|"scope":"ephemeral"/, file);
+  }
+  const tools = await readFile(new URL("../../docs/tools.md", import.meta.url), "utf8");
+  assert.match(tools, /`session`, `project`, `global`/);
+  assert.match(tools, /"scope":"session"/);
+  assert.match(tools, /`temporary` \(Session\)/);
+  for (const label of ["Global", "Project", "Session"]) assert.ok(tools.includes(`Scope: ${label}`));
+});
 
 const schema = settingsSchema() as Record<string, any>;
 test("discovery value schemas describe every actual default", () => {

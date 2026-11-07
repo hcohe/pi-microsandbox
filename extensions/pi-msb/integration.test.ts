@@ -30,6 +30,55 @@ async function temp(t: test.TestContext, prefix: string): Promise<string> {
   return root;
 }
 
+for (const existing of ["missing-agent", "empty-agent", "empty-policy-directory", "empty-config", "user-config"] as const) {
+  test(`enabled setup, reload and settings inspection never bootstrap global config: ${existing}`, async (t) => {
+    const root = await temp(t, "lazy-config");
+    const cwd = join(root, "workspace");
+    const agentDir = join(root, "agent");
+    const policyDir = join(agentDir, "pi-microsandbox");
+    const file = join(policyDir, "default.toml");
+    await mkdir(cwd);
+    if (existing !== "missing-agent") await mkdir(agentDir);
+    if (["empty-policy-directory", "empty-config", "user-config"].includes(existing)) await mkdir(policyDir);
+    const text = existing === "empty-config" ? "" : existing === "user-config" ? "# user policy\ncpus = 3\n" : undefined;
+    if (text !== undefined) await writeFile(file, text, { mode: 0o640 });
+    const before = text === undefined ? undefined : await stat(file);
+    const calls: string[] = [];
+    const integration = createMsbIntegration({
+      sessionId: "lazy-config", cwd, configDirName: ".pi", agentDir,
+      env: { HOME: root, PI_MSB_BOOTSTRAP_TOOLS: "false", PI_MSB_PRUNE_ON_START: "false", PI_MSB_DOCKER__MODE: "disabled" },
+      sdkLoader: async () => fakeSdk(calls),
+      locksPort: { tryAcquire: async () => ({ path: "unused", release: async () => undefined }) },
+      acquireOwnerLock: async () => ({ path: "unused", release: async () => undefined }),
+    });
+    t.after(() => integration.manager.shutdown());
+    const assertUntouched = async () => {
+      if (before) {
+        assert.equal(await readFile(file, "utf8"), text);
+        const after = await stat(file);
+        for (const key of ["ino", "mode", "mtimeMs", "ctimeMs"] as const) assert.equal(after[key], before[key]);
+      } else await assert.rejects(stat(file), { code: "ENOENT" });
+      if (existing === "missing-agent") await assert.rejects(stat(agentDir), { code: "ENOENT" });
+      if (["missing-agent", "empty-agent"].includes(existing)) await assert.rejects(stat(policyDir), { code: "ENOENT" });
+    };
+    for (let setup = 0; setup < 2; setup++) {
+      assert.equal((await integration.configureSession({ sessionId: "lazy-config", cwd, projectTrusted: true })).status, "active");
+      await assertUntouched();
+      await integration.control.reload();
+      assert.equal(integration.control.getState().status, "active");
+      await assertUntouched();
+      await integration.control.settings!.inspect();
+      for (const scope of ["global", "project", "temporary"] as const) {
+        const draft = await integration.control.settings!.open(scope);
+        await draft.preview();
+        draft.discard();
+      }
+      await assertUntouched();
+    }
+    assert.ok(calls.some((call) => call.startsWith("cpus:")), "must boot through the fake SDK, not skip setup");
+  });
+}
+
 test("host policy survives local edits while temporary settings override it through reload and off/on", async (t) => {
   const root = await temp(t, "host-config");
   const cwd = join(root, "Code", "app");
@@ -238,7 +287,7 @@ test("legacy same-session sandbox is removed and recreated, never reconnected", 
   await integration.manager.shutdown();
 });
 
-test("session setup bootstraps only on first enabled session and ignores obsolete local policy", async (t) => {
+test("session setup stays read-only when disabled or auto-start is off and ignores obsolete local policy", async (t) => {
   const root = await temp(t, "bootstrap-lifecycle");
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
@@ -257,10 +306,10 @@ test("session setup bootstraps only on first enabled session and ignores obsolet
   await assert.rejects(stat(file), { code: "ENOENT" });
   env.PI_MSB_DISABLE = "0";
   assert.equal((await integration.configureSession({ sessionId: "bootstrap", cwd, projectTrusted: true })).status, "off");
-  const template = await readFile(file, "utf8");
-  assert.match(template, /pi-microsandbox host-owned configuration/);
+  await assert.rejects(stat(agentDir), { code: "ENOENT" });
   assert.equal(integration.configRef.value.cpus, 3);
   assert.equal(loads, 0);
+  await mkdir(dirname(file), { recursive: true });
   await writeFile(file, "cpus = 2\n");
   await integration.control.reload();
   assert.equal(integration.configRef.value.cpus, 2);
@@ -272,7 +321,7 @@ test("session setup bootstraps only on first enabled session and ignores obsolet
   assert.equal(loads, 0);
 });
 
-test("bootstrap failures block setup and explicit on even when environment requests host fallback", async (t) => {
+test("unsafe host config paths block setup and explicit on even when environment requests host fallback", async (t) => {
   const root = await temp(t, "bootstrap-failure");
   const cwd = join(root, "project");
   await mkdir(cwd);
@@ -418,6 +467,7 @@ test("preview compares privately to adopted runtime and late resource changes ca
   const agentDir = join(root, "agent"); const calls: string[] = []; const sdk = fakeSdk(calls);
   const integration = createMsbIntegration({ sessionId: "consent", cwd, agentDir, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "lock"), release: async () => {} }) });
   await integration.configureSession({ sessionId: "consent", cwd, projectTrusted: true });
+  await mkdir(join(agentDir, "pi-microsandbox"), { recursive: true });
   await writeFile(join(agentDir, "pi-microsandbox/default.toml"), "cpus = 2\n");
   const draft = await integration.control.settings!.open("temporary"); draft.set("show_footer", false);
   assert.equal((await draft.preview()).effect, "live"); // disk baseline already has cpus=2

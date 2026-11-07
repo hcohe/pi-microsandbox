@@ -393,6 +393,7 @@ test("reconnect with missing or conflicting actual image never guesses disk VM p
     const labels = (await f.sdk.Sandbox.get(name)).config().labels;
     const calls: string[] = []; const sdk = fakeSdk(calls, { name, status: "running", labels });
     const handle = await sdk.Sandbox.get(name); handle.config = () => ({ name, labels, ...(actualImage ? { image: actualImage } : {}) });
+    await mkdir(dirname(f.paths.global!), { recursive: true });
     await writeFile(f.paths.global!, 'cpus = 2\nmemory_mib = 2048\n[network]\nmode = "deny"\n');
     const integration = createMsbIntegration({ sessionId: "panel-session", cwd: f.input.cwd, agentDir: f.input.agentDir, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(f.root, "second.lock"), release: async () => {} }) });
     t.after(() => integration.manager.shutdown()); await integration.configureSession({ sessionId: "panel-session", cwd: f.input.cwd, projectTrusted: true });
