@@ -269,7 +269,8 @@ pruning, and sets `bootstrap_tools = false` so the result measures repeat boot
 and readiness rather than an image pull or package install.
 The p95 must be at most 2,000 ms. Every sandbox is shut down and removed. If
 lifecycle cleanup fails, the test fails and retains its reported `.tmp` directory
-for recovery instead of claiming success.
+for recovery instead of claiming success. Cleanup diagnostics use the observed
+runtime name, not a name derived from the session ID.
 
 Run the tool directly to change the image, sample count, warm-ups, or limit:
 
@@ -295,6 +296,10 @@ reviewing the script:
 ```sh
 PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh
 ```
+
+The CI cleanup guard tracks actual sandbox name/session pairs and rechecks
+managed/session labels before stopping or removing a resource; random names
+are never treated as proof of ownership.
 
 Without that variable the script prints a `SKIP` line for every scenario and
 exits successfully; this skip path does not validate virtualization. If

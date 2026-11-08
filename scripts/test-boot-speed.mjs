@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_CONFIG } from "../extensions/pi-msb/config.ts";
 import { createMsbIntegration } from "../extensions/pi-msb/control.ts";
-import { sandboxNameFor } from "../extensions/pi-msb/types.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DEFAULT_RUNS = 3;
@@ -165,12 +164,14 @@ async function main() {
     await mkdir(cwd, { recursive: true });
     const sessionId = `pi-msb-boot-speed-${process.pid}-${Date.now()}-${attemptNumber}`;
     const env = { ...process.env, PI_MSB_DISABLE: "" };
+    let sandboxName = null;
     const integration = createMsbIntegration({
       sessionId,
       cwd,
       configDirName: ".pi",
       env,
       entries: () => [],
+      onState: (state) => { if (state.info) sandboxName = state.info.name; },
     });
     let cleanupPromise;
     const cleanup = async () => {
@@ -179,8 +180,7 @@ async function main() {
           await integration.manager.shutdown();
           const cleanupState = integration.manager.getState();
           if (cleanupState.status === "unavailable") {
-            const sandboxName = sandboxNameFor(sessionId);
-            throw new Error(`cleanup failed for sandbox ${sandboxName} (session ${sessionId}): ${cleanupState.reason ?? "unknown cleanup error"}`);
+            throw new Error(`cleanup failed for sandbox ${sandboxName ?? "<not observed>"} (session ${sessionId}): ${cleanupState.reason ?? "unknown cleanup error"}`);
           }
         })();
       }

@@ -21,7 +21,8 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   const cwd = join(root, "workspace"); await mkdir(cwd);
   const input = { cwd, repoRoot: cwd, configDirName: ".pi", projectTrusted: true, env: {}, agentDir: join(root, "agent") };
   const calls: string[] = []; const sdk = fakeSdk(calls);
-  const integration = native ? createMsbIntegration({ sessionId: "panel-session", cwd, agentDir: input.agentDir, configDirName: ".pi", env: { PI_MSB_ALLOW_HOST_EXECUTION: "false", PI_MSB_FALLBACK_MODE: "block" }, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => {} }) }) : undefined;
+  const entries: unknown[] = [];
+  const integration = native ? createMsbIntegration({ sessionId: "panel-session", cwd, agentDir: input.agentDir, configDirName: ".pi", env: { PI_MSB_ALLOW_HOST_EXECUTION: "false", PI_MSB_FALLBACK_MODE: "block" }, sdkLoader: async () => sdk, entries: () => entries, appendEntry: (customType, data) => { entries.push({ type: "custom", customType, data }); }, acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => {} }) }) : undefined;
   if (integration) { await integration.configureSession({ sessionId: "panel-session", cwd, projectTrusted: true }); t.after(() => integration.manager.shutdown()); }
   const settings = integration?.control.settings ?? new SettingsEditor(input, "panel-session");
   const control: MsbControl = integration?.control ?? {
@@ -54,7 +55,7 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   const list = async (group: string, label: string) => { await node(group, label); await expand(label); };
   const number = async (value: string) => { await edit("Resources", "Virtual CPUs:"); await key("\x15"); await key(value); await key("\r"); };
   t.after(() => panel.dispose());
-  return { root, input, settings, control, integration, sdk, ctx, calls, panel, terminal, key, seek, choose, tree, expand, node, edit, save, apply, action, list, number, selected, full, text, paths, closed: () => closed };
+  return { root, input, settings, control, integration, sdk, entries, ctx, calls, panel, terminal, key, seek, choose, tree, expand, node, edit, save, apply, action, list, number, selected, full, text, paths, closed: () => closed };
 }
 
 test("Session scope selection and review explain Pi reload resets without changing settings reload semantics", async (t) => {
@@ -395,7 +396,7 @@ test("reconnect with missing or conflicting actual image never guesses disk VM p
     const handle = await sdk.Sandbox.get(name); handle.config = () => ({ name, labels, ...(actualImage ? { image: actualImage } : {}) });
     await mkdir(dirname(f.paths.global!), { recursive: true });
     await writeFile(f.paths.global!, 'cpus = 2\nmemory_mib = 2048\n[network]\nmode = "deny"\n');
-    const integration = createMsbIntegration({ sessionId: "panel-session", cwd: f.input.cwd, agentDir: f.input.agentDir, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, acquireOwnerLock: async () => ({ path: join(f.root, "second.lock"), release: async () => {} }) });
+    const integration = createMsbIntegration({ sessionId: "panel-session", cwd: f.input.cwd, agentDir: f.input.agentDir, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, entries: () => f.entries, acquireOwnerLock: async () => ({ path: join(f.root, "second.lock"), release: async () => {} }) });
     t.after(() => integration.manager.shutdown()); await integration.configureSession({ sessionId: "panel-session", cwd: f.input.cwd, projectTrusted: true });
     assert.ok(calls.some((call) => call.startsWith("connect:"))); assert.ok(!calls.some((call) => call.startsWith("create:")));
     const snapshot = integration.control.getRuntimePolicy!()!; assert.equal(snapshot.verification, "reconnected"); assert.ok(!snapshot.knownFields.includes("image")); assert.ok(snapshot.knownFields.includes("fallbackMode"));

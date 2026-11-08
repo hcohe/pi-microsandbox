@@ -19,17 +19,16 @@ import { registerConfigTools } from "./settings-tools.ts";
 import { registerDiagnosticsTool } from "./diagnostics-tools.ts";
 import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 import { registerSandboxTools } from "./tools.ts";
-import { displayId, type ResolvedConfig, type RuntimeState } from "./types.ts";
+import type { ResolvedConfig, RuntimeState, SessionExecutionIdentity } from "./types.ts";
 
-export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: string): string | undefined {
+export function footerStatus(state: RuntimeState, visible: boolean): string | undefined {
   if (!visible) return undefined;
-  const sessionDisplayId = sessionId ? displayId(sessionId) : undefined;
   switch (state.status) {
-    case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}${state.observation === "asleep" ? " asleep" : state.observation === "unknown" ? " uncertain" : ""}`;
+    case "active": return `${state.info?.name ?? "MSB active"}${state.observation === "asleep" ? " asleep" : state.observation === "unknown" ? " uncertain" : ""}`;
     case "off": return "Microsandbox disabled - Running on host";
     case "host-fallback": return "MSB host fallback";
     case "unavailable": return "Microsandbox Blocked";
-    case "booting": return `msb-${sessionDisplayId ?? state.info?.displayId ?? "…"}`;
+    case "booting": return state.pendingName ?? state.info?.name ?? "MSB starting";
     case "stopping": return "MSB stopping";
     default: return "MSB disabled";
   }
@@ -65,6 +64,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   let currentContext: ExtensionContext | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
+  let bootState: { identity: SessionExecutionIdentity; state: RuntimeState } | undefined;
   let bootGeneration = 0;
   let customFooterInstalled = false;
   let uiGeneration = 0;
@@ -102,6 +102,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
 
   const stopBootAnimation = (): void => {
     bootGeneration += 1;
+    bootState = undefined;
     if (bootAnimation !== undefined) {
       clearInterval(bootAnimation);
       bootAnimation = undefined;
@@ -113,11 +114,16 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     const generation = bootGeneration;
     let frame = 0;
     const render = (): void => {
-      // Read the current session and theme on every tick, never a previous context.
+      // Read the current UI and theme on every tick, never a previous context.
       const ctx = currentContext;
       if (!ctx || generation !== bootGeneration || !integration.configRef.value.showFooter) return;
-      const state: RuntimeState = { status: "booting", info: null };
-      const text = footerStatus(state, true, ctx.sessionManager.getSessionId())!;
+      const identity = currentProvider.execution!.current();
+      let state: RuntimeState = { status: "booting", info: null };
+      if (bootState?.identity === identity && identity.sessionId === ctx.sessionManager.getSessionId() && identity.cwd === ctx.cwd) {
+        const current = currentProvider.getState();
+        state = current.status === "booting" ? current : bootState.state;
+      }
+      const text = footerStatus(state, true)!;
       ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state, frame));
       frame = (frame + 1) % 2;
     };
@@ -132,7 +138,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   };
 
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
-    const text = footerStatus(state, integration.configRef.value.showFooter, ctx.sessionManager.getSessionId());
+    const text = footerStatus(state, integration.configRef.value.showFooter);
     if (text !== undefined) ensureCustomFooter(ctx);
     if (text === undefined) {
       stopBootAnimation();
@@ -142,6 +148,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     }
     startObservation(ctx);
     if (state.status === "booting") {
+      bootState = { identity: currentProvider.execution!.current(), state };
+      if (bootAnimation !== undefined) ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state));
       startBootAnimation();
       return;
     }

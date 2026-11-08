@@ -14,6 +14,7 @@ const escaped = (value: string) => JSON.stringify(value).slice(1, -1);
 async function fixture(t: test.TestContext) {
   const root = await mkdtemp("/tmp/pi-msb-control-secrets-privacy-");
   const integrations: MsbIntegration[] = [];
+  const entries: unknown[] = [];
   t.after(async () => {
     try {
       for (const integration of integrations.reverse()) {
@@ -66,6 +67,8 @@ async function fixture(t: test.TestContext) {
       sessionId, cwd, agentDir: join(root, "agent"), configDirName: ".pi",
       env: { PRIVACY_TOKEN: token, PRIVACY_COUNTER: counter },
       sdkLoader: async () => sdk,
+      entries: () => entries,
+      appendEntry: (customType, data) => { entries.push({ type: "custom", customType, data }); },
       locksPort: { tryAcquire: async () => ({ path: join(root, "prune.lock"), release: async () => undefined }) },
       acquireOwnerLock: async () => ({ path: join(root, "owner.lock"), release: async () => undefined }),
       onState: (state) => { states.push(structuredClone(state)); },

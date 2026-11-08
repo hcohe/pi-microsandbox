@@ -26,7 +26,6 @@ import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } 
 import {
   LOCKFILE_VERSION,
   createSessionExecution,
-  sandboxNameFor,
   type AgentRuntimePolicySnapshot,
   type BootRequest,
   type Config,
@@ -227,11 +226,11 @@ function applyNetwork(builder: AnyRecord, config: Config, sdk: MicrosandboxModul
   }
 }
 
-function lockInfoFor(request: BootRequest): LockInfo {
+function lockInfoFor(request: BootRequest, name: string): LockInfo {
   return {
     version: LOCKFILE_VERSION,
     sessionId: request.sessionId,
-    sandboxName: request.config.sandboxName ?? sandboxNameFor(request.sessionId),
+    sandboxName: name,
     cwd: request.cwd,
     root: request.workspace.hostRoot,
     pid: process.pid,
@@ -353,9 +352,9 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         logSecretRedactions.clear(); resolvedCommandSources.clear(); endingSession = false;
       }
     },
-    acquireOwnerLock: async (request) => options.acquireOwnerLock
-      ? options.acquireOwnerLock(request)
-      : acquireOwnerLock({ lockDir: expandHome(request.config.lockDir) }, lockInfoFor(request)),
+    acquireOwnerLock: async (request, name) => options.acquireOwnerLock
+      ? options.acquireOwnerLock(request, name)
+      : acquireOwnerLock({ lockDir: expandHome(request.config.lockDir) }, lockInfoFor(request, name)),
     pruneOthers: async (currentSessionId) => pruneStale({ port: prunePort, locks: lockPort(), currentSessionId, stopTimeoutMs: configRef.value.stopTimeoutMs }),
     inspectSandbox: async (name) => {
       const msb = await sdk();
@@ -369,9 +368,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     connectSandbox: async (value) => objectConfig(value)._handle.connect(),
     startSandbox: async (value) => objectConfig(value)._handle.startDetached(),
-    createSandbox: async (request) => {
+    createSandbox: async (request, name) => {
       const msb = await sdk();
-      const name = request.config.sandboxName ?? sandboxNameFor(request.sessionId);
       const labels = buildSandboxLabels({ sessionId: request.sessionId, cwd: request.cwd, root: request.workspace.hostRoot, guestRoot: request.workspace.guestRoot, pid: process.pid, image: request.config.image });
       let builder = msb.Sandbox.builder(name).image(request.config.image).pullPolicy(request.config.pullPolicy).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeout(request.config.idleTimeoutSec).detached(request.config.detached).workdir(request.workspace.cwd).labels(labels);
       builder.volume(request.workspace.guestRoot, (m: AnyRecord) => m.bind(request.workspace.hostRoot));
@@ -586,7 +584,9 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   const displayActivities = new Map<symbol, SessionExecutionIdentity>();
   const displayState = (state = visibleState()): RuntimeState => {
-    if ([...displayActivities.values()].includes(execution.context.current())) return { status: "booting", info: null };
+    if ([...displayActivities.values()].includes(execution.context.current())) {
+      return { status: "booting", info: null, ...(state.status === "booting" && state.pendingName ? { pendingName: state.pendingName } : {}) };
+    }
     return state;
   };
   const notifyState = (state: RuntimeState) => options.onState?.(displayState(state));
@@ -601,13 +601,19 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     };
   };
   const visibleState = (): RuntimeState => {
-    if (!execution.context.isReady()) return failureState?.status === "unavailable" ? failureState : { status: "booting", info: null };
+    if (!execution.context.isReady()) {
+      if (failureState?.status === "unavailable") return failureState;
+      const booting = managerIdentity === execution.context.current() ? manager.getState() : undefined;
+      return { status: "booting", info: null, ...(booting?.status === "booting" && booting.pendingName ? { pendingName: booting.pendingName } : {}) };
+    }
     const state = failureState ?? manager.getState();
     if (explicitOff && (state.status === "disabled" || state.status === "off")) return { ...state, status: "off", info: null };
     return state.status === "active" && !configReady ? { ...state, observation: "unknown" } : state;
   };
   deps.onState = () => {
-    if (execution.context.isReady() && managerIdentity === execution.context.current()) notifyState(visibleState());
+    if (managerIdentity !== execution.context.current()) return;
+    const state = visibleState();
+    if (execution.context.isReady() || state.status === "booting" && state.pendingName) notifyState(state);
   };
   const provider: ToolOpsProvider = {
     execution: execution.context,

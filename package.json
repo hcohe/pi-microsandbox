@@ -55,6 +55,7 @@
     "release-check": "npm run check && npm audit --omit=dev"
   },
   "dependencies": {
+    "@criblinc/docker-names": "1.2.2",
     "microsandbox": "0.6.16"
   },
   "peerDependencies": {

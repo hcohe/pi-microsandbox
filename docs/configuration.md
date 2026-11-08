@@ -89,6 +89,16 @@ host-process races: keep policy host-owned and inaccessible to guest writes.
 Unreadable or invalid configuration fails closed by default, not silently
 ignored. [Backend guarantees →](settings-backend.md#file-safety-and-bounded-guarantees)
 
+## Sandbox names
+
+Automatic names are two random Docker-style words, such as `goofy-panini`,
+from `@criblinc/docker-names`, without a prefix or numeric suffix. The selected
+name is saved with the session and reused on reload/resume; previously saved
+names are retained. Explicit `sandbox_name` settings are unchanged. Names are
+not ownership credentials: session locks and verified labels still protect
+resources. A name collision with another session fails closed, without
+replacing its sandbox.
+
 ## A small TOML starter
 
 Create this from a **host editor**, outside the mounted workspace. Omit `image`

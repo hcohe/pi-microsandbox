@@ -60,9 +60,14 @@ Or open **`/msb`** to browse the panel. Arrows or `hjkl` navigate, Enter edits,
 closes. Settings trees start collapsed; **Status** is read-only runtime information.
 [Full panel guide →](commands.md)
 
-The footer shows **`msb-ID ●`**: green for active, red for blocked, and a warning
-color for sleep, uncertain state, or host execution. The dot pulses while booting
-or reloading. Docker capability warnings alone don't turn an active VM red.
+The footer shows the sandbox name, for example **`great-cullen ●`**, matching
+`msb ls`: green for active, red for blocked, and a warning color for sleep,
+uncertain state, or host execution. The selected name appears during boot,
+including while waiting for ownership, VM creation, and readiness checks, and
+stays the same when active. Only initial configuration discovery before name
+selection shows **`MSB starting ●`**, never a session hash. The dot pulses while
+booting or reloading; a displayed boot name is not proof that the VM is ready.
+Docker capability warnings alone don't turn an active VM red.
 Colors follow your theme; the indicator isn't proof of every policy rule.
 
 ## Make one change

@@ -5,12 +5,12 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { footerStatus, styleFooterStatus } from "./index.ts";
-import { displayId, type RuntimeState } from "./types.ts";
+import type { RuntimeState } from "./types.ts";
 
 const active: RuntimeState = {
   status: "active",
   info: {
-    name: "pi-msb-example",
+    name: "great-cullen",
     displayId: "bf9379",
     image: "ubuntu:24.04",
     pid: 123,
@@ -161,28 +161,35 @@ test("lifecycle cwd replacement routes fresh host-mode tools to the current cwd 
 
 test("footer status follows the visibility setting", () => {
   assert.equal(footerStatus(active, false), undefined);
-  assert.equal(footerStatus(active, true), "msb-bf9379");
+  assert.equal(footerStatus(active, true), "great-cullen");
 });
 
-test("booting shows the real current-session ID before sandbox info exists", () => {
+test("active footer shows actual sandbox names, including explicit overrides", () => {
+  assert.equal(footerStatus(active, true), "great-cullen");
+  assert.equal(footerStatus({ ...active, info: { ...active.info!, name: "custom-sandbox" } }, true), "custom-sandbox");
+  assert.equal(footerStatus({ ...active, info: null }, true), "MSB active");
+});
+
+test("booting shows the sandbox name when known and never a session hash", () => {
   const booting: RuntimeState = { status: "booting", info: null };
-  assert.equal(footerStatus(booting, true, "session-one"), `msb-${displayId("session-one")}`);
-  assert.equal(footerStatus({ ...booting, info: active.info }, true, "session-two"), `msb-${displayId("session-two")}`);
-  assert.equal(footerStatus(booting, true), "msb-…");
-  assert.equal(footerStatus(booting, false, "session-one"), undefined);
+  assert.equal(footerStatus(booting, true), "MSB starting");
+  assert.equal(footerStatus({ ...booting, pendingName: "great-cullen" }, true), "great-cullen");
+  assert.equal(footerStatus({ ...booting, pendingName: "explicit-name" }, true), "explicit-name");
+  assert.equal(footerStatus(booting, false), undefined);
 });
 
 test("live footer puts a theme-success circle on the right of the dim label", () => {
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
-  assert.equal(styleFooterStatus(theme, footerStatus(active, true)!, active), "\x1b[22mmsb-bf9379 ●\x1b[22m");
-  assert.deepEqual(calls, [["dim", "msb-bf9379"], ["success", "●"]]);
+  assert.equal(styleFooterStatus(theme, footerStatus(active, true)!, active), "\x1b[22mgreat-cullen ●\x1b[22m");
+  assert.deepEqual(calls, [["dim", "great-cullen"], ["success", "●"]]);
 });
 
 test("boot frames flash only the right-hand circle between theme warning and dim", () => {
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
-  const label = footerStatus({ status: "booting", info: null }, true, "session-one")!;
+  const label = footerStatus({ status: "booting", info: null }, true)!;
+  assert.equal(label, "MSB starting");
   for (let frame = 0; frame < 4; frame++) {
     calls.length = 0;
     assert.equal(styleFooterStatus(theme, label, { status: "booting", info: null }, frame), `\x1b[22m${label} ●\x1b[22m`);
@@ -198,7 +205,7 @@ test("active sandbox stays green regardless of Docker capability readiness", () 
     for (const frame of [0, 1]) {
       calls.length = 0;
       styleFooterStatus(theme, footerStatus(state, true)!, state, frame);
-      assert.deepEqual(calls, [["dim", "msb-bf9379"], ["success", "●"]]);
+      assert.deepEqual(calls, [["dim", "great-cullen"], ["success", "●"]]);
     }
   }
 });
@@ -222,7 +229,7 @@ test("observed asleep and unknown guests use orange without changing active rout
   for (const observation of ["asleep", "unknown"] as const) {
     const state: RuntimeState = { ...active, observation };
     const label = footerStatus(state, true)!;
-    assert.match(label, observation === "asleep" ? / asleep$/ : / uncertain$/);
+    assert.equal(label, observation === "asleep" ? "great-cullen asleep" : "great-cullen uncertain");
     assert.match(styleFooterStatus(theme, label, state), /warning:●/);
     assert.equal(state.status, "active");
   }
@@ -381,4 +388,141 @@ test("renaming a session during deferred reload preserves flashing until reload 
     console.log('PASS rename-reload');
   `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
   assert.match(output, /PASS rename-reload/);
+});
+
+test("selected boot names reach the footer through deferred lock, create, preparation and reload without crossing session identities", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-footer-pending-name-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import {join} from 'node:path';
+    import {registerHooks, syncBuiltinESMExports} from 'node:module';
+    const {fakeSdk} = await import(${JSON.stringify(new URL("../../test/fake-msb-sdk.ts", import.meta.url).href)});
+    const {STATE_SCHEMA_VERSION} = await import(${JSON.stringify(new URL("./types.ts", import.meta.url).href)});
+    const controlUrl = ${JSON.stringify(new URL("./control.ts", import.meta.url).href)};
+    const indexUrl = ${JSON.stringify(new URL("./index.ts", import.meta.url).href)};
+    const wrapper = 'data:text/javascript,' + encodeURIComponent(
+      'import {createMsbIntegration as create} from ' + JSON.stringify(controlUrl) + ';' +
+      'export function createMsbIntegration(options) {' +
+      'const fixture = globalThis.bootFixture;' +
+      'const value = create({...options, sdkLoader:async()=>fixture.sdk, acquireOwnerLock:fixture.acquire,' +
+      'onState(state) {fixture.notifications.push(state); options.onState?.(state);}});' +
+      'fixture.integration = value; return value;}');
+    registerHooks({resolve(specifier, context, next) {
+      if (context.parentURL === indexUrl && specifier === './control.ts') return {url:wrapper, shortCircuit:true};
+      return next(specifier, context);
+    }});
+    const deferred = () => {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};};
+    const gates = () => ({locking:deferred(), locked:deferred(), creating:deferred(), created:deferred(), preparing:deferred(), prepared:deferred()});
+    let currentGates = gates();
+    const timers = new Map(); let timerId = 0;
+    globalThis.setInterval = (callback, delay) => {const id = ++timerId; timers.set(id, {callback, delay}); return id;};
+    globalThis.clearInterval = id => timers.delete(id);
+    const sdk = fakeSdk([]), builder = sdk.Sandbox.builder;
+    sdk.Sandbox.builder = name => {
+      const value = builder(name), create = value.create.bind(value), pending = currentGates;
+      value.create = async () => {
+        pending.creating.resolve(); await pending.created.promise;
+        const raw = await create(), exec = raw.execWith;
+        raw.execWith = async (...args) => {pending.preparing.resolve(); await pending.prepared.promise; return exec(...args);};
+        return raw;
+      };
+      return value;
+    };
+    globalThis.bootFixture = {sdk, notifications:[], acquire:async (_request, name) => {
+      const pending = currentGates; pending.name = name; pending.locking.resolve(); await pending.locked.promise;
+      return {path:'fixture', release:async()=>{}};
+    }};
+    const fixture = globalThis.bootFixture;
+    const {default:register} = await import(indexUrl);
+    const hooks = new Map(), statuses = []; let session = 'automatic', entries = [];
+    register({registerTool() {}, registerCommand() {}, appendEntry(customType, data) {entries.push({type:'custom', customType, data});},
+      on(event, handler) {hooks.set(event, [...(hooks.get(event) ?? []), handler]);}});
+    const ctx = {cwd:process.cwd(), mode:'rpc', hasUI:true, isProjectTrusted:()=>true,
+      sessionManager:{getSessionId:()=>session, getEntries:()=>entries},
+      ui:{theme:{fg:(role,text)=>role+':'+text}, setFooter() {}, setStatus(_key,value) {statuses.push(value);}, notify() {}}};
+    const lifecycle = event => hooks.get(event).at(-1)({},ctx);
+    const animation = () => [...timers.values()].find(timer=>timer.delay===400);
+    const tick = () => {assert.ok(animation()); animation().callback();};
+    const assertPending = (pending, ready) => {
+      const expected = {status:'booting', info:null, pendingName:pending.name};
+      assert.deepEqual(fixture.integration.control.getState(), expected);
+      assert.deepEqual(fixture.integration.provider.getState(), expected);
+      assert.deepEqual(fixture.notifications.at(-1), expected, 'onState must preserve the selected name');
+      assert.equal(fixture.integration.provider.execution.isReady(), ready);
+      assert.equal(fixture.integration.provider.isActive(), false);
+      assert.ok(statuses.at(-1).includes('dim:'+pending.name+' '), 'selection updates the footer before the next tick');
+      tick(); assert.ok(statuses.at(-1).includes('dim:'+pending.name+' '), statuses.at(-1));
+      assert.doesNotMatch(statuses.at(-1), /MSB starting/);
+    };
+    const complete = async (starting, pending, ready) => {
+      await pending.locking.promise; assertPending(pending, ready); pending.locked.resolve();
+      await pending.creating.promise; assertPending(pending, ready); pending.created.resolve();
+      await pending.preparing.promise; assertPending(pending, ready); pending.prepared.resolve();
+      await starting;
+      assert.equal(fixture.integration.control.getState().info.name, pending.name);
+      assert.equal(fixture.integration.control.getState().pendingName, undefined);
+      assert.ok(statuses.at(-1).includes('dim:'+pending.name+' success:●'), statuses.at(-1));
+      assert.equal(animation(), undefined);
+    };
+    delete process.env.PI_MSB_SANDBOX_NAME;
+    for (const naming of ['automatic','restored','explicit']) {
+      session = naming; entries = [];
+      if (naming === 'restored') entries.push({type:'custom', customType:'pi-msb.state', data:{
+        version:STATE_SCHEMA_VERSION, sessionId:session, sandboxName:'saved-random-name', cwd:ctx.cwd,
+        root:ctx.cwd, guestRoot:ctx.cwd, image:'saved-image', enabled:true, createdAt:1}});
+      if (naming === 'explicit') process.env.PI_MSB_SANDBOX_NAME = 'user-selected-name';
+      const pending = currentGates = gates();
+      await complete(lifecycle('session_start'), pending, false);
+      if (naming === 'automatic') {
+        process.env.PI_MSB_CPUS = '3';
+        const reloading = currentGates = gates();
+        const reload = fixture.integration.control.reload();
+        await complete(reload, reloading, true);
+        assert.equal(reloading.name, pending.name, 'reload retains the original random name');
+        delete process.env.PI_MSB_CPUS;
+      } else assert.equal(pending.name, naming === 'restored' ? 'saved-random-name' : 'user-selected-name');
+      await lifecycle('session_shutdown');
+    }
+    delete process.env.PI_MSB_SANDBOX_NAME;
+    const firstCwd = ctx.cwd, secondCwd = join(firstCwd, 'second'); await fs.promises.mkdir(secondCwd);
+    for (const change of ['session','cwd']) {
+      ctx.cwd = firstCwd; session = 'old-'+change; entries = [];
+      const old = currentGates = gates(), oldStarting = lifecycle('session_start');
+      await old.locking.promise; old.locked.resolve(); await old.creating.promise;
+      assertPending(old, false);
+      const staleAnimation = animation();
+      const replacement = currentGates = gates();
+      let discoveryHeld = true;
+      const discovering = deferred(), discovered = deferred(), realpath = fs.promises.realpath;
+      fs.promises.realpath = async (...args) => {
+        if (discoveryHeld && args[0] === ctx.cwd) {discovering.resolve(); await discovered.promise;}
+        return realpath(...args);
+      };
+      syncBuiltinESMExports();
+      if (change === 'session') session = 'replacement-session'; else ctx.cwd = secondCwd;
+      process.env.PI_MSB_SANDBOX_NAME = 'replacement-'+change;
+      const switching = lifecycle('session_info_changed'), count = statuses.length;
+      staleAnimation.callback(); assert.equal(statuses.length, count, 'obsolete animation cannot update replacement UI');
+      tick(); assert.match(statuses.at(-1), /MSB starting/);
+      assert.equal(fixture.integration.control.getState().pendingName, undefined, 'old manager name must not cross identity boundary');
+      old.created.resolve(); old.prepared.resolve(); await oldStarting; await discovering.promise;
+      tick(); assert.match(statuses.at(-1), /MSB starting/);
+      assert.ok(!statuses.slice(count).some(value=>value?.includes(old.name)), 'old boot completion must not republish its name');
+      discoveryHeld = false; discovered.resolve();
+      await complete(switching, replacement, false);
+      assert.equal(replacement.name, 'replacement-'+change);
+      fs.promises.realpath = realpath; syncBuiltinESMExports();
+      await lifecycle('session_shutdown'); delete process.env.PI_MSB_SANDBOX_NAME;
+    }
+    assert.equal(timers.size, 0);
+    console.log('PASS pending-footer');
+  `], {
+    cwd, timeout: 20_000,
+    env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "true", PI_MSB_BOOTSTRAP_TOOLS: "false", PI_MSB_PRUNE_ON_START: "false", PI_MSB_DOCKER__MODE: "disabled" },
+    encoding: "utf8", stdio: "pipe",
+  });
+  assert.match(output, /PASS pending-footer/);
 });

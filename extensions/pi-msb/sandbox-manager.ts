@@ -1,7 +1,7 @@
+import { generateName } from "@criblinc/docker-names";
 import { classifySettingsEffect } from "./settings-effect.ts";
 import {
   displayId,
-  sandboxNameFor,
   STATE_SCHEMA_VERSION,
   type BootRequest,
   type Config,
@@ -25,12 +25,12 @@ export interface InspectedSandbox {
 }
 
 export interface SandboxManagerDeps {
-  acquireOwnerLock(request: BootRequest): Promise<LockHandle | null>;
+  acquireOwnerLock(request: BootRequest, name: string): Promise<LockHandle | null>;
   pruneOthers(currentSessionId: string): Promise<PruneReport>;
   inspectSandbox(name: string): Promise<InspectedSandbox | null>;
   connectSandbox(value: InspectedSandbox): Promise<unknown>;
   startSandbox(value: InspectedSandbox): Promise<unknown>;
-  createSandbox(request: BootRequest): Promise<unknown>;
+  createSandbox(request: BootRequest, name: string): Promise<unknown>;
   stopAndRemove(name: string, timeoutMs: number): Promise<void>;
   createTransport(raw: unknown): SandboxTransport;
   createOperations(transport: SandboxTransport): ToolOperations;
@@ -144,19 +144,6 @@ function sameBootRequest(a: BootRequest, b: BootRequest): boolean {
   );
 }
 
-function sameSessionRestore(
-  request: BootRequest,
-): PersistedSandboxState | null {
-  const restored = request.restored;
-  if (!restored) return null;
-  if (restored.version !== STATE_SCHEMA_VERSION) return null;
-  if (restored.sessionId !== request.sessionId) return null;
-  if (restored.cwd !== request.cwd ||
-      restored.root !== request.workspace.hostRoot ||
-      restored.guestRoot !== request.workspace.guestRoot) return null;
-  return restored;
-}
-
 /**
  * Lifecycle coordinator for the injected sandbox ports. In particular, no
  * storage or SDK operation is reached until the owner lock has been acquired.
@@ -167,6 +154,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   let runtime: RuntimeExecution | null = null;
   let runtimeInvalid = false;
   let sandboxName: string | null = null;
+  let automaticName: { sessionId: string; name: string } | null = null;
   let lastRequest: BootRequest | null = null;
   let retainedState: PersistedSandboxState | null = null;
   // activeUses includes reservations made before preflight. pendingUses marks
@@ -321,7 +309,16 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   }
 
   function requestSandboxName(request: BootRequest): string {
-    return request.config.sandboxName ?? sandboxNameFor(request.sessionId);
+    if (request.config.sandboxName !== null) return request.config.sandboxName;
+    if (automaticName?.sessionId === request.sessionId) return automaticName.name;
+    const restored = request.restored;
+    // A saved name is only a locator. Inspection still proves session ownership
+    // and replaces stale workspace/configuration bindings under the owner lock.
+    const savedName = restored?.version === STATE_SCHEMA_VERSION && restored.sessionId === request.sessionId
+      && typeof restored.sandboxName === "string" && restored.sandboxName.length > 0 ? restored.sandboxName : null;
+    const name = savedName ?? generateName();
+    automaticName = { sessionId: request.sessionId, name };
+    return name;
   }
 
   function invalidatesRuntime(error: unknown): boolean {
@@ -353,11 +350,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     await transition;
     await retirement;
     const previousRequest = lastRequest;
+    const name = requestSandboxName(request);
     if (
       state.status === "active" &&
       runtime &&
       previousRequest &&
-      sandboxName === requestSandboxName(request) &&
+      sandboxName === name &&
       !request.forceRecreate &&
       sameBootRequest(previousRequest, request)
     ) {
@@ -367,7 +365,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         previousRequest.sessionId === request.sessionId && previousRequest.cwd === request.cwd &&
         previousRequest.workspace.hostRoot === request.workspace.hostRoot &&
         previousRequest.workspace.guestRoot === request.workspace.guestRoot &&
-        requestSandboxName(previousRequest) === requestSandboxName(request) &&
+        sandboxName === name &&
         classifySettingsEffect(previousRequest.config, request.config) !== "restart") {
       lastRequest = request;
       deps.adopted?.(request, "live");
@@ -379,10 +377,10 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
 
     lastRequest = request;
-    publish({ status: "booting", info: null });
+    publish({ status: "booting", info: null, pendingName: name });
     let owner: LockHandle | null;
     try {
-      owner = await deps.acquireOwnerLock(request);
+      owner = await deps.acquireOwnerLock(request, name);
     } catch (error) {
       // A lock implementation failure is fail-closed and must not permit any
       // SDK/storage call to run without ownership.
@@ -409,21 +407,20 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       if (request.config.pruneOnStart) {
         await deps.pruneOthers(request.sessionId);
       }
-      const restored = sameSessionRestore(request);
-      const name = requestSandboxName(request);
       sandboxName = name;
       const inspected = await deps.inspectSandbox(name);
       let raw: unknown;
+      if (inspected && inspected.name !== name) throw new Error(`sandbox name mismatch: expected ${name}`);
 
       if (!inspected) {
         partialSandbox = true; created = true;
-        raw = await deps.createSandbox(request);
+        raw = await deps.createSandbox(request, name);
       } else if (isLegacyManagedOwner(inspected, request)) {
         // The current session owner lock guards removal. Legacy named volumes
         // are intentionally neither inspected nor removed.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
         partialSandbox = true; created = true;
-        raw = await deps.createSandbox(request);
+        raw = await deps.createSandbox(request, name);
       } else if (!isManagedOwner(inspected, request)) {
         throw new Error(`sandbox name conflict: ${name}`);
       } else if (request.forceRecreate || !matchesWorkspace(inspected, request)) {
@@ -433,7 +430,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         // The old instance was removed; a failed replacement still needs its
         // own best-effort cleanup.
         partialSandbox = true; created = true;
-        raw = await deps.createSandbox(request);
+        raw = await deps.createSandbox(request, name);
       } else if (isRunning(inspected)) {
         raw = await deps.connectSandbox(inspected);
         partialSandbox = true;
@@ -476,7 +473,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       await disposeRuntime();
       if (partialSandbox && sandboxName) {
         try {
-          await deps.stopAndRemove(sandboxName, request.config.stopTimeoutMs);
+          // A different session can win the name between inspection and create.
+          // A rejected create never grants permission to remove that resource.
+          const cleanupTarget = await deps.inspectSandbox(sandboxName);
+          if (cleanupTarget?.name === sandboxName && isManagedOwner(cleanupTarget, request)) {
+            await deps.stopAndRemove(sandboxName, request.config.stopTimeoutMs);
+          }
         } catch {
           // Leave an uncertain labelled sandbox for a later prune/recovery.
         }
@@ -670,6 +672,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       return {
         status: state.status,
         info: state.info ? { ...state.info, docker: { ...state.info.docker } } : null,
+        ...(state.pendingName ? { pendingName: state.pendingName } : {}),
         ...(state.reason ? { reason: state.reason } : {}),
         ...(observation ? { observation } : {}),
       };

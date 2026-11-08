@@ -21,9 +21,6 @@ export function resourceId(sessionId: string): string {
 export function displayId(sessionId: string): string {
   return resourceId(sessionId).slice(0, 6);
 }
-export function sandboxNameFor(sessionId: string): string {
-  return `pi-msb-${resourceId(sessionId)}`;
-}
 // ---------------------------------------------------------------- config ----
 export type NetworkMode = "default" | "open" | "allowlist" | "deny";
 export type FallbackMode = "block" | "host";
@@ -364,6 +361,8 @@ export interface SandboxInfo {
 export interface RuntimeState {
   status: RuntimeStatus;
   info: SandboxInfo | null;
+  /** Display-only selected boot name; not proof of ownership or a ready VM. */
+  pendingName?: string;
   reason?: string;
   /** Display-only liveness; does not change routing or wake eligibility. */
   observation?: "asleep" | "unknown";

@@ -77,7 +77,7 @@ import { createSandboxGrepExecute } from "__ROOT__/extensions/pi-msb/operations-
 import { acquireOwnerLock } from "__ROOT__/extensions/pi-msb/locks.ts";
 import { createHostReadAccess } from "__ROOT__/extensions/pi-msb/skill-access.ts";
 import { registerSandboxTools } from "__ROOT__/extensions/pi-msb/tools.ts";
-import { LOCKFILE_VERSION, sandboxNameFor } from "__ROOT__/extensions/pi-msb/types.ts";
+import { LOCKFILE_VERSION } from "__ROOT__/extensions/pi-msb/types.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateLine, formatSize } from "@earendil-works/pi-coding-agent";
 
 const execFile = promisify(execFileCallback);
@@ -202,11 +202,16 @@ async function close(value) {
 async function sandboxAbsent(name) {
   try { await Sandbox.get(name); return false; } catch { return true; }
 }
-async function removeSandboxIfPresent(name) {
+async function removeSandboxIfPresent(name, sessionId) {
+  const isOwned = (handle) => handle.name === name &&
+    handle.config()?.labels?.["pi-msb.managed"] === "true" &&
+    handle.config()?.labels?.["pi-msb.session"] === sessionId;
   try {
     const sandbox = await Sandbox.get(name);
+    if (!isOwned(sandbox)) return;
     try { await sandbox.stopWithTimeout(10_000); } catch {}
-    await (await Sandbox.get(name)).remove();
+    const current = await Sandbox.get(name);
+    if (isOwned(current)) await current.remove();
   } catch {}
 }
 
@@ -347,7 +352,7 @@ async function scenario4() {
   const info = {
     version: LOCKFILE_VERSION,
     sessionId,
-    sandboxName: sandboxNameFor(sessionId),
+    sandboxName: "duplicate-owner-lock-fixture",
     cwd,
     root: cwd,
     pid: process.pid,
@@ -384,11 +389,14 @@ async function scenario5() {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let replacement;
+  let orphanName;
   try {
     for (let i = 0; i < 180 && !(await fs.access(ready).then(() => true, () => false)); i++) await sleep(1000);
     assert.equal(await fs.access(ready).then(() => true, () => false), true, "owner did not reach active state");
     const ownerRecord = JSON.parse(await readFile(ready, "utf8"));
     assert.equal(ownerRecord.sessionId, staleSession);
+    assert.equal(typeof ownerRecord.name, "string");
+    orphanName = ownerRecord.name;
     assert.equal(await sandboxAbsent(ownerRecord.name), false, "owner sandbox was not created");
     child.kill("SIGKILL");
     await new Promise((resolve) => child.once("exit", resolve));
@@ -397,7 +405,7 @@ async function scenario5() {
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL");
     if (replacement) await close(replacement);
-    await removeSandboxIfPresent(sandboxNameFor(staleSession));
+    if (orphanName) await removeSandboxIfPresent(orphanName, staleSession);
     await rm(root, { recursive: true, force: true });
   }
 }
@@ -809,7 +817,7 @@ async function probe() {
   const name = `pi-msb-live-probe-${process.pid}-${Date.now()}`;
   let sandbox;
   try {
-    sandbox = await Sandbox.builder(name).image(IMAGE).cpus(1).memory(512).idleTimeout(30).create();
+    sandbox = await Sandbox.builder(name).labels({ "pi-msb.managed": "true", "pi-msb.session": name }).image(IMAGE).cpus(1).memory(512).idleTimeout(30).create();
     const result = await sandbox.exec("true", []);
     if (result.code !== 0) throw new Error(`probe command exited ${result.code}`);
     console.log("PROBE|PASS|virtualization and image are available");
@@ -823,10 +831,7 @@ async function probe() {
       process.exitCode = 1;
     }
   } finally {
-    if (sandbox) {
-      try { await sandbox.stopWithTimeout(10000); } catch {}
-      try { await (await Sandbox.get(name)).remove(); } catch {}
-    }
+    if (sandbox) await removeSandboxIfPresent(name, name);
   }
 }
 

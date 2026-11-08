@@ -8,7 +8,9 @@ import test from "node:test";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createMsbIntegration } from "./control.ts";
-import { sandboxNameFor, STATE_SCHEMA_VERSION, type Config, type PersistedSandboxState, type ResolvedConfig } from "./types.ts";
+import { resourceId, STATE_SCHEMA_VERSION, type Config, type PersistedSandboxState, type ResolvedConfig, type RuntimeState } from "./types.ts";
+
+const legacySandboxNameFor = (session: string): string => `pi-msb-${resourceId(session)}`;
 
 function config(overrides: Partial<Config> = {}): Config {
   return {
@@ -250,7 +252,7 @@ for (const status of ["running", "stopped"]) test(`a restored wider-root Git san
   await mkdir(cwd, { recursive: true });
   initRepo(repo);
   const sessionId = "wider-root";
-  const name = sandboxNameFor(sessionId);
+  const name = legacySandboxNameFor(sessionId);
   const restored: PersistedSandboxState = {
     version: STATE_SCHEMA_VERSION, sessionId, sandboxName: name, cwd,
     root: await realpath(repo), guestRoot: repo, image: DEFAULT_CONFIG.image, enabled: true, createdAt: 1,
@@ -300,7 +302,7 @@ test("current labels and persisted state carry schema, session, image, cwd, and 
   assert.equal("pi-msb.mode" in labels, false);
   assert.equal("pi-msb.volume" in labels, false);
   assert.deepEqual(entries.at(-1)?.data, {
-    version: STATE_SCHEMA_VERSION, sessionId, sandboxName: sandboxNameFor(sessionId), cwd: root,
+    version: STATE_SCHEMA_VERSION, sessionId, sandboxName: integration.control.getState().info!.name, cwd: root,
     root: await realpath(root), guestRoot: root, image: DEFAULT_CONFIG.image, enabled: true,
     createdAt: (entries.at(-1)?.data as any).createdAt,
   });
@@ -356,7 +358,7 @@ test("historical persisted overrides are ignored and never resurrect temporary s
 test("legacy same-session sandbox is removed and recreated, never reconnected", async (t) => {
   const root = await temp(t, "legacy-sandbox");
   const sessionId = "legacy-sandbox";
-  const name = sandboxNameFor(sessionId);
+  const name = legacySandboxNameFor(sessionId);
   const calls: string[] = [];
   const sdk = fakeSdk(calls, {
     name, status: "running",
@@ -366,7 +368,7 @@ test("legacy same-session sandbox is removed and recreated, never reconnected", 
     sessionId, cwd: root, configDirName: ".pi", sdkLoader: async () => sdk,
     acquireOwnerLock: async () => { calls.push("owner-lock"); return { path: join(root, "owner.lock"), release: async () => undefined }; },
   });
-  assert.equal((await integration.configureSession({ sessionId, cwd: root, projectTrusted: true, config: resolved(config()) })).status, "active");
+  assert.equal((await integration.configureSession({ sessionId, cwd: root, projectTrusted: true, config: resolved(config({ sandboxName: name })) })).status, "active");
   assert.ok(calls.indexOf("owner-lock") < calls.indexOf(`stop:${name}`));
   assert.ok(calls.indexOf(`remove:${name}`) < calls.indexOf(`create:${name}`));
   assert.equal(calls.includes(`connect:${name}`), false);
@@ -813,7 +815,7 @@ test("UI refresh and manager notifications track sleep, wake, blocked preflight 
   const cwd = join(root, "workspace"); await mkdir(cwd);
   const calls: string[] = [];
   const sdk = fakeSdk(calls);
-  const states: Array<{ status: string; observation?: string }> = [];
+  const states: RuntimeState[] = [];
   let entered!: () => void, release!: () => void;
   const enteredPoll = new Promise<void>((resolve) => { entered = resolve; });
   const releasedPoll = new Promise<void>((resolve) => { release = resolve; });
@@ -832,7 +834,7 @@ test("UI refresh and manager notifications track sleep, wake, blocked preflight 
   t.after(() => integration.manager.shutdown());
   const setup = { sessionId: "liveness", cwd, projectTrusted: true, config: resolved(config()) };
   await integration.configureSession(setup);
-  const handle = await get(sandboxNameFor("liveness"));
+  const handle = await get(integration.control.getState().info!.name);
   handle.status = "stopped";
   const before = calls.length;
   assert.equal((await integration.provider.refreshState!()).observation, "asleep");
@@ -858,7 +860,9 @@ test("UI refresh and manager notifications track sleep, wake, blocked preflight 
   release();
   await refreshing;
   await replacing;
-  assert.deepEqual(states.slice(count).map((state) => state.status), ["active"]);
+  assert.deepEqual(states.slice(count).map((state) => state.status), ["booting", "active"]);
+  assert.equal(states[count]?.pendingName, integration.control.getState().info?.name);
+  assert.equal(states[count]?.info, null);
 });
 
 test("reload presents booting until success or failure without changing tool routing", async (t) => {
@@ -905,4 +909,51 @@ for (const mode of ["disabled", "invalid"]) test(`passive UI refresh never loads
   assert.equal(loads, 0);
   assert.equal(integration.provider.getState().status, mode === "disabled" ? "off" : "unavailable");
   await integration.manager.shutdown();
+});
+
+test("automatic names stay consistent across SDK creation, owner metadata, settings reload and session resume", async (t) => {
+  const root = await temp(t, "docker-names");
+  const cwd = join(root, "workspace");
+  await mkdir(cwd);
+  const sessionId = "random-name-session";
+  const calls: string[] = [];
+  const entries: Array<{ type: string; customType: string; data: unknown }> = [];
+  const lockNames: string[] = [];
+  const options = {
+    sessionId, cwd, configDirName: ".pi", agentDir: join(root, "agent"),
+    env: { HOME: root, PI_MSB_BOOTSTRAP_TOOLS: "false", PI_MSB_PRUNE_ON_START: "false", PI_MSB_DOCKER__MODE: "disabled" },
+    entries: () => entries,
+    appendEntry: (customType: string, data?: unknown) => { entries.push({ type: "custom", customType, data }); },
+    acquireOwnerLock: async (_request: unknown, name: string) => {
+      lockNames.push(name);
+      return { path: "unused", release: async () => undefined };
+    },
+  };
+  const integration = createMsbIntegration({ ...options, sdkLoader: async () => fakeSdk(calls) });
+  t.after(() => integration.manager.shutdown());
+  const initial = await integration.configureSession({ sessionId, cwd, projectTrusted: true, config: resolved(config()) });
+  assert.equal(initial.status, "active");
+  const name = initial.info!.name;
+  assert.match(name, /^[a-z]+-[a-z]+$/);
+  assert.ok(calls.includes(`create:${name}`));
+  assert.equal((entries.at(-1)!.data as PersistedSandboxState).sandboxName, name);
+  assert.equal(integration.configRef.value.sandboxName, null, "chosen runtime name is not a settings override");
+  await integration.control.reload();
+  assert.equal(integration.control.getState().info?.name, name);
+  await integration.control.setEnabled(false);
+  await integration.control.setEnabled(true);
+  assert.equal(integration.control.getState().info?.name, name);
+  assert.ok(lockNames.every((selected) => selected === name));
+  const labels = JSON.parse(calls.find((call) => call.startsWith("labels:"))!.slice("labels:".length));
+  assert.equal(labels["pi-msb.session"], sessionId);
+  await integration.manager.shutdown();
+
+  const resumedCalls: string[] = [];
+  const resumedSdk = fakeSdk(resumedCalls, { name, status: "running", labels });
+  const resumed = createMsbIntegration({ ...options, sdkLoader: async () => resumedSdk });
+  t.after(() => resumed.manager.shutdown());
+  assert.equal((await resumed.configureSession({ sessionId, cwd, projectTrusted: true, config: resolved(config()) })).info?.name, name);
+  assert.ok(resumedCalls.includes(`connect:${name}`));
+  assert.equal(resumedCalls.some((call) => call.startsWith("create:")), false);
+  assert.equal(lockNames.at(-1), name);
 });
