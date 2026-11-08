@@ -74,12 +74,37 @@ open proposal; cancel and reopen it.
 Both host-owned layers load regardless of Pi's project trust state. They do not
 sandbox project-local extensions or other code you choose to load on the host.
 
+### Host-owned Dockerfile sources
+
+You may put `Dockerfile` beside `default.toml` (Global) or the exact canonical
+cwd's `config.toml` (Project), with an optional dedicated `build-context/` beside
+it. No repository context or parent Project source is inherited. At each scope,
+an explicit `image` wins over its colocated Dockerfile; otherwise the Dockerfile
+supplies that scope's image. Project overrides Global; Session `image` overrides
+both. Runtime settings show the content-addressed local image, source scope/path
+in warnings and effective `pull_policy="never"`; raw scope files remain sparse.
+Do not save a generated image reference as policy unless you intend to disable
+discovery. Unrelated edits preserve source discovery.
+
+Builds run inside an isolated disposable rootful VM using the bundled digest pin
+and guest Docker/Buildx, then import a validated single-image tar via the host SDK.
+No host Docker or CLI is needed. Build networking is public-download access plus
+DNS, independently of runtime restrictions; no runtime secrets/env/mounts are
+inherited. Source/content changes rebuild on the next settings reload/activation;
+unchanged sources use a validated local cache. Build and built-image runtime
+failures always block, even with host fallback configured. Inspection never builds
+or creates cache directories. Input bounds, trust rules, disk requirements,
+refresh behavior and the opt-in roundtrip are documented in
+[Host-owned Dockerfile](images.md#host-owned-dockerfile-no-host-docker).
+
 ### When files appear
 
 Setup, inspection, and reload create **no policy files or directories**. Saving
 Global settings creates only the saved assignments in `default.toml`, not a
 commented template. A Project save creates its override; Session creates nothing.
-Existing files—even empty ones—are left alone until explicitly saved.
+Existing files—even empty ones—are left alone until explicitly saved. Dockerfile
+activation may separately create build cache records and SDK images; it does not
+create or modify policy/source files.
 
 New saved files use mode `0600`, new directories `0700` (subject to a stricter
 umask). Saves revalidate targets, reject stale proposals, and replace files
@@ -102,7 +127,8 @@ replacing its sandbox.
 ## A small TOML starter
 
 Create this from a **host editor**, outside the mounted workspace. Omit `image`
-to use the bundled digest-pinned default image.
+to discover a host-owned Dockerfile, or use the bundled digest-pinned default
+image when none is selected.
 
 ```toml
 # ~/.pi/agent/pi-microsandbox/default.toml

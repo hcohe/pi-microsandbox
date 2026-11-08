@@ -108,6 +108,8 @@ export type ConfigLayerInput = Omit<ParsedConfigLayer, "value"> & {
   value: DeepPartial<Config> | DeepReadonly<Config>;
 };
 export interface ResolvedConfig {
+  /** Host-owned source descriptor only; never carries Dockerfile/context contents. */
+  imageBuild?: import("./image-source.ts").DockerfileSource;
   config: Config;
   provenance: Record<string, ConfigLayerName>;
   warnings: string[];
@@ -375,6 +377,8 @@ export interface BootRequest {
   restored: PersistedSandboxState | null;
   /** Recreate only after ownership validation, even when inspected labels match. */
   forceRecreate?: boolean;
+  /** Locally built images must never route validation/start failures to the host. */
+  blockHostFallback?: boolean;
 }
 export interface SandboxManager extends ToolOpsProvider {
   boot(request: BootRequest): Promise<RuntimeState>;
@@ -413,6 +417,8 @@ export interface AgentRuntimePolicySnapshot {
   adoptedAt: number;
 }
 export interface MsbControl {
+  /** Read-only host path resolution, guarded by current canonical workspace/session identity. */
+  getDockerfileGuidePaths?(): Promise<import("./dockerfile-guide.ts").DockerfileGuidePaths | undefined>;
   /** Passive allowlisted snapshot from held state only. No settings.inspect,
    * source/environment reads, commands, SDK, logs, lifecycle or writes.
    * Cached desired/adoption is last-known, not live; raw errors are withheld.

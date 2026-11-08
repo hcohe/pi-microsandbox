@@ -59,6 +59,7 @@ extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/diagnostics-tools.ts required
+extensions/pi-msb/dockerfile-guide.ts required
 extensions/pi-msb/control-panel.ts required
 extensions/pi-msb/settings.ts required
 extensions/pi-msb/settings-conflict.ts required
@@ -81,6 +82,9 @@ extensions/pi-msb/settings-input.ts required
 extensions/pi-msb/masked-input.ts required
 extensions/pi-msb/footer.ts required
 extensions/pi-msb/flock.ts required
+extensions/pi-msb/image-archive.ts required
+extensions/pi-msb/image-build.ts required
+extensions/pi-msb/image-source.ts required
 extensions/pi-msb/index.ts required
 extensions/pi-msb/labels.ts required
 extensions/pi-msb/locks.ts required

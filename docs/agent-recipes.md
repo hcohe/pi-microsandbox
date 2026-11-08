@@ -37,6 +37,20 @@ This is a good first prompt after installation—or after inheriting somebody
 else's setup. Unknown runtime policy should stay **unknown**, not become
 “probably safe.” Inspection is not a connectivity or live-enforcement test.
 
+## Add a package to my image
+
+> Call msb_dockerfile_guide first. Show this Project's exact host-owned Dockerfile
+> and context locations and the bundled digest-pinned FROM example with jq.
+> Inspect existing files, then propose only approved HOST-tool edits; don't use
+> sandbox file tools, overwrite existing files, or execute the guide automatically.
+> Explain image precedence and any approved inheritance change needed, then ask
+> me to reload settings. If host tools are blocked, give me human host-editor
+> instructions instead of weakening protection.
+
+The guide is read-only and works without a running VM when the canonical cwd is
+known. See [host-owned Dockerfiles](images.md#host-owned-dockerfile-no-host-docker)
+for isolated COPY contexts, cache/rebuild behavior and the build network boundary.
+
 ## Less RAM, same ambition
 
 > Set this Project to 2 CPUs and 4096 MiB RAM. Inspect the schema first, explain

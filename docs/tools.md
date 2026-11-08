@@ -8,6 +8,7 @@ page is the precise contract for tool arguments, approval, and results.
 | Tool | Job | Needs approval? |
 | --- | --- | --- |
 | `msb_diagnostics` | Passive cached report, even when sandbox execution is blocked | No |
+| `msb_dockerfile_guide` | Read-only host paths, pinned FROM example and safe customization workflow | No (instructions only) |
 | `msb_config_get` | Inspect settings, schemas, origins, desired/adopted policy | No |
 | `msb_config_set` | Propose one scoped edit or an atomic same-scope batch | **Every call**, through interactive UI |
 
@@ -18,10 +19,40 @@ change, then distinguish saved policy from successful runtime activation.
 The model can discover and inspect settings with **`msb_config_get`** and propose
 one operation or an atomic same-scope batch with **`msb_config_set`**. Use
 **`msb_diagnostics`** when startup fails or routed tools are blocked. None grants
-general host execution. These three exact names remain available under default third-party blocking only when public
+general host execution. Call **`msb_dockerfile_guide`** before creating a Dockerfile
+customization. These four exact names remain available under default third-party blocking only when public
 registration provenance resolves to this extension's actual entry module. Missing,
 mismatched or duplicate-winning foreign registration receives no exemption;
 other `msb_*` names have no exemption.
+
+## `msb_dockerfile_guide`
+
+Call `{}` before creating Dockerfile customization. Human-readable JSON content and
+structured `details` include `baseImage`, a usable `minimalDockerfile`, `workflow`,
+`context`, `lifecycle`, and `imageContract`. With a known canonical workspace,
+`paths.global` and `paths.project` each give exact host-owned `config`, `dockerfile`
+and `buildContext` locations, plus optional shell-quoted `createOnlyExamples`.
+`baseImage` is always the bundled published digest pin, **not** the effective
+image (which may be a custom/generated local reference).
+
+The tool resolves path metadata only, checks session identity across async work,
+and reads no TOML, Dockerfile, context contents or credential values. It never
+writes, executes commands, resolves host secret commands, prompts approval,
+loads the SDK, starts a VM, builds/imports, or reloads. It works off/blocked and
+headlessly when workspace identity is known. Unsafe/unavailable paths return
+`outcome: "unavailable"` with bounded generic guidance and no paths/commands;
+nonempty arguments are rejected. No repository/parent-policy discovery occurs.
+
+Choose one scope; inspect existing files, then create/edit using existing
+**approved HOST tools**, not ordinary sandbox Bash/read/write. Returned examples
+use `bash` with `execution_target: "host"` and refuse an existing Dockerfile.
+They are instructions, not execution or approval grants. Active host calls require
+`allowHostExecution`, an approving UI and per-call approval; blocked routing,
+denial or no UI means ask the human to use a host editor/terminal. Never enable
+host execution/fallback or disable protection automatically. After approved host
+edits and any approved image-setting inheritance changes, explicitly reload via
+`/msb` → Actions → Reload settings. See [images](images.md#host-owned-dockerfile-no-host-docker)
+for precedence, isolated contexts, input limits, cache/rebuild and network details.
 
 ## `msb_diagnostics`
 

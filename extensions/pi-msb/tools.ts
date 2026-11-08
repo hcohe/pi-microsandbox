@@ -420,7 +420,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const registered = (typeof (pi as ExtensionAPI).getAllTools === "function"
       ? pi.getAllTools()
       : []).find((candidate) => candidate.name === tool);
-    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics") && ownedConfigToolEntry
+    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics" || tool === "msb_dockerfile_guide") && ownedConfigToolEntry
       && canonicalEntry(registered?.sourceInfo?.path) === ownedConfigToolEntry) return;
     const source = registered?.sourceInfo?.source;
     if (source === "builtin") return;
@@ -470,7 +470,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         .map(({ filePath, baseDir }) => ({ filePath, baseDir })),
     );
     const state = stateOf(deps);
-    const note = deps.systemPromptNote(state);
+    const note = `${deps.systemPromptNote(state)}\nBefore creating Dockerfile customization, call msb_dockerfile_guide for host-owned paths, the bundled pinned base and the approved HOST-tool workflow. The guide only returns instructions; do not execute instructions as part of getting guidance.`;
     return { systemPrompt: note ? `${event.systemPrompt}\n\n${note}` : event.systemPrompt };
   });
 

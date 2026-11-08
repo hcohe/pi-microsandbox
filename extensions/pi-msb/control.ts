@@ -1,4 +1,6 @@
 import { homedir } from "node:os";
+import { dockerfileGuidePaths } from "./dockerfile-guide.ts";
+import { BUILD_FAILURE, ensureDockerfileImage } from "./image-build.ts";
 import { isIP } from "node:net";
 import { join } from "node:path";
 
@@ -54,6 +56,8 @@ export interface MicrosandboxModule {
   Sandbox: AnyRecord;
   NetworkPolicy?: AnyRecord;
   Rule?: AnyRecord;
+  Image?: Pick<typeof import("microsandbox").Image, "get" | "load">;
+  defaultBackendKind?: () => "local" | "cloud";
 }
 
 export interface SessionSetup {
@@ -571,16 +575,45 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   let managerIdentity: SessionExecutionIdentity | undefined;
   const manager = createSandboxManager(deps);
+  let buildAbort = new AbortController();
+  let activationGeneration = 0;
+  const invalidateActivation = () => {
+    capturingBootFailure = false;
+    activationGeneration++;
+    buildAbort.abort();
+    buildAbort = new AbortController();
+  };
   const boot = async (request: Parameters<typeof manager.boot>[0]) => {
-    managerIdentity = execution.context.current();
+    invalidateActivation();
+    const generation = activationGeneration;
+    const identity = execution.context.current();
+    const source = resolved.imageBuild;
+    const signal = buildAbort.signal;
+    const current = () => generation === activationGeneration && execution.context.current() === identity && !signal.aborted;
+    managerIdentity = identity;
     requestExecutions.set(request, managerIdentity);
     diagnosticFailure = "runtime_start_failed";
     capturingBootFailure = true;
     try {
+      if (source) {
+        request.blockHostFallback = true;
+        try {
+          if (request.config.image !== resolved.config.image || request.config.pullPolicy !== "never") throw new Error(BUILD_FAILURE);
+          const msb = await sdk();
+          if (!current()) return visibleState();
+          await ensureDockerfileImage({ sdk: msb, source, signal });
+        } catch {
+          if (!current()) return visibleState();
+          // This path deliberately bypasses manager fallback, even if host fallback was configured.
+          return { status: "unavailable", info: null, reason: BUILD_FAILURE } as RuntimeState;
+        }
+      }
+      if (!current()) return visibleState();
       const result = await manager.boot(request);
+      if (!current()) return visibleState();
       if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
       return result;
-    } finally { capturingBootFailure = false; }
+    } finally { if (generation === activationGeneration) capturingBootFailure = false; }
   };
   const displayActivities = new Map<symbol, SessionExecutionIdentity>();
   const displayState = (state = visibleState()): RuntimeState => {
@@ -724,6 +757,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   let sessionSetup: Promise<unknown> = Promise.resolve();
   const configureSession = (setup: SessionSetup): Promise<RuntimeState> => {
     const previous = execution.context.current();
+    invalidateActivation();
     const identity = execution.begin(setup.sessionId, setup.cwd);
     displayActivities.clear();
     failureState = { status: "booting", info: null };
@@ -754,6 +788,17 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return settings;
     },
     getState: visibleState,
+    async getDockerfileGuidePaths() {
+      const selected = workspace;
+      const identity = execution.context.current();
+      if (!selected || !settingsReady) return undefined;
+      const check = () => {
+        if (execution.context.current() !== identity || workspace !== selected || !settingsReady) throw new Error("Workspace/session changed");
+      };
+      const paths = await dockerfileGuidePaths(settingsInput(), selected.hostRoot, check);
+      check();
+      return paths;
+    },
     async getDiagnostics() {
       const state = visibleState();
       const statuses = ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"];
@@ -792,6 +837,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const identity = execution.context.current();
       const assertCurrent = () => execution.context.assertCurrent(identity);
       assertCurrent();
+      if (!enabled) invalidateActivation();
       if (enabled && isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
         failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
@@ -941,6 +987,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   return {
     control, manager, provider, configRef, configureSession,
     endSession: () => {
+      invalidateActivation();
       const identity = execution.context.current();
       execution.begin(identity.sessionId, identity.cwd);
       displayActivities.clear();

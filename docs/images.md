@@ -58,12 +58,142 @@ image = "ghcr.io/hcohe/pi-microsandbox:python-1.1.0"
 pull_policy = "if-missing"
 ```
 
-If `image` is omitted, pi-microsandbox uses the configured `default` variant
+If `image` is omitted and no host-owned Dockerfile is selected, pi-microsandbox uses the configured `default` variant
 release, qualified by both its `VERSION` tag and immutable index digest. Image
 versions are independent of the installed package version. If `pull_policy` is
 omitted, `"if-missing"` is used: Microsandbox pulls the image only when that
 exact reference is absent from its cache. Use `"always"` to check a registry for
 an updated mutable tag, or `"never"` to require a cached local image.
+
+## Host-owned Dockerfile (no host Docker)
+
+**Call `msb_dockerfile_guide` with `{}` before creating customization.** It returns
+exact Global/Project host paths for the current canonical cwd, a directly usable
+`FROM` with the installed bundled image's digest pin, and safe create-only host
+command examples. It does not execute them or change anything. Inspect/edit via
+approved HOST tools (`execution_target: "host"`), never ordinary sandbox
+Bash/read/write. If host policy, blocked routing or lack of an approving UI
+prevents that, ask the human to use their host editor/terminal; do not enable host
+execution/fallback automatically. [Tool contract](tools.md#msb_dockerfile_guide).
+
+Place a Dockerfile beside your host-owned policy, outside the mounted cwd:
+
+```text
+<Pi agent dir>/pi-microsandbox/Dockerfile                         # Global
+<Pi agent dir>/pi-microsandbox/build-context/                     # optional Global context
+<Pi agent dir>/pi-microsandbox/projects/Code/app/Dockerfile       # Project for ~/Code/app
+<Pi agent dir>/pi-microsandbox/projects/Code/app/build-context/    # optional Project context
+```
+
+The default Pi agent directory is `~/.pi/agent`; Pi's `getAgentDir()` (including
+`PI_CODING_AGENT_DIR`) is authoritative. Projects outside home use
+`projects-absolute/<absolute-cwd-without-leading-slash>/Dockerfile`, exactly like
+[Project configuration](configuration.md#host-owned-project-overrides). Canonical
+cwd selects the Project: aliases share it, nested cwd does not inherit a parent's
+Dockerfile. A host-selected agent-directory symlink is supported, but descendants
+must not be symlinks. Keep these paths outside the workspace and writable mounts;
+a cwd encompassing the policy location (often home itself) is rejected, not
+silently granted access. Build sources cannot be exposed through explicit mounts,
+even read-only ones.
+
+**Source precedence is atomic.** At each host scope, an explicit TOML `image`
+wins over its colocated Dockerfile. Otherwise the Dockerfile supplies that scope's
+image. Project overrides Global, and a Session `image` disables inherited
+Dockerfile discovery. With neither image nor Dockerfile, the bundled digest pin
+is used. Remove a scope's explicit `image` to enable its Dockerfile; changing
+`pull_policy` alone does not disable discovery. Discovered images always use
+`pull_policy = "never"`. Settings show the generated local reference, source scope
+and a Dockerfile-path warning; unrelated settings saves do **not** persist the
+generated reference. Do not copy effective settings into a policy file.
+
+A minimal Dockerfile can derive from the bundled image (use the exact digest pin
+returned by `msb_dockerfile_guide`, not effective `msb_config_get` image, which may
+be a generated local reference or custom image):
+
+```dockerfile
+FROM ghcr.io/hcohe/pi-microsandbox:1.1.0
+RUN apt-get update && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
+# COPY helper.sh /usr/local/bin/helper  # only from this scope's build-context/
+```
+
+Use a verified `@sha256:...` suffix for reproducibility; the tag above is only a
+readable example. Custom images still need the required guest tools and Docker
+components if runtime Docker is required.
+
+### Build boundary and lifecycle
+
+On activation (startup, enable or settings reload), the extension snapshots only
+`Dockerfile` and the **contents of its dedicated `build-context/`**. That directory
+becomes the context root for `COPY`; Dockerfile is staged at its root. No implicit
+repository, TOML files, other projects, policy tree, host credentials, host Docker
+socket, or runtime mounts/environment/secrets are supplied. Do not place secrets
+in the dedicated context or Dockerfile: those bytes are deliberately build inputs.
+`build-context/Dockerfile` is rejected to prevent overwriting the selected source.
+All symlinks, multiply-linked regular files (hardlinks), special files and changing
+inputs are rejected. Limits: 32 MiB total source bytes, 2,048 entries (including
+Dockerfile/directories), 16 context nesting levels. A context is optional.
+
+A separate disposable **rootful** Microsandbox VM runs the existing digest-pinned
+bundled image with guest Docker/Buildx (2 CPUs, 4,096 MiB, 20-minute build cap).
+Its independent explicit SDK Public network profile allows public downloads plus
+gateway DNS, denies unmatched egress, and denies ingress. It does **not** inherit
+runtime network restrictions: even a runtime configured `deny` needs public
+registry/package downloads on an uncached build. No host/private allow profile,
+published ports, registry credentials, pushes, host Docker, host build command,
+`msb` CLI, cross-architecture emulation or cloud backend is used. Public egress is
+not a guarantee against arbitrary exfiltration of the supplied build inputs.
+
+Guest `docker buildx build --load` and `docker save` produce an archive. After
+ownership-checked builder destruction, bounded streaming preflight accepts one
+exact generated image reference and the native Linux architecture, and creates a
+Docker-save-only archive without extra index/repository aliases. The host SDK's
+`Image.load` imports that **tar file**, not a directory. The real runtime starts
+from the generated local reference with **pull policy never**. SDK image digest,
+OS and architecture must validate before a successful cache record is written.
+
+Build cache records/locks live under `<Pi agent dir>/pi-microsandbox/build-cache/`;
+finished images live in the local Microsandbox SDK cache, separate from guest
+Docker. Inspection/config resolution creates neither cache nor builder. Cache
+keys include exact source bytes, executable bits, native platform, builder image
+pin and build implementation/options. Concurrent builds deduplicate with flock.
+Unchanged inputs reuse a digest/platform-validated finished image. **Changing
+Dockerfile/context content and reloading settings rebuilds**, and the image
+identity invalidates VM reuse. Import completes before an existing runtime is
+destroyed when possible; replacement loses guest-local state. Build failures and
+built-image runtime validation/start failures **block routed execution even with
+`fallback_mode = "host"`**; there is no automatic host build/execution fallback.
+Errors intentionally omit build output to avoid leaking context data.
+
+Mutable `FROM` tags and external package downloads are **not** refreshed while the
+finished-image cache is reused. Prefer pinned dependencies. To explicitly refresh,
+change a Dockerfile comment (not just its mtime) and reload settings. There is no
+manual rebuild button or persistent guest layer cache in this MVP. Old generated
+images are subject to ordinary Microsandbox image-cache management.
+
+Export archives are limited to 16 GiB, 16,384 tar entries, and 1 MiB per metadata
+file; links, special entries and unsupported tar extensions fail closed. Reserve
+space for guest Docker storage **plus both original and sanitized host archives**
+(up to 32 GiB of host archive bytes). The cap is an accepted-archive limit, not a
+proactive disk quota. Disk exhaustion fails closed. Normal completion/failure and
+cancellation clean temporary `/tmp/pi-msb-build-*` directories and owned builders;
+if SDK destruction cannot be verified, output is retained rather than deleting
+files a possibly running builder can access. A process crash can also leave
+artifacts; builder lifetime is bounded, but host cleanup may be necessary. Guest
+streams are aborted on timeout/session supersession/Off. The pinned SDK has no
+cancellation API for create/import: late results are awaited before cleanup and
+cannot activate a superseded runtime; those SDK calls may outlast the build cap.
+
+An opt-in build/export/import/runtime roundtrip test is available on a supported
+virtualization host (downloads/builds images; ordinary test skips are not proof):
+
+```sh
+PI_MSB_LIVE_BUILD_TEST=1 node --experimental-strip-types --import ./test/setup.ts \
+  --test extensions/pi-msb/image-build-live.test.ts
+```
+
+The roundtrip has not been live-validated as part of this change; fake-SDK tests
+cannot prove guest Docker, archive compatibility, network or SDK import behavior.
 
 ## Cloud CLIs from this branch
 

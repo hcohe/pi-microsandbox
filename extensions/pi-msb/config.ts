@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { buildImageReference, discoverDockerfile, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { isSecretHost, networkDestinationKind } from "./network-domains.ts";
 import type {
@@ -855,6 +856,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   const targets = await hostConfigTargets(input);
   const { global: hostDefaultFile, project: hostProjectFile } = targets.paths;
   const hostLayers: ParsedConfigLayer[] = [];
+  const buildSources = new Map<ConfigLayerName, Pick<DockerfileSource, "dockerfile" | "agentRoot" | "agentAlias" | "cacheDir" | "scope">>();
   const hostPolicyPaths: string[] = [];
   for (const [name, file] of [
     ["host-default", hostDefaultFile],
@@ -869,12 +871,11 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     const protectedPaths = await Promise.all([canonicalPolicyLocation(file, realpath), canonicalPolicyLocation(dirname(file), realpath)]);
     hostPolicyPaths.push(...protectedPaths);
     const text = await (input.readFile ?? readHostPolicyFile)(file);
-    if (text === null) continue;
     if (protectedPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
-    const policy = layerFromText(name, text, lexicalFile);
-    if (captureSanitizer) privateSources.push(readRawConfig(text));
+    const policy = text === null ? { name, value: {} as DeepPartial<Config>, warnings: [] } : layerFromText(name, text, lexicalFile);
+    if (captureSanitizer && text !== null) privateSources.push(readRawConfig(text));
     hostLayers.push(policy);
   }
   hostPolicyPaths.push(...await hostPolicyAncestorLocations(Object.values(targets.lexicalPaths), realpath));
@@ -886,6 +887,21 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     throw new ConfigError(["host configuration must be outside the mounted workspace"]);
   }
   hostPolicyPaths.push(...hostPolicyRoots);
+  // A higher explicit image disables lower Dockerfiles completely, including reads.
+  for (const policy of Object.hasOwn(input.temporaryOverrides ?? {}, "image") ? [] : [...hostLayers].reverse()) {
+    const name = policy.name as "host-default" | "host-project";
+    const file = name === "host-default" ? hostDefaultFile : hostProjectFile;
+    // Image and Dockerfile are one atomic source choice at each host scope.
+    if (Object.hasOwn(policy.value, "image")) break;
+    const dockerfile = join(dirname(file), "Dockerfile");
+    try {
+      if (await discoverDockerfile(targets.canonicalAgentDir, dockerfile)) {
+        policy.value.image = `pi-msb-discovered:${name}`;
+        buildSources.set(name, { dockerfile, agentRoot: targets.canonicalAgentDir, agentAlias: targets.agentDir, cacheDir: join(targets.canonicalAgentDir, "pi-microsandbox", "build-cache"), scope: name });
+        break;
+      }
+    } catch { throw new ConfigError(["host-owned Dockerfile could not be safely inspected"]); }
+  }
   const environment = parseEnvConfig(env);
   layers.push(environment);
   if (captureSanitizer) privateSources.push(environment.value);
@@ -900,6 +916,18 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   }
   const merged = mergeConfigLayers(layers);
   warnings.push(...merged.warnings);
+  let imageBuild: DockerfileSource | undefined;
+  const selectedSource = buildSources.get(merged.provenance.image!);
+  if (selectedSource && merged.value.image === `pi-msb-discovered:${selectedSource.scope}`) {
+    try {
+      const snapshot = await snapshotDockerfile(selectedSource, DEFAULT_CONFIG.image);
+      imageBuild = { ...selectedSource, identity: snapshot.identity, platform: snapshot.platform };
+      merged.value.image = buildImageReference(snapshot.identity);
+      merged.value.pullPolicy = "never";
+      merged.provenance.pullPolicy = selectedSource.scope;
+      warnings.push(`image source: ${selectedSource.scope} Dockerfile ${selectedSource.dockerfile}; generated local image, pull_policy=never`);
+    } catch { throw new ConfigError(["host-owned Dockerfile/context could not be safely snapshotted (regular files only; bounded context required)"]); }
+  }
   let config = validateConfig(merged.value);
   config = {
     ...config,
@@ -927,6 +955,9 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   for (const [index, mount] of config.mounts.entries()) {
     if (mount.type === "named" || mount.type === "tmpfs" || typeof mount.hostPath !== "string") continue;
     const host = resolve(mount.hostPath);
+    if (imageBuild && [imageBuild.dockerfile, join(dirname(imageBuild.dockerfile), "build-context")].some((path) => isInside(path, host) || isInside(host, path))) {
+      policyIssues.push("host mounts must not expose Dockerfile or build-context sources");
+    }
     if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || hostPolicyRoots.some((root) => isInside(host, root)))) {
       policyIssues.push("writable host mounts must not expose host configuration");
     }
@@ -939,7 +970,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   }
   if (policyIssues.length) throw new ConfigError(policyIssues);
   captureSanitizer?.(createSettingsSanitizer([...privateSources, config]));
-  return { config, provenance: merged.provenance, warnings: warnings.map(warning) };
+  return { config, provenance: merged.provenance, warnings: warnings.map(warning), ...(imageBuild ? { imageBuild } : {}) };
 }
 
 function setAt(base: any, parts: string[], value: unknown): any {

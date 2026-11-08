@@ -222,7 +222,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   function setFailure(request: BootRequest | null, error: unknown): RuntimeState {
     const reason = redactMessage(error, request?.config, deps.redactError);
     publish({
-      status: request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
+      status: !request?.blockHostFallback && request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
       info: null,
       reason,
     });

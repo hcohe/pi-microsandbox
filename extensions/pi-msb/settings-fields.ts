@@ -6,7 +6,7 @@ export type Section = typeof SECTIONS[number];
 export interface FieldHelp { hint: string; editorHelp: string; choiceHelp?: Readonly<Record<string, string>> }
 export interface SettingsField extends FieldHelp { path: string; section: Section; description: string; choices?: readonly (string | boolean)[] }
 const descriptions: Record<string, string> = {
-  image: "Guest image (prefer a verified digest). Custom images need runtime tools.",
+  image: "Guest image (prefer a verified digest). An explicit image disables this scope's host-owned Dockerfile; discovered builds show a generated local ref.",
   pull_policy: "When to download the guest image.", sandbox_name: "Sandbox identity; inherit for the automatic session name.",
   bootstrap_tools: "Choose whether missing guest tools may be installed automatically.",
   cpus: "Virtual CPUs, 1–64.", memory_mib: "Guest RAM in MiB, minimum 128.", idle_timeout_sec: "Idle stop in seconds; 0 disables it.",
@@ -28,7 +28,7 @@ const descriptions: Record<string, string> = {
 };
 // Menu hints stay brief; editor help is static and never interpolates configured values.
 const help: Record<string, FieldHelp> = {
-  image: { hint: "The image your sandbox runs", editorHelp: "Enter a nonempty guest image name; prefer a verified digest.\nExample format: registry.example.com/team/image@sha256:<verified-digest>\nCustom images must include the required runtime tools." },
+  image: { hint: "The image your sandbox runs", editorHelp: "Enter a nonempty guest image name; prefer a verified digest.\nExample format: registry.example.com/team/image@sha256:<verified-digest>\nCustom images must include the required runtime tools.\nAn explicit image wins over this scope's Dockerfile; inherit to allow discovery.\nDiscovered builds show a generated local ref and always use pull policy never." },
   pull_policy: { hint: "When to download the image", editorHelp: "Choose when the guest image may be downloaded.\nFor example, if-missing reuses a locally available image.", choiceHelp: { always: "Download on every start.", "if-missing": "Download only when the image is not available locally.", never: "Use only a local image; fail if it is missing." } },
   sandbox_name: { hint: "A name for your sandbox", editorHelp: "Enter a sandbox name, or go back to choose the automatic session name.\nExample: my-project\nAutomatic names require Session scope." },
   bootstrap_tools: { hint: "How guest tools get installed", editorHelp: "Choose whether to install missing tools inside the guest.\nFor example, auto checks which tools the image needs.", choiceHelp: { auto: "Install missing guest tools when needed.", true: "Install missing guest tools when needed.", false: "Never bootstrap; the image must already provide the tools." } },
