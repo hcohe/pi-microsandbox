@@ -1,87 +1,144 @@
-# Recovery and troubleshooting
+# When the sandbox gets sand in its gears
 
 [Back to README](../README.md)
 
-1. Ask the agent to run `msb_diagnostics` even when routed tools are blocked.
-   This is passive: it uses cached, secret-redacted state without shell commands,
-   native SDK loading, log fetching, credential resolution, or VM startup.
-   Unknown/live health remains explicitly unverified. For human-only follow-up,
-   open `/msb`: inspect Status and Actions → Recent logs when the panel is available.
-2. Use `msb_config_get` to inspect configuration and recovery metadata, then
-   `msb_config_set` for an explicitly approved repair. These host management tools
-   do not require a healthy VM. Supported semantic repairs validate the full final
-   configuration before saving; malformed TOML and unresolved workspace identity
-   require host-side human repair. Fix image, virtualization, path, or missing-tool
-   problems as indicated, then choose Actions → Reload settings or apply a new
-   approved settings change. Saved-but-reload-failed means the file changed, not
-   that the sandbox recovered.
-   Startup failures fail closed; routed tools do not silently run on the host.
-   Do not disable protection or broaden host access merely to make recovery tools work.
-3. If a process died, a later startup or Actions → Prune stale sandboxes can remove its labelled
-   sandbox after the owner lock is free.
-4. If a same-name resource has different managed labels, pi-microsandbox
-   refuses to attach or replace it. Verify the resource with Microsandbox's
-   tooling before removing it.
-5. On unsupported virtualization hosts, use `PI_MSB_DISABLE=1` or `/msb` → Actions → Turn off
-   for explicit host mode, or configure `fallback_mode = "host"` knowingly.
-   Automatic fallback remains visibly distinct from explicit off mode; both are
-   unsandboxed.
-6. For bootstrap failures, use an image that already contains the required
-   command list or allow the configured network policy to reach the package
-   repositories. Deny mode cannot bootstrap an image missing those commands.
+## Start here: diagnose without opening the gates
 
-There are no workspace modes. Only canonical `realpath(cwd)` is bind-mounted
-read/write, at the lexically resolved cwd as both guest root and command cwd.
-Git root discovery is not used; Git ancestors/siblings outside cwd are never
-automatically exposed. If startup fails because the cwd or symlink layout cannot
-be represented safely, fix the host path rather than expecting another root.
-Writes are immediate; `.git`, secrets, and untracked files within cwd are
-visible. Overlapping sessions share host files, and nested containers can reach
-the mount. Explicit mounts and user-approved host controls are separate.
+Ask your agent:
 
-If Project settings appear missing after starting in a nested cwd, inspect that
-canonical cwd's exact [override location](configuration.md#host-owned-project-overrides).
-Canonical cwd determines Project identity and the shared session boundary;
-parent Project overrides are not inherited, so new explicit overrides may be
-needed. Global settings are unchanged. Replacing cwd invalidates host approvals
-and host-read grants; old approval is not permission for the new directory.
+> Run msb_diagnostics, then inspect configuration and recovery metadata with
+> msb_config_get. Explain what failed and what's unverified. Propose the smallest
+> supported settings repair for approval. Don't turn off the sandbox, enable host
+> fallback, or broaden host tools/mounts as a workaround. Verify activation.
 
-If Git fails in a linked worktree or submodule, check whether its metadata lies
-outside cwd. Such metadata is not separately mounted, and guest Git may require
-explicit setup or mounts. Metadata inside cwd remains exposed but never selects
-the bind root.
+`msb_diagnostics` works while routed tools are blocked. It uses cached,
+secret-redacted state—no commands, SDK loading, file/environment reads, logs,
+credential resolution, or VM startup. It isn't a live health check.
 
-## Legacy named volumes
+Configuration tools also work without a healthy VM. A supported semantic repair
+validates the entire final configuration before saving and requires fresh human
+approval. Recovering an invalid baseline additionally reviews the safety policy
+being activated, including retained host commands, not just the field repaired.
+Malformed TOML and unresolved workspace identity need human host-side repair.
 
-Named Git volumes created by older releases are never migrated or deleted
-automatically. Use Microsandbox's volume tooling to inspect and recover each
-`pi-msb-vol-*` volume, then remove it manually only after confirming that
-nothing is needed. Current pi-microsandbox commands do not manage these volumes.
+Prefer doing it yourself? Open `/msb`, inspect **Status**, then **Actions →
+Recent logs**. Fix the cause and choose **Reload settings** after external edits.
+Normal approved settings edits reload automatically.
 
-## Docker daemon problems
+## “Saved” isn't always “running”
 
-`/msb` → Status shows Docker readiness, server version, and storage driver
-when known. Inside an active sandbox, start or recheck the daemon with:
+| Result | Meaning / next step |
+| --- | --- |
+| `applied` | Save and reload completed. Check runtime status: off mode is still not a running VM. |
+| `saved_but_reload_failed` | The setting was saved, but not fully activated. Inspect again, fix the cause, and reload; don't assume rollback. |
+| `conflict` | Source/session/runtime changed during review. Cancel and make a fresh proposal. |
+| `rejected` | Nothing was authorized/applied; inspect safe validation or recovery guidance. |
+| `apply_failed` with `saved: "unknown"` | I/O may have failed after replacement. Inspect host storage before retrying. |
+
+With default `fallback_mode = "block"`, failure does not silently run tools on
+the host. Explicit off mode and `fallback_mode = "host"` are **unsandboxed**,
+not recovery magic. Don't disable protection just to get diagnostic tools back.
+
+## Common snags
+
+### Missing runtime or virtualization
+
+- Keep npm optional dependencies enabled; Microsandbox uses a platform package
+  for its native runtime. Reinstall appropriately, install that platform package,
+  or set `MSB_PATH` to a working standalone `msb` binary.
+- Linux needs accessible `/dev/kvm`; a container/VM needs passthrough or nested
+  virtualization. Installing another package won't add missing host support.
+- Supported hosts are Apple Silicon macOS and GNU Linux x86_64/arm64—not Intel
+  macOS, Windows, or musl Linux. [Requirements →](getting-started.md#check-your-host)
+
+### Policy won't load or save
+
+Check the named host target's permissions and path layout from a **host shell**.
+The selected Pi agent directory may be a symlink; files/directories below its
+canonical anchor must not be. Policy cannot live in cwd or writable mounts.
+The panel reports a safe stage/error class rather than raw credential-bearing
+exceptions. Never paste raw credentials into an issue report.
+
+Malformed TOML requires a host editor; the agent setter won't blindly overwrite
+an unreadable file. Inspection, reload, and setup don't create missing files;
+that is expected, not an installation failure.
+
+### “Where did my Project settings go?”
+
+Project identity is **canonical cwd**, not Git root. Starting in a nested
+subdirectory selects a separate exact override with no parent inheritance.
+Symlink aliases of the same canonical cwd share it; Global is unchanged.
+Inspect Sources or `msb_config_get` for the right location.
+
+In-repo `.pi-msb.toml` is ignored. Older host Project `.pi-msb.toml` files aren't
+auto-migrated to `config.toml`. [Migration guide →](configuration.md#coming-from-an-older-setup)
+
+### “My Session restriction disappeared”
+
+Pi `/reload`, session/workspace switch, and shutdown clear Session overrides;
+resuming the transcript doesn't restore them. Ordinary **settings reload**
+preserves them. Inherited policy can be broader after reset. Ask for Project or
+Global scope if the restriction must last.
+
+### Missing files or Git errors
+
+Only cwd is mounted read/write; Git ancestors and siblings outside it aren't
+automatically exposed. Start Pi at the intended directory instead of expecting
+Git-root discovery. External linked-worktree/submodule metadata isn't separately
+mounted, so guest Git may need explicit setup or reviewed mounts.
+
+Unsupported cwd/symlink layouts fail rather than choosing a different root.
+Replacing cwd invalidates prior host approvals and host-read grants. Remember:
+`.git`, `.env`, and untracked files inside cwd are exposed, host writes are
+immediate, and overlapping sessions share files. [Storage →](storage.md)
+
+### Missing commands or blocked downloads
+
+Use an image with the required commands, or allow the needed package repositories
+under the intended network policy. `deny` cannot bootstrap missing guest tools.
+Allowlist domains are exact: a package may fetch binaries from destinations other
+than its registry. Review those destinations rather than switching to `open`.
+[Images →](images.md) · [Network rules →](configuration.md#networking)
+
+### Stale or conflicting sandboxes
+
+After a dead owner releases its lock, startup or **Actions → Prune stale
+sandboxes** can clean eligible labelled resources. Live owners/current sessions
+are preserved. If a same-name resource has different managed labels, the
+extension refuses to attach or replace it. Verify with Microsandbox tooling
+before any manual removal. Host files and legacy named volumes are not pruned.
+
+## Docker feeling grumpy?
+
+`/msb` → **Status** shows readiness, version, and storage driver when known.
+Inside an active guest, recheck with:
 
 ```sh
 pi-msb-docker-start 15000
 docker info
 ```
 
-Startup logs are guest-local at `/var/log/pi-msb-dockerd.log`. Check the network
-prerequisites with `iptables --version` (it should report `nf_tables`), `nft
---version`, and `sysctl net.ipv4.ip_forward` (it should be `1`). The daemon uses
-`vfs`; slower builds and higher disk use are expected compared with `overlay2`.
-Increase `memory_mib` or `docker.startup_timeout_ms` if startup is killed or
-large builds run out of memory. Small builds should have at least 1 GiB and
-larger Compose stacks should have 2 GiB or more; the default is 8 GiB.
+Guest startup logs are at `/var/log/pi-msb-dockerd.log`. Useful checks:
+`iptables --version` should report `nf_tables`, `nft --version` should work,
+and `sysctl net.ipv4.ip_forward` should be `1`.
 
-A published container port needs two mappings. Configure the outer
-`network.publish_ports` mapping before sandbox creation, then use Docker `-p`
-inside the guest. A Docker mapping by itself is not reachable from the host.
-Pull and container-egress failures under `deny` or `allowlist` are expected; do
-not bypass the outer policy or mount the host Docker socket as a workaround.
+The daemon uses `vfs`: slower builds and higher disk use than `overlay2` are
+expected. Increase `memory_mib` or `docker.startup_timeout_ms` for heavy startup
+or builds. Small builds should have at least 1 GiB; larger Compose stacks often
+need 2 GiB or more. Default VM memory is 8 GiB.
 
-For installation prerequisites, see
-[installation and requirements](getting-started.md). To test a live sandbox
-from source, see the [live test matrix](development.md#live-test-matrix).
+For host access to a container port, you need **two mappings**: outer
+`network.publish_ports` set before VM creation, then Docker `-p` inside the VM.
+A Docker mapping alone isn't host-reachable. Network pull/egress failures under
+`deny` or `allowlist` may be expected. Never mount the host Docker socket or
+bypass outer policy to make them disappear.
+
+## Old named workspace volumes
+
+Older `pi-msb-vol-*` volumes aren't migrated or deleted automatically and may
+contain unexported work. Current `/msb` doesn't list/export/manage them. Recover
+and verify the data with Microsandbox tooling before deleting anything.
+[Recovery instructions →](storage.md#upgrading-from-named-git-volumes)
+
+For source-level validation, see the [live test matrix](development.md#live-test-matrix).
+A skipped live test is not proof that virtualization works.

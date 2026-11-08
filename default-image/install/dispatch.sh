@@ -54,11 +54,6 @@ for toolchain in ${toolchains}; do
     "${install_dir}/${toolchain}.sh"
 done
 
-# curl is build-time transport, not part of a language contract. All compilers
-# and headers installed by the selected toolchains remain available.
-curl_status="$(dpkg-query --show --showformat='${db:Status-Abbrev}' curl 2>/dev/null || true)"
-if [[ "${curl_status}" == "ii " ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y curl
-    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
-fi
+# curl is part of the shared base contract and remains available at runtime.
+# All compilers and headers installed by selected toolchains remain available.
 cleanup_apt

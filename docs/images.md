@@ -1,6 +1,25 @@
-# Images
+# Pick your Linux lunchbox
 
-[Back to README](../README.md)
+[Back to README](../README.md) · [Agent recipes](agent-recipes.md)
+
+The default image comes with Node.js, Python, Rust, Go, and Docker. If that's
+more lunch than you need, choose a language-specific variant—or pack your own.
+Image changes may recreate the VM and discard guest-local state.
+
+**New in source builds:** every variant now includes **gcloud 592.0.0**, **AWS
+CLI v2 2.39.6**, and **curl** in its shared base. Existing published tags and the
+package's digest-pinned default are unchanged; use a new source build until a
+new image cohort is published and the package pin updated.
+[Build one now →](#cloud-clis-from-this-branch)
+
+You can ask your agent to make the change:
+
+> Inspect my current image and the image-setting schema. Propose this Project's
+> image as ghcr.io/hcohe/pi-microsandbox:python-1.1.0 with pull_policy if-missing,
+> in one approved batch. Explain the restart impact and verify activation.
+
+For reproducible custom setups, use an immutable digest rather than a mutable
+latest tag. The bundled default is already digest-pinned.
 
 pi-microsandbox publishes six Ubuntu 26.04 image variants at
 `ghcr.io/hcohe/pi-microsandbox`. Every tag is a Linux multi-platform image for
@@ -10,8 +29,9 @@ AMD64 and ARM64.
 
 `VERSION` below is the independent image version, such as `1.0.0`. Release
 tags are write-once. Latest tags are mutable development tags built from `main`.
-Push an exact `image-vVERSION` Git tag to publish a release cohort. Package
-`vX.Y.Z` tags do not invoke image builds, and manual workflow runs validate only.
+Package versions and image versions are separate. Maintainers publish image
+cohorts through the [image release workflow](development.md#image-development);
+selecting an image here doesn't build or publish one.
 
 | Variant | Contents | Release tag | Latest tag |
 | --- | --- | --- | --- |
@@ -22,7 +42,7 @@ Push an exact `image-vVERSION` Git tag to publish a release cohort. Package
 | `go` | Base plus Go 1.26.8 and cgo build support | `go-VERSION` | `go-latest` |
 | `default` | Base plus the Node.js, Python, Rust, and Go modules above | `VERSION` | `latest` |
 
-The base contract includes `bash`, `sh`, `git`, `rg`, `file`, `cat`, `mkdir`,
+The published base contract includes `bash`, `sh`, `git`, `rg`, `file`, `cat`, `mkdir`,
 `rm`, Docker Engine and CLI 29.8.0, containerd 2.3.4, runc 1.5.1, Buildx
 0.37.1, Compose 5.5.1, and the Ubuntu iptables-nft and nftables tools. CA
 certificates support HTTPS Git operations. Docker is part of the common base
@@ -34,7 +54,7 @@ Select a variant in host-owned configuration outside the mounted cwd:
 
 ```toml
 # ~/.pi/agent/pi-microsandbox/default.toml (or a host-owned project override)
-image = "ghcr.io/hcohe/pi-microsandbox:python-1.0.0"
+image = "ghcr.io/hcohe/pi-microsandbox:python-1.1.0"
 pull_policy = "if-missing"
 ```
 
@@ -45,15 +65,72 @@ omitted, `"if-missing"` is used: Microsandbox pulls the image only when that
 exact reference is absent from its cache. Use `"always"` to check a registry for
 an updated mutable tag, or `"never"` to require a cached local image.
 
+## Cloud CLIs from this branch
+
+Want the new tools before the next published image cohort? From a **repository
+checkout**, build a local base image on a supported host. This has the shared
+runtime/cloud tools without Node.js, Python, Rust, or Go developer toolchains:
+
+```sh
+docker build \
+  --file default-image/Dockerfile \
+  --build-arg IMAGE_VARIANT=base \
+  --build-arg TOOLCHAINS= \
+  --tag pi-cloud-tools:dev \
+  default-image
+```
+
+The build verifies tools without cloud credentials. Check the finished image
+with networking disabled:
+
+```sh
+docker run --rm --network none pi-cloud-tools:dev gcloud version --quiet
+docker run --rm --network none pi-cloud-tools:dev aws --version
+docker run --rm --network none pi-cloud-tools:dev curl --version
+```
+
+Use the host Microsandbox CLI to load it into **Microsandbox's** image cache,
+which is separate from Docker's:
+
+```sh
+docker save pi-cloud-tools:dev | msb load --tag pi-cloud-tools:local
+```
+
+Ask your agent:
+
+> Propose this Project's image as pi-cloud-tools:local with pull_policy never,
+> in one approved batch. Explain the VM restart and verify activation. Don't
+> import my host cloud profiles or credentials.
+
+Or save the equivalent host-owned TOML:
+
+```toml
+image = "pi-cloud-tools:local"
+pull_policy = "never"
+```
+
+For language toolchains too, build the `default` variant instead, with
+`IMAGE_VARIANT=default` and `TOOLCHAINS="node python rust go"`. CLI installation
+is **not authentication**: configure credentials deliberately. Start with the
+[keyless, read-only Google Cloud recipe](google-cloud.md). AWS credentials and
+permissions likewise remain your responsibility; no host `.aws` directory is
+copied or mounted automatically.
+
 ## How the images are assembled
 
 [`default-image/variants.json`](../default-image/variants.json) is the single
 source of variant composition and tag names. The workflow passes each entry's
 toolchain list to one generic
-[`default-image/Dockerfile`](../default-image/Dockerfile). The common Docker installer runs before the modular
-`default-image/install/<language>.sh` scripts. The corresponding common
-verifier checks Docker and its CLI plugins in every variant; language verifiers
-then exercise each selected toolchain.
+[`default-image/Dockerfile`](../default-image/Dockerfile). The common Docker,
+Google Cloud CLI, and AWS CLI installers run before the modular `default-image/install/<language>.sh` scripts. curl is retained as a
+runtime tool, not removed after downloads. The common verifier checks Docker,
+its plugins, cloud CLI versions/offline configuration, and a local curl transfer
+in every variant; language verifiers then exercise each selected toolchain.
+Cloud CLIs include no credentials or profiles. Their private bundled Python
+runtimes do not add `python`/`python3` to the language-free base's PATH.
+The final image sets `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE` and `AWS_CA_BUNDLE` to
+`/etc/ssl/certs/ca-certificates.crt`: both clients follow the system trust store
+when Microsandbox adds its runtime CA, without disabling TLS verification.
 
 The `default` variant runs the same Node.js, Python, Rust, and Go modules as the
 individual variants. It does not have a duplicate package list. This keeps an
@@ -87,7 +164,7 @@ Start from a versioned base tag so the guest contract does not change when
 `main` is rebuilt:
 
 ```dockerfile
-FROM ghcr.io/hcohe/pi-microsandbox:base-1.0.0
+FROM ghcr.io/hcohe/pi-microsandbox:base-1.1.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends jq \

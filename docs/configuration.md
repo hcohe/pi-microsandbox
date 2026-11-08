@@ -1,332 +1,303 @@
-# Configuration
+# Make the sandbox yours
 
-[Back to README](../README.md)
+[Back to README](../README.md) · [Agent recipes](agent-recipes.md) · [Tool reference](tools.md)
 
-Configure host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml`.
-The file is created when you save a Global setting, not during setup or reload.
-Use host-owned per-project files for project-specific overrides, `PI_MSB_*`
-environment variables for launch settings, and the [`/msb` control panel](commands.md)
-to apply each change to Session, Project or Global, or cancel. Collapsed settings
-trees sit directly below MICROSANDBOX and edit desired policy; Status shows
-read-only runtime metadata, not duplicate settings.
+Three ways to turn the knobs:
 
-The model can inspect settings headlessly with `msb_config_get` or propose one
-Session/Project/Global change with `msb_config_set`. Changes always require
-fresh explicit user approval. Agent tools can read and set `hostEnv` variable
-names and `hostCmd` command text, but cannot read or set literal `textValue`
-credentials. Host commands are also shown to the human in the approval dialog,
-because approving hidden executable host code would be unsafe.
-The confirmation shows the focused diff without warning lines; relevant warnings
-are returned as text to the agent after completion so it can explain them to you.
-See the [tool schemas and scope lifetimes](tools.md).
+- **Ask your agent.** It inspects with `msb_config_get` and proposes approved
+  changes with `msb_config_set`. [Try these prompts →](agent-recipes.md)
+- **Open `/msb`.** Browse settings and apply an edit yourself.
+  [Panel guide →](commands.md)
+- **Edit host-owned TOML.** Useful for provisioning and headless workflows.
+  Keep policy outside the workspace; sandbox Bash is not your policy editor.
 
-Settings take precedence in this order: built-ins < environment
-< **Global** (host-owned defaults) < **Project** (host-owned overrides)
-< **Session**.
-Session settings are memory-only and authoritative, including empty lists;
-they are cleared when switching sessions/workspaces or shutting down.
-Keep configuration and credential files outside the mounted workspace and all
-writable mounts.
+## Choose a scope
 
-TOML uses snake_case (camelCase aliases such as `allowHosts`, `hostEnv`, `hostCmd`,
-and `textValue` also work); environment variables use `PI_MSB_` with `__` for nesting.
-The following is a small **host-owned** configuration example:
+| Scope | Storage | Lifetime |
+| --- | --- | --- |
+| **Session** | Memory only | Until Pi `/reload`, session/workspace switch, or shutdown. Never restored from transcripts. |
+| **Project** | Host-owned `config.toml` for one canonical cwd | Until you change or remove it. |
+| **Global** | Host-owned `default.toml` | Baseline for all projects, until changed. |
 
-```toml
-# ~/.pi/agent/pi-microsandbox/default.toml (or a host-owned project override)
-image = "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c"
-pull_policy = "if-missing"
-bootstrap_tools = "auto"
-cpus = 4
-memory_mib = 8192
-idle_timeout_sec = 600
-fallback_mode = "block"
-show_footer = true # Default; set false to hide the MSB footer status.
+Normal precedence, lowest to highest:
 
-[network]
-mode = "default" # default | open | allowlist | deny
-allow_dns = true
+**built-ins → environment → Global → Project → Session**
 
-[docker]
-mode = "auto" # auto | require | disabled
-startup_timeout_ms = 15000
+An omitted field inherits. Nested tables override individual fields.
+**Lists in host-owned files replace lower-layer lists**; `[]` explicitly clears
+one. For agent edits, use `upsert`/`remove` to adjust an entry without replacing
+unrelated siblings. Don't copy the entire resolved configuration back into a file:
+that would turn inherited settings and credentials into new scope-owned defaults.
 
-# Prefer host sources over literal credentials.
-[[secrets]]
-env = "NPM_TOKEN"
-host_env = "NPM_TOKEN"
-allow_hosts = ["registry.npmjs.org"]
-```
+Applying an edit reloads this sandbox automatically. Other sessions pick up
+saved defaults on their next start/reload; there is no broadcast. A higher scope
+can shadow your edit without being cleared automatically.
+
+**Settings reload is not Pi `/reload`.** Actions → Reload settings keeps Session
+overrides. Pi's extension `/reload` clears them, so inherited policy may become
+more permissive. Persist lasting restrictions explicitly in Project or Global.
+The panel requires a running VM for Session edits; the agent setter can propose
+Session settings while inactive and may start a VM if `auto_start` is true.
 
 ## Host-owned project overrides
 
-Keep settings protected from unapproved sandbox writes outside the mounted
-cwd. Configuration tools can change them only after explicit user approval:
+By default, policy lives here:
 
 ```text
-<agent-dir>/pi-microsandbox/default.toml
-<agent-dir>/pi-microsandbox/projects/<home-relative-project-path>/config.toml
+~/.pi/agent/pi-microsandbox/default.toml
+~/.pi/agent/pi-microsandbox/projects/<home-relative-cwd>/config.toml
 ```
 
-`default.toml` supplies the **Global** baseline. The host-owned
-per-project `config.toml` supplies **Project** overrides. Both layers take precedence
-over environment variables, but not deliberate Session changes.
-For example, pin `fallback_mode = "block"` in `default.toml` and set a project's
-`memory_mib` in its host-owned override.
+For example:
 
-The agent directory comes from Pi's `getAgentDir()`: normally `~/.pi/agent`,
-with `PI_CODING_AGENT_DIR` and Pi's distribution-specific default respected.
-The default baseline location is `~/.pi/agent/pi-microsandbox/default.toml`.
-For a project at `~/Code/pi-microsandbox`, the project override location is:
+| Start Pi in… | Project override under `~/.pi/agent/pi-microsandbox/` |
+| --- | --- |
+| `~/Code/app` | `projects/Code/app/config.toml` |
+| `~/Code/app/server` | `projects/Code/app/server/config.toml` |
+| Your home directory | `projects/config.toml` |
+| `/srv/app` outside home | `projects-absolute/srv/app/config.toml` |
 
-```text
-~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/config.toml
-```
+Identity comes from **canonical `realpath(cwd)`**, not Git. Symlink aliases of
+the same directory share Project settings and the shared session boundary.
+Nested directories have separate identities: **no parent-policy inheritance**.
+Global remains unchanged. The agent can inspect origins and source locations so
+you don't need to guess the right file.
 
-The project identity and shared session boundary are determined by canonical
-`realpath(cwd)`, independent of Git. Symlink aliases of the same cwd use the
-same host file, but a nested cwd has a distinct identity and may need new
-explicit Project overrides. Parent Project overrides are not inherited; Global
-settings are unchanged. For example, `~/Code/app/subdir` uses
-`projects/Code/app/subdir/config.toml`, not `projects/Code/app/config.toml`.
-Projects outside home use `<agent-dir>/pi-microsandbox/projects-absolute/<absolute-project-path-without-leading-slash>/config.toml`
-instead, so `/srv/app` cannot collide with `~/srv/app`. There is no parent-policy
-search: each workspace has one exact host override location. A project whose
-root is home itself uses `projects/config.toml`.
+Pi's `getAgentDir()` selects the agent directory, including `PI_CODING_AGENT_DIR`
+and distribution-specific defaults. A host-selected symlink for that directory
+is supported; its canonical location anchors saves. Policy files and directories
+below it must not be symlinks. The lexical and canonical locations must stay
+outside the workspace and all writable mounts, including alias/ancestor paths
+that could replace the selected link. Retargeting the directory invalidates an
+open proposal; cancel and reopen it.
 
-For `~/Code/app`, create the override from a **host shell** (not sandbox bash):
+Both host-owned layers load regardless of Pi's project trust state. They do not
+sandbox project-local extensions or other code you choose to load on the host.
 
-```sh
-agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-mkdir -p -m 700 "$agent_dir/pi-microsandbox/projects/Code/app"
-# noclobber preserves an existing override; umask protects new files.
-(umask 077; set -C; printf 'cpus = 2\nmemory_mib = 2048\n' > \
-  "$agent_dir/pi-microsandbox/projects/Code/app/config.toml")
-```
+### When files appear
 
-Open `/msb` → Actions → Reload settings after external edits. Keep the agent directory outside the mounted
-workspace. A symlinked host-selected Pi agent directory is supported: its canonical
-location anchors the save targets. Policy files and directories below that anchor
-must not be symlinks. Both the original and canonical locations remain subject to
-workspace/writable-mount guards. Writable mounts also cannot expose physical
-ancestor entries or intermediate alias hops that could replace the selected agent
-link; read-only parents and unrelated sibling directories remain allowed.
-Retargeting or replacing the agent directory while
-a proposal is open invalidates it; cancel and reopen before applying.
+Setup, inspection, and reload create **no policy files or directories**. Saving
+Global settings creates only the saved assignments in `default.toml`, not a
+commented template. A Project save creates its override; Session creates nothing.
+Existing files—even empty ones—are left alone until explicitly saved.
 
-Both host-owned files are loaded regardless of Pi's project trust state. They
-are applied after launch settings, with the project-specific file after `default.toml`.
-**Session** places memory-only changes above both
-files, never in the transcript. They reset on session switch/end, including
-resuming the same session. This action is unavailable without a running sandbox.
-**`d` (inherit)** on a scalar proposes removal of the chosen scope's assignment;
-collections only support individual entry removal. Actions → **Reset Session
-overrides** clears only committed memory overrides, leaves Project/Global
-defaults unchanged, and reconfigures automatically after confirmation.
-Project/Global apply persists only the intended operation, preserving unedited
-secret sources without copying inherited credentials. Apply reloads this sandbox
-automatically; others pick up defaults on next start/reload. Higher overrides can
-shadow persisted defaults. See [apply scopes](commands.md#apply-scopes).
-Origins label committed settings. Status is read-only; its adoption timestamp
-changes only after successful adoption, not merely after persistence.
-Only explicitly configured fields override lower layers; omitted fields inherit
-from the preceding layers, including the host-owned default. Nested tables
-override individual fields. **Lists in both host-owned layers replace the entire
-lower-layer list**, including secrets, mounts,
-network hosts, and tool lists; `[]` clears a list.
+New saved files use mode `0600`, new directories `0700` (subject to a stricter
+umask). Saves revalidate targets, reject stale proposals, and replace files
+atomically. Changed saves preserve unknown keys but not original comments/layout;
+no-ops leave the file untouched. Portable filesystem checks cannot eliminate all
+host-process races: keep policy host-owned and inaccessible to guest writes.
+Unreadable or invalid configuration fails closed by default, not silently
+ignored. [Backend guarantees →](settings-backend.md#file-safety-and-bounded-guarantees)
 
-The default `pass_through_tools` list contains only `web_search`, `source_check`
-and `fetch_content`. Third-party `todo` and `ask_user_question` tools require
-explicit pass-through configuration; they are not allowed by default.
+## A small TOML starter
 
-For example, a host-owned npm policy can pin the relevant execution, host-access,
-and network settings as well as the secret:
+Create this from a **host editor**, outside the mounted workspace. Omit `image`
+to use the bundled digest-pinned default image.
 
 ```toml
-# ~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml
+# ~/.pi/agent/pi-microsandbox/default.toml
+cpus = 2
+memory_mib = 4096
 fallback_mode = "block"
-auto_start = true
-allow_host_execution = false
-allow_skill_reads = false
-block_third_party = true
-route_tools = ["read", "write", "edit", "ls", "find", "grep", "bash"]
-pass_through_tools = []
-host_env = []
-mounts = []
+show_footer = true
 
 [network]
-mode = "allowlist"
-allow_hosts = ["registry.npmjs.org"]
-allow_dns = true
-publish_ports = []
+mode = "default"
 
-[[secrets]]
-env = "NPM_TOKEN"
-host_env = "MY_PROJECT_NPM_TOKEN"
-allow_hosts = ["registry.npmjs.org"]
+[docker]
+mode = "auto"
 ```
 
-Make `MY_PROJECT_NPM_TOKEN` available to the host Pi process before launch.
-Each secret requires **exactly one** of these sources:
+After external edits, use `/msb` → Actions → **Reload settings**. Normal panel
+and agent-tool edits already reload automatically. A save can succeed while
+activation fails; inspect the result rather than assuming the VM adopted it.
 
-- `host_env` / `hostEnv`: the name of a host environment variable.
-- `text_value` / `textValue`: a literal string, used exactly as written. No
-  reference expansion occurs.
-- `host_cmd` / `hostCmd`: a trusted shell command run on the host; its stdout is
-  the secret, with trailing newlines removed.
+TOML uses snake_case; camelCase aliases also work. Agent-tool paths use
+snake_case, but structured entry keys use camelCase (`hostEnv`, `allowHosts`,
+`hostPath`, `guestPath`). Environment keys use `PI_MSB_` and `__` for nesting.
+The getter's schema is the complete, discoverable setting reference.
 
-**Deprecated API:** secret `value` and `$ENV:NAME` references are no longer
-supported. Use `textValue` for literal text and `hostEnv` for host variables.
-A `textValue` starting with `$ENV:` is literal text, not an environment lookup.
+## Networking
 
-`msb_config_get` exposes host variable names and command text, never the resolved
-credentials. `msb_config_set` can configure either host source; literal `textValue`
-input is rejected. Configure literals from a host-owned file or the human `/msb`
-panel instead. Metadata-only agent edits may retain an existing literal without
-seeing it. Do not embed credentials in `hostCmd`: its command text is visible to
-the agent. Getters, previews, and saves do not resolve or execute these sources.
+| `network.mode` | Meaning |
+| --- | --- |
+| `default` | Leave the Microsandbox SDK's default policy in place. Not an explicit allowlist. |
+| `allowlist` | Default-deny, with configured destination and optional DNS rules. |
+| `deny` | Disable VM networking. |
+| `open` | Allow all traffic, including private/host access. A deliberate boundary expansion. |
 
-For example, literal and command-backed secrets:
+```toml
+[network]
+mode = "allowlist"
+allow_hosts = ["registry.npmjs.org", "api.example.com"]
+allow_dns = true
+publish_ports = []
+```
+
+Network hosts accept **exact ASCII DNS names**, IP addresses, or CIDRs. No URLs,
+ports, wildcards, trailing dots, whitespace, or implicit subdomains. Use punycode
+for international domains. Add `api.github.com` separately from `github.com`.
+
+This is **DNS/IP matching, not per-request URL or TLS-hostname authorization**.
+Shared IPs and cached hostname state matter; destination rules are not HTTPS-only.
+With allowlist mode, `allow_dns = true` adds a separate TCP/UDP port 53 exception
+to the SDK Host destination. It does not filter DNS queries by service domain or
+promise protection against DNS exfiltration. Host/pass-through tools remain
+outside VM network policy.
+
+### Local servers and Docker ports
+
+Published ports default to loopback unless you specify another bind address:
+
+```toml
+[network]
+publish_ports = ["127.0.0.1:8080:8080"]
+```
+
+Create the outer mapping with the VM, and have the guest app listen on
+`0.0.0.0:8080`. For Docker, also use an inner mapping such as
+`docker run -p 0.0.0.0:8080:8080 …`. Docker `-p` alone exposes a port inside the
+microVM, not on your host; random Docker port mappings cannot create outer
+mappings. Nested-container egress stays behind the outer network policy.
+
+## Secrets: bring the source, not the value
+
+Prefer a host environment source:
 
 ```toml
 [[secrets]]
-env = "MY_HOST_SECRET"
-allowHosts = ["api.target.com"]
-textValue = "s3cre3t"
-
-[[secrets]]
-env = "GOOGLE_CLOUD_ACCESS_TOKEN"
-allowHosts = ["*.googleapis.com"]
-hostCmd = "gcloud auth print-access-token --quiet"
+env = "NPM_TOKEN"
+host_env = "PROJECT_NPM_TOKEN"
+allow_hosts = ["registry.npmjs.org"]
 ```
 
-Host commands run with Pi's host privileges and environment, **not inside the
-sandbox**. Use only trusted commands and ensure the command prints only the
-credential on stdout. Commands have a 10-second deadline and a 64 KiB combined
-stdout/stderr limit; nonzero exits, empty output, timeout or excessive output
-block sandbox creation without echoing command output. Configure host-specific
-paths explicitly; do not rely on the policy file's directory as the command's
-working directory. Missing host variables also block sandbox creation. Sources are resolved on
-sandbox creation/recreation, not during inspection, validation or saving; tokens
-are not refreshed automatically in a running sandbox. `/msb` → Actions shows
-redacted configuration and re-reads policy with Reload settings.
+Each secret requires exactly one source:
 
-Setup, reload and inspection do not create configuration files or their parent
-directories. Missing files use the built-in and environment defaults; existing
-files, including empty ones, are not rewritten or chmodded by setup. Saving a
-Global setting creates `default.toml` with the explicitly saved settings, without
-a commented template. Saving a Project setting creates only its project override;
-Session settings remain in memory and create no files. You can also create either
-host-owned file manually. New saved files use mode `0600` and new directories
-`0700` (subject to a more restrictive umask). Saving errors are reported rather
-than silently falling back to host execution. Without a project override, host
-defaults still apply.
-An unreadable or invalid host file fails closed rather than silently dropping
-that layer. Both host files must remain outside the workspace, including through
-symlinks. Writable extra mounts may not overlap the host policy directory,
-even when no policy files exist, including paths for other projects' future overrides.
-Keep the agent directory and secret files outside all writable mounts. Setting only `secrets` does **not** lock other
-permissions: pin those fields explicitly, as above. This feature does not disable
-explicit user controls such as Actions → Turn off or `PI_MSB_DISABLE`, and is not isolation
-from host code you independently choose to load or execute.
+| TOML source | What happens |
+| --- | --- |
+| `host_env` | Read the named variable from the host Pi process's environment. |
+| `host_cmd` | Run a trusted host shell command; use stdout with trailing newlines removed. |
+| `text_value` | Use literal text exactly as written. Human panel or host-file entry only. |
 
-## Other configuration behavior
+Secret `allow_hosts` must be nonempty. It accepts exact DNS names or one leading
+wildcard such as `*.example.com` (add the apex separately), not IP/CIDR rules.
+These scopes constrain TLS-verified credential substitution—**not network
+access**. Add network grants separately if needed. Restricting networking does
+not require deleting unrelated secrets.
 
-- Only canonical `realpath(cwd)` is bind-mounted read/write, with the lexically
-  resolved cwd as both guest root and command cwd. Writes reach the host
-  immediately. Git discovery never selects the root or automatically exposes
-  Git ancestors/siblings outside cwd. Git metadata within cwd remains exposed;
-  external linked-worktree/submodule metadata is not separately mounted, so
-  guest Git may need explicit setup or mounts. Explicit extra mounts and
-  user-approved host controls are separate from this cwd boundary.
-- `show_footer = true` uses Pi's single custom-footer slot so the MSB status can
-  appear in the upper-right corner. It replaces Pi's built-in footer (or another
-  extension's custom footer), preserves the standard location, usage, model,
-  and shared status fields, but cannot show Pi-only indicators such as the
-  auto-compaction and experimental-feature markers.
+Agent inspection exposes host variable names and host command text, **never
+resolved credentials or literal values**. The setter can configure `hostEnv` or
+`hostCmd`; it rejects `textValue`. Metadata-only upserts can retain an existing
+private source without revealing it. The human panel masks all source fields
+and never prefills them. Don't put credential bytes in command text or chat.
+
+Host commands execute with **Pi's host privileges and environment**, not inside
+the VM. Review their exact text before approval. They must print only the
+credential on stdout and finish within 10 seconds and 64 KiB combined output.
+Missing variables, nonzero exits, empty command output, timeouts, and excessive
+output block creation without echoing the credential. Don't rely on the policy
+file's directory as the command cwd.
+
+Sources resolve at VM creation/recreation, **not inspection or saving**. An
+approved edit may immediately recreate the VM and therefore resolve them during
+activation. Tokens do not refresh automatically in a running VM.
+Process-control variables such as `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DOCKER_HOST`,
+and `DOCKER_CONTEXT` cannot be forwarded or injected.
+
+## Extra mounts and environment
+
+Directory/file mounts require absolute host paths; guest paths default to the
+host path. Mounts default to read-only. For example:
+
+```toml
+[[mounts]]
+type = "dir"
+host_path = "/Users/me/Datasets/sample"
+guest_path = "/mnt/sample"
+readonly = true
+```
+
+Use your own path. `named` mounts take a volume name as `host_path`; `tmpfs`
+needs no host source. Supported options are `noexec`, `nosuid`, and `nodev`.
+Mounts cannot overlap the cwd bind or shadow reserved `/tmp`, protected system
+trees such as `/usr`, `/bin`, `/proc`, `/sys`, or Docker runtime paths such as
+`/run`, `/var/run`, `/var/lib/docker`. Host sources are canonicalized and sockets
+are rejected, including symlink aliases to host Docker sockets.
+
+Writable mounts expose real host data and may not expose the host policy
+directory—even before policy files exist, including future other-project files.
+Keep credential files outside writable mounts too. `host_env` forwards explicitly
+selected ordinary host environment variables; don't use it as a substitute for
+destination-scoped secrets.
+
+## Resources, tools, and other useful knobs
+
+- **Resources:** defaults are 4 CPUs and 8192 MiB. Reduce them if your host is
+  smaller. Resource changes may recreate the guest.
+- **Images:** the default includes Node.js, Python, Rust, and Go and is pinned to
+  an immutable image digest. Image versions are independent of package versions.
+  `pull_policy` is `if-missing` by default; `always` and `never` are supported.
+  [Choose or build an image →](images.md)
+- **Bootstrap:** `bootstrap_tools = "auto"` probes required commands and may
+  install missing ones using noninteractive `apt-get` under VM network policy.
+  `false` blocks with the missing command list. Prepare images ahead of time for
+  offline work. Docker is not installed by bootstrap.
+- **Docker:** `docker.mode` is `auto`, `require`, or `disabled`. Auto tolerates
+  images without Docker; require blocks if it is missing or cannot start.
+  `docker.startup_timeout_ms` is an integer from 1 to 300000 (default 15000).
+  Guest Docker state is disposable. [Storage →](storage.md)
+- **Tools:** routed defaults are `read`, `write`, `edit`, `ls`, `find`, `grep`,
+  and `bash`. Third-party tools are blocked by default except `web_search`,
+  `source_check`, and `fetch_content` pass-throughs. `todo` and
+  `ask_user_question` are not default exceptions. Permitted third-party tools
+  run outside the VM, without per-call host approval. [Safety →](safety.md)
+- **Footer:** `show_footer = true` uses Pi's single custom-footer slot. It keeps
+  common location/usage/model/shared status fields, but replaces other custom
+  footers and cannot reproduce every Pi-only indicator. Set false to hide it.
   The dot is green for an active sandbox, red when sandbox execution is blocked,
   and orange for other states, including sleep and explicit host execution.
   Flashing orange means booting or reloading configuration. Docker capability
   warnings alone do not turn an active sandbox red. While visible, the indicator
   periodically checks VM state without waking the guest; it is not a continuous
   health guarantee.
-- The default image is the complete Node.js, Python, Rust, and Go `1.1.0`
-  variant, pinned to its immutable multi-platform digest. Image releases have
-  an independent version stream from package releases. The default
-  `pull_policy = "if-missing"` pulls only when that exact reference is
-  absent from the Microsandbox cache. `"always"` and `"never"` are also
-  supported.
-  See [Images](images.md) for all published variants, exact tag patterns,
-  contents, custom image workflows, and the required guest commands.
-  `bootstrap_tools = "auto"` probes those commands and uses noninteractive
-  `apt-get` under the configured network policy when a custom image is missing
-  them. `false` blocks with the missing command list instead. New sandboxes use
-  4 CPUs and 8192 MiB by default; set `cpus` and `memory_mib` lower if the host
-  cannot support that allocation.
-- `docker.mode = "auto"` starts the guest daemon when the image has Docker and
-  reports `missing` for older or custom images without it. `"require"` blocks
-  sandbox preparation if Docker is absent or cannot start. `"disabled"` leaves
-  the installed daemon stopped. `startup_timeout_ms` must be an integer from 1
-  through 300000. Readiness is pinned to the managed guest Unix socket and
-  ignores inherited Docker client endpoint settings. Docker state stays on the
-  disposable guest root filesystem. Small builds should have at least 1 GiB; larger Compose stacks usually need
-  2 GiB or more.
-- `network.mode = "default"` leaves the SDK's default policy in place. `open`
-  allows all network traffic, including private/host access; `allowlist` is
-  default-deny with configured host/DNS rules; `deny` disables networking.
-  Published ports default to loopback unless a bind address is specified.
-  Nested containers remain subject to this outer policy. A Docker `-p` mapping
-  exposes a port only inside the microVM. Host access also needs a matching
-  `network.publish_ports` entry created with the sandbox, for example
-  `publish_ports = ["127.0.0.1:8080:8080"]` together with `docker run -p
-  0.0.0.0:8080:8080 ...`. Docker's random host-port form cannot create that
-  outer mapping.
-- Network `allow_hosts` accepts **exact ASCII DNS names**, e.g. `api.example.com`,
-  and IPv4/IPv6 addresses or CIDRs. Secret `allow_hosts` accepts exact DNS names
-  and wildcard subdomain scopes such as `*.googleapis.com` (a single leading
-  `*.` only), not IP/CIDR rules. Wildcards are passed to the SDK's secret host
-  pattern matcher; add the apex domain separately if needed. Neither list
-  accepts URLs, ports, whitespace or trailing dots; use punycode for international
-  domains. Exact names do not implicitly grant subdomains, and invalid scopes
-  fail closed at validation.
-  Domain network rules match cached hostnames for remote IPs, not HTTP URLs, and
-  do not restrict protocols/ports to HTTPS. With allowlist mode, `allow_dns = true`
-  adds a separate TCP/UDP port 53 rule to the SDK Host destination.
-- Secrets require a non-empty `allow_hosts` list. These destinations constrain
-  TLS-verified credential substitution, **not network access**: they do not add
-  exceptions to the network allowlist. Restricting networking does not require
-  clearing unrelated secrets. Secret sources are resolved only while constructing
-  the SDK builder. Effective config, warnings, errors, and the control panel
-  redact secret literals and resolved credential bytes. Agent tools expose
-  `hostEnv` names and `hostCmd` text as configuration metadata, while the human
-  effective-TOML diagnostic keeps source fields masked. Process
-  control variables such as `DOCKER_HOST`, `DOCKER_CONTEXT`, `PATH`,
-  `BASH_ENV`, and `LD_PRELOAD` cannot be forwarded with `host_env` or injected
-  as secrets.
-- Directory/file mounts use absolute host paths and guest paths (the guest path
-  defaults to the host path). Mounts default to read-only; writable host mounts
-  explicitly expose host data. `named` mounts use a volume name as `host_path`;
-  `tmpfs` mounts need no host path. Options support only `noexec`, `nosuid`, and
-  `nodev`; unsupported options block startup.
-  Mounts may not overlap or shadow the project mount,
-  reserved `/tmp`,
-  protected guest system trees such as `/usr`, `/bin`, `/proc`, and `/sys`, or
-  Docker runtime paths such as `/run`, `/var/run`, and `/var/lib/docker`.
-  Host mount sources are canonicalized before use; socket targets, including
-  Docker sockets reached through symlink aliases, are rejected.
+- **Lifecycle:** `auto_start = false` doesn't stop a running VM or hand tools to
+  the host. Explicit off mode does. Keep `fallback_mode = "block"` for fail-closed
+  operation; `"host"` opts into automatic unsandboxed execution after failure.
 
-Useful environment controls include:
+## Environment controls
+
+Set these in your **host shell before launching Pi**. Host Global/Project and
+Session settings take precedence, except `PI_MSB_DISABLE` remains authoritative.
 
 ```sh
-PI_MSB_DISABLE=1                 # explicit host/off mode
-PI_MSB_PULL_POLICY=always        # recheck mutable custom image tags on creation
-PI_MSB_NETWORK__MODE=deny        # nested environment key
-PI_MSB_DOCKER__MODE=require      # require a working guest Docker daemon
-PI_MSB_DOCKER__STARTUP_TIMEOUT_MS=30000
-PI_MSB_FALLBACK_MODE=host        # opt into automatic host fallback
-PI_MSB_SHOW_FOOTER=false         # hide the MSB status from Pi's footer
-PI_MSB_ROUTE_TOOLS='read,write'  # POSIX delimiter for simple arrays
+PI_MSB_NETWORK__MODE=deny pi
+PI_MSB_DOCKER__MODE=require pi
+PI_MSB_SHOW_FOOTER=false pi
 ```
 
-Do not put resolved secret values in logs, issue reports, or
-shell history.
+`PI_MSB_DISABLE=1 pi` deliberately runs in **unsandboxed host mode**. It is not a
+safe way to work around an error. Remove the variable and restart to enable the
+sandbox; saving settings cannot override it.
+
+## Coming from an older setup?
+
+- **In-repo `.pi-msb.toml` is ignored**, trusted project or not. Review and move
+  intended policy into the host-owned Project location; don't copy secrets or
+  broad permissions blindly.
+- **Older host Project files named `.pi-msb.toml` are not auto-migrated.** The
+  current exact target is `config.toml`. Inspect Sources and move intended
+  assignments from a host editor. Cwd identity may also have changed.
+- **Secret `value`, `$ENV:`, and `$FILE:` references are no longer supported.**
+  Use `host_env`, `host_cmd`, or `text_value`. Reference-looking text inside
+  `text_value` stays literal; it performs no lookup.
+- **Legacy host inputs still work:** `$XDG_CONFIG_HOME/pi-msb/config.toml`
+  (normally `~/.config/pi-msb/config.toml`) and `PI_MSB_CONFIG_FILE`. Relative
+  explicit paths resolve from cwd; the file must still be outside the workspace.
+  Their order is built-ins → legacy XDG → explicit file → environment → internal
+  CLI overrides → host Global → host Project → Session. New approved saves target
+  host Global/Project files, not these compatibility inputs.
+- **No Git-root search or workspace modes.** Only cwd is mounted. Nested cwd
+  doesn't inherit parent Project policy, and external worktree metadata isn't
+  separately mounted. [Storage and legacy-volume recovery →](storage.md)
+- **`/msb` is now the panel, not a subcommand family.** Use its Actions tree for
+  lifecycle controls and agent tools for approved settings edits.

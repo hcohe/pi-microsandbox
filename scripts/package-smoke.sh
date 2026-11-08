@@ -43,10 +43,12 @@ cat >"$MANIFEST" <<'EOF'
 LICENSE required
 README.md required
 SECURITY.md required
+docs/agent-recipes.md required
 docs/commands.md required
 docs/configuration.md required
 docs/development.md required
 docs/getting-started.md required
+docs/google-cloud.md required
 docs/images.md required
 docs/safety.md required
 docs/settings-backend.md required

@@ -1,166 +1,162 @@
-# Safety model
+# Small VM. Real boundaries.
 
 [Back to README](../README.md)
 
-The default is fail-closed:
+A sandbox is useful when you know what stays inside—and what doesn't. Here's
+our deal, without the force-field marketing.
 
-- Configuration, including host-owned defaults and project overrides, is
-  resolved before a sandbox starts. A boot, image,
-  configuration, or tool failure blocks the seven routed tools
-  (`read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash`). Failure never
-  silently falls back to host execution. A streamed command must provide an
-  explicit integer exit code; a truncated or malformed completion is an error,
-  even when partial output was received. Failed streams receive bounded,
-  best-effort handle/iterator cleanup and are never retried on the host.
-- `execution_target = "host"` is an opt-in escape for routed tool calls. While
-  a sandbox is active it requires interactive approval for the exact tool,
-  working directory, and recursively sorted arguments. It is unavailable in
-  headless operation and is never silently selected. The approval prompt uses
-  theme-colored labels, a Bash command in the theme's string color (orange in
-  the dark theme), syntax-highlighted JSON arguments for other tools, and a
-  prominent isolation warning in the terminal. Bash
-  prompts omit execution options such as timeout; approval still binds all
-  arguments. Terminal control characters in commands are shown as escapes.
-  **No** is selected by default; Escape
-  also denies the request.
-- `/msb` → Actions → Turn off is an explicit host-mode handoff and asks for
-  confirmation before stopping/removing the guest. This is
-  different from `fallback_mode = "host"`, which automatically uses host tools
-  after a sandbox failure and is shown as `MSB host fallback`. Both are
-  unsandboxed controls, not workspace settings.
-- Session or working-directory replacement immediately invalidates host
-  approvals and host-read grants. New routed calls stay blocked during setup;
-  successful setup admits them using the current directory. Already-admitted
-  sandbox calls may finish before their old transport is retired.
-- A project cannot replace another process's sandbox: ownership is a
-  non-blocking kernel `flock` acquired before sandbox mutation. The small
-  bundled POSIX addon is loaded lazily, has no install script, and never falls
-  back to a racy PID check. Failed runtime retirement relinquishes cleanup
-  authority: later shutdown must not remove a same-name resource now owned by
-  another process. Recovery or pruning must reacquire and validate ownership.
+## Fail closed by default
 
-pi-microsandbox bind-mounts only canonical `realpath(cwd)` read/write, with the
-lexically resolved cwd as both guest root and command cwd. It does not discover
-Git roots or automatically expose Git ancestors or siblings outside cwd.
+With the default `fallback_mode = "block"`, failed configuration, startup,
+images, or tool execution block routed tools: `read`, `write`, `edit`, `ls`,
+`find`, `grep`, and `bash`. A broken VM is **not** permission to retry on your
+host. Malformed/truncated command completion is an error even if some output
+arrived; cleanup is best-effort and never becomes a host retry.
 
-This mount deliberately exposes host files within cwd, including `.git`,
-untracked files, and secrets such as `.env`. Writes are immediately visible on
-the host, and sessions with overlapping binds can read or overwrite the same
-files. Use separate host worktrees or checkouts for independent files. Unsafe
-root mappings fail startup rather than silently selecting another root.
+There are explicit ways to leave that boundary:
 
-Git metadata within cwd remains exposed but never selects the bind. External
-linked-worktree/submodule metadata is not separately mounted; Git in the guest
-may need explicit setup or mounts. Explicit extra mounts and user-approved host
-controls can widen access separately from the cwd bind. This boundary is not a
-guarantee against every sandbox escape.
+| Control | What you authorize |
+| --- | --- |
+| Routed call with `execution_target = "host"` | One exact tool/cwd/argument set, with interactive No-first approval when the sandbox is active. Headless use is unavailable. |
+| `/msb` → Actions → Turn off | An explicit handoff to unsandboxed host tools after confirmation. |
+| `PI_MSB_DISABLE=1` | Launch in explicit unsandboxed off mode. |
+| `fallback_mode = "host"` | Automatic unsandboxed tool execution after sandbox failure, visibly marked as host fallback. |
+| Pass-through tools / permitted third-party tools | Execution outside the VM, without per-call host approval. |
+
+Keep block mode for untrusted work. The default pass-throughs are `web_search`,
+`source_check`, and `fetch_content`; other third-party tools are blocked unless
+you explicitly allow them. Host/pass-through tools are outside VM network rules.
+Project-local extensions and other code you choose to load on the host aren't
+sandboxed by this configuration layer.
+
+Session/cwd replacement immediately invalidates host approvals and host-read
+grants. New routed calls stay blocked during setup; admitted old sandbox calls
+may finish before their transport is retired. An approval for yesterday's cwd
+is not permission for a replacement directory.
+
+## Your cwd is a live read/write bind
+
+The host source is **canonical `realpath(cwd)`**. The lexically resolved cwd
+path is both the guest root and command cwd. No Git-root discovery, no automatic
+Git ancestors/siblings, no export/sync phase. Writes reach host files immediately.
+Unsafe path layouts fail startup instead of silently selecting another root.
+
+Everything inside cwd is exposed: `.git`, ignored files, untracked files,
+configuration, and secrets. Overlapping sessions share those host files. Separate
+worktrees/checkouts give you independent changes, not automatic secret isolation.
+
+External linked-worktree/submodule metadata is not separately mounted. Guest Git
+may need explicit setup or mounts. Metadata inside cwd stays accessible but never
+selects the bind. Extra mounts and approved host controls can widen access.
 
 ### Local files and secrets are your responsibility
 
-pi-microsandbox does not manage local-file security: it does not hide, filter,
-or restrict access to `.env` files or other sensitive information inside the
-mounted workspace. Git ignore rules do not prevent the sandbox from reading
-those files.
+**A `.gitignore` is not a secret filter.** Neither is the VM boundary for a file
+you deliberately mount inside it. pi-microsandbox doesn't hide `.env` files or
+scrub your checkout. Put only credentials the agent may access in that tree.
 
-We recommend [Worktrunk](https://worktrunk.dev/) for managing separate worktrees
-and automating per-project or per-worktree setup with hooks. Use that workflow
-to prepare a dedicated `.env` containing only credentials the agent may access,
-and review it before starting Pi. Avoid copying production secrets into agent
-worktrees. Worktrunk is workflow tooling, not a secret-filtering security boundary;
-any sensitive file placed in the mounted workspace remains accessible.
+[Worktrunk](https://worktrunk.dev/) can help manage worktrees and setup hooks,
+including a dedicated `.env` per worktree. It is workflow tooling, not secret
+isolation. Avoid copying production credentials into agent worktrees.
 
-The extension entry point does not import the native SDK or load the flock
-addon. Unsupported hosts can still load Pi and remain blocked or explicitly
-off. pi-microsandbox supports Apple Silicon macOS and GNU Linux x86_64 or arm64
-with KVM; Windows, Intel macOS, and musl Linux are not supported.
+## Keep policy on the host
+
+**Global** and **Project** files live under Pi's host-owned agent directory,
+outside the workspace and writable mounts. **Session** overrides are memory-only
+and higher priority. Lists in host-owned files replace lower lists. Unspecified
+fields aren't locked: configuring a secret doesn't also pin host fallback,
+networking, or tool permissions. [Configuration →](configuration.md)
+
+No files are created by setup, reload, or inspection. Approved persistent saves
+use atomic replacement, mode `0600` files and `0700` new directories, rechecking
+identity, target safety, and external changes. A selected-agent-directory symlink
+is supported; policy descendants cannot be symlinks. Writable mounts cannot
+expose policy roots or paths that let the guest replace their aliases, even if
+files haven't been created yet. Host-process filesystem races aren't completely
+preventable; the directory must remain host-controlled.
+
+Session restrictions reset on Pi `/reload`, session/workspace switch, or
+shutdown; transcript resume doesn't restore them. Ordinary settings reload keeps
+them. Persist lasting restrictions in Project or Global. Nested cwd has a
+separate canonical Project identity and shared session boundary, with **no parent
+Project inheritance**; Global stays unchanged.
 
 ## Approved configuration tools
 
-`msb_config_get` is read-only, including headless use. `msb_config_set` can edit
-one explicit Session/Project/Global setting only after a fresh sanitized
-Cancel-first review; host-execution permission never substitutes for approval.
-The tool confirmation shows the masked diff without semantic warning lines.
-Relevant safety/impact warnings remain in review metadata and are returned in
-agent-visible text after completion (including saved-but-not-activated outcomes),
-so the agent can advise the user. Human setter result rows also omit warning
-blocks; getter inspection warnings are unchanged.
-No UI means no mutation. Secret sources and arbitrary unknown raw values
-are not exposed. Changed files/session identity/Session settings invalidate approval;
-conflicts never silently retry. Only these two exact tool names bypass the
-third-party tool gate, not other host tools or `msb_*` prefixes. See
-[schemas, review navigation and truthful save/reload outcomes](tools.md).
+`msb_config_get` is read-only, including headless use. `msb_config_set` requires
+fresh explicit No-first approval for every scoped operation or batch. Existing
+host-execution permission doesn't waive approval. No interactive UI means no
+mutation. Changed files, session identity, overrides, or runtime invalidate the
+proposal; it isn't silently rebased or retried.
 
-## Host-owned configuration
+The tool dialog shows the scope, masked diff, and executable host commands for
+authorization. Relevant impact warnings are returned to the agent after
+completion, not included as warning lines in that dialog; ask it to explain them.
+A save and runtime adoption are separate outcomes. Failed activation does not
+undo an already saved setting and never authorizes host fallback.
 
-Use [host-owned defaults and project overrides](configuration.md#host-owned-project-overrides)
-under Pi's agent directory to pin security-sensitive fields. Keep configuration
-outside the mounted cwd and all writable mounts.
-Setup, reload and inspection do not create configuration files or directories.
-A missing `default.toml` is created only when saving Global settings; Project saves
-create only their override, and Session changes create no files. Existing files
-(even empty ones) are preserved until explicitly edited. New saved files use mode
-`0600` and new directories `0700`; configuration errors still fail closed.
-`pi-microsandbox/default.toml` supplies Global defaults; a host-owned per-project
-file supplies Project overrides. Both take precedence over launch environment/CLI settings;
-deliberate Session changes sit above both files, last only for the current
-session and are not written to its transcript. Host lists replace rather than
-extend lower-layer lists. `PI_MSB_*`
-environment variables and session `/msb` controls are also supported.
-Panel saves revalidate canonical host targets and workspace/mount guards, reject
-symlink targets/ancestors and external changes, and replace files atomically with
-mode 0600 (new directories 0700). Portable filesystem checks cannot prevent every
-host-process race; the policy directory must remain host-owned and inaccessible
-to guest writes. Save confirmation is a security decision: open networking,
-pass-through tools, host fallback and writable mounts widen the boundary.
-The human panel uses masked secret entry and never prefills source fields.
-Agent tools can read and configure host variable names and host commands, but
-cannot read or set literal `textValue` credentials. Do not embed credentials in
-host commands: their text is visible to the agent. A secret's host command runs
-with Pi's host privileges, not in the sandbox; approve only trusted commands.
-Inspection and settings saves never execute them.
-Configured secret bytes are redacted from recent log display, but guest application
-logs may contain other sensitive data. Do not share logs blindly.
+`msb_diagnostics` provides passive, cached recovery information without commands,
+SDK loading, file/environment reads, logs, credentials, or VM startup. These three
+exact management-tool names receive an exemption only when registration
+provenance resolves to this extension's actual entry module. An arbitrary
+`msb_*` tool or foreign registration doesn't inherit it. [Tool contract →](tools.md)
 
-Unspecified settings are **not** locked. Missing overrides preserve the usual
-configuration behavior; unreadable or invalid overrides fail closed.
+## Credentials: know which parts are private
 
-Keep policy files and their symlink targets outside the mounted workspace. Extra
-writable mounts may not overlap the policy directory, even when no policy files
-exist, including locations for other projects' future overrides. Keep policy and
-credential files outside writable mounts. A project override applies to one
-canonical cwd identity, which also determines the shared session boundary,
-not to arbitrary other directories or host processes. Nested cwd may need new
-explicit Project overrides; parent overrides are not inherited and Global is
-unchanged. Explicit user host-mode controls remain available. Project trust also permits Pi to load project-local extensions;
-this configuration layer does not sandbox such host-side code.
+Literal credential values and resolved bytes are hidden from agent configuration
+outputs. **Host variable names and host command text are visible metadata.**
+The agent can configure those sources but cannot submit literal `textValue`
+credentials. Use the human panel or a host-owned file for literals.
 
-## Docker inside the guest
+A `hostCmd` runs with Pi's **host privileges**, not inside the guest. Review only
+trusted commands and never embed credentials in their text. Inspection and saving
+don't execute them; VM creation/recreation resolves sources, including during
+activation after an approved save. Tokens aren't automatically refreshed in a
+running VM. Secret destination scopes limit credential substitution, not network
+access, and do not protect secret files in the mounted cwd.
 
-The Docker daemon runs inside the microVM and listens only on the guest Unix
-socket. Access to that socket is root-equivalent inside the guest, not on the
-host. Readiness probes explicitly select that socket and reject unverified
-socket ownership. Docker and process-control environment variables are cleared
-for preparation, and configuration cannot forward them. Mounts that shadow
-protected guest executables or Docker runtime paths are rejected. The extension
-never mounts the host Docker socket, starts a host daemon, or copies host Docker
-configuration and registry credentials into the guest.
+Configured credential bytes are redacted from recent-log display, but arbitrary
+application logs can contain other sensitive data. Share minimal, reviewed,
+redacted evidence—not a complete log dump.
 
-A nested container can still reach anything mounted into the microVM, including
-the entire selected workspace and explicitly configured mounts. Treat a
-Dockerfile or Compose file as guest-root code and use read-only extra mounts
-where possible. Container egress remains behind the Microsandbox network
-policy.
+## Network policy is not a URL firewall
 
-## Host-read exceptions
+Network rules match exact DNS names via remote-IP hostname/cache state, or
+explicit IP/CIDR destinations. They are not per-request URL/TLS-hostname
+authorization and don't restrict traffic to HTTPS. Shared IPs/cache state matter.
+Enabled DNS adds a separate runtime-host TCP/UDP port 53 exception, not a
+service-domain query filter or a DNS-exfiltration guarantee.
 
-Pi-discovered `SKILL.md` reads are a narrow host-read exception. A standalone
-skill grants only its exact file; a directory skill grants regular files
-canonically below its directory. Symlink escapes, devices, sockets, and
-unrelated host paths are denied. A successful sandbox Bash/grep result may
-record one exact generated `details.fullOutputPath`; neighboring files do not
-become readable.
+Desired policy is not proof of active enforcement. Adopted policy is last-known;
+reconnected VMs may have unverified network state. No-op/live-only edits don't
+verify it. Connectivity tests prove only the destinations tested.
+[Network configuration →](configuration.md#networking)
 
-## Reporting vulnerabilities
+## Docker lives inside the guest
 
-Report suspected vulnerabilities privately. See the
-[security policy](../SECURITY.md); do not open a public issue.
+The daemon uses the guest Unix socket. It's root-equivalent **inside the VM**,
+not on your host. The extension never mounts the host Docker socket, starts a
+host daemon, or copies host Docker configuration/registry credentials into the
+guest. Preparation clears Docker/process-control environment variables; config
+cannot forward them or shadow protected runtime paths with mounts.
+
+Nested containers can still reach the workspace and extra mounts. Treat Docker
+and Compose files as guest-root code with access to that data. Use read-only
+extra mounts where possible. Container egress remains behind outer VM policy.
+
+## Narrow host reads and ownership
+
+When allowed, Pi-discovered skills are a narrow host-read exception: a standalone
+skill grants its exact `SKILL.md`; a directory skill grants regular files
+canonically below that directory. Symlink escapes, sockets, devices, and unrelated
+paths are denied. A successful sandbox Bash/grep result can grant its exact
+`details.fullOutputPath`, never neighboring files.
+
+Sandbox mutations require a nonblocking kernel `flock` and verified managed
+labels. One process cannot replace another live owner's VM, and locking never
+falls back to a racy PID check. Failed retirement relinquishes cleanup authority;
+recovery/pruning must reacquire and verify ownership. Legacy named volumes are
+not automatically deleted.
+
+This is not a guarantee against every sandbox escape. Report suspected
+vulnerabilities [privately](../SECURITY.md), not in a public issue.

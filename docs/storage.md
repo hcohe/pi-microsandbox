@@ -1,62 +1,68 @@
-# Workspace storage
+# Where your files actually live
 
 [Back to README](../README.md)
 
 ## One read/write workspace
 
-There are no workspace modes. pi-microsandbox bind-mounts only the current
-working directory: the host source is canonical `realpath(cwd)`, and both the
-guest root and command cwd use the lexically resolved cwd path. The bind is
-read/write. Writes are immediately visible in the host directory; there is no
-export or synchronization step.
+No syncing. No export button. **Edits are already on your host.**
 
-Git root discovery is not used. Starting Pi in a Git subdirectory exposes that
-directory, not its Git ancestors or siblings outside cwd. Files within cwd,
-including `.git`, untracked files, and secrets such as `.env`, remain exposed.
-Sessions with overlapping cwd binds can read or overwrite the same host files.
-Use separate host worktrees or checkouts when tasks need independent files.
+pi-microsandbox mounts only canonical `realpath(cwd)` read/write. Its lexically
+resolved cwd path is both the guest root and command cwd. There are no workspace
+modes or Git-root discovery: starting in `app/server` exposes that directory,
+not its Git ancestors or sibling directories outside cwd.
 
-Canonical cwd also determines the Project configuration identity and shared
-session boundary. A nested cwd has its own identity and may need new explicit
-Project overrides; parent overrides are not inherited. Symlink aliases of the
-same canonical cwd share that identity. Global settings are unchanged. See
-[project overrides](configuration.md#host-owned-project-overrides).
+| Data | Where it lives | Survives VM removal? |
+| --- | --- | --- |
+| Files in cwd | Host read/write bind | **Yes**, including edits/deletions |
+| Extra host mounts | Host paths you explicitly expose | **Yes**, including permitted writes |
+| Ordinary guest-local files | VM root filesystem | No |
+| Inner Docker images, containers, cache | Guest `/var/lib/docker` | No |
+| Session setting overrides | Extension memory | Yes within the same Pi session; cleared by reset, Pi `/reload`, session/workspace switch, or shutdown |
+| Project/Global settings | Host-owned agent directory | Yes |
 
-Local-file security is up to you: pi-microsandbox does not hide `.env` files or
-other sensitive information in that read/write mount. We recommend
-[Worktrunk](https://worktrunk.dev/) for managing worktrees and setup hooks, such as
-preparing a dedicated `.env` per project or worktree. Include only credentials
-the agent may access; neither worktree separation nor Git ignore rules protect
-secrets placed inside the mounted tree. See the [safety model](safety.md#local-files-and-secrets-are-your-responsibility).
+Everything inside cwd stays visible: `.git`, `.env`, ignored files, and
+untracked files. Git ignore rules do not protect secrets. Sessions with
+overlapping binds can overwrite each other's files. Separate host worktrees or
+checkouts are your friend when tasks need independent changes.
 
-Git metadata inside cwd remains exposed, but never selects the bind root.
-Linked-worktree or submodule metadata outside cwd is not mounted separately;
-Git commands in the guest may require explicit setup or mounts. Extra mounts
-and user-approved host controls are separate from the cwd bind and can widen
-access. An unsupported path or symlink layout fails startup instead of silently
-selecting a different root or host execution.
+[Worktrunk](https://worktrunk.dev/) can help manage worktrees and setup hooks,
+such as preparing a dedicated `.env` with only agent-appropriate credentials.
+It isn't secret filtering; sensitive files placed in the mount remain accessible.
+[Safety guide →](safety.md#local-files-and-secrets-are-your-responsibility)
 
-## Inner Docker state
+## Cwd, Git, and Project identity
 
-Docker stores images, layers, containers, and build cache under
-`/var/lib/docker` on the sandbox root filesystem. It uses the `vfs` storage
-driver because nested overlay filesystems and project-backed mounts cannot be
-assumed to support `overlay2`. This state disappears when the sandbox is
-removed and is not written to the project mount. Separate sessions do not share
-an inner Docker cache.
+Canonical cwd determines the Project settings identity and shared session
+boundary. Symlink aliases share that identity; nested cwd does not inherit its
+parent's Project overrides. Global remains unchanged.
+[Project paths →](configuration.md#host-owned-project-overrides)
 
-Containers started inside the microVM can reach the mounted workspace. Treat
-Dockerfiles and Compose files as code with access to the entire selected root.
+Git metadata inside cwd is exposed but never chooses the bind. Linked-worktree
+or submodule metadata outside cwd is **not mounted separately**, so Git in the
+guest may need explicit setup or reviewed mounts. Extra mounts and approved host
+controls widen access separately. An unsafe cwd/symlink layout fails startup;
+it doesn't silently select another root or run on the host.
+
+## Docker's cupboard is disposable
+
+Inner Docker uses the guest `/var/lib/docker` and the `vfs` storage driver;
+nested overlay filesystems aren't assumed to support `overlay2`. Removing or
+recreating the VM discards images, layers, containers, and build cache. Sessions
+don't share this cache. Guest-root state isn't stored in your project bind.
+
+Containers can still reach host-backed mounts, including the workspace. Treat
+Dockerfiles and Compose files as code with access to those files. VM recreation
+is not a way to undo host writes.
 
 ## Upgrading from named Git volumes
 
-Older releases could keep Git workspaces in named `pi-msb-vol-*` volumes. The
-new workspace behavior does not reconnect, migrate, or delete those volumes.
-They may contain the only copy of unexported work.
+Older releases could keep workspaces in `pi-msb-vol-*` named volumes. Current
+versions do not reconnect, migrate, export, or delete them. They may hold the
+**only copy of unexported work**.
 
-Before upgrading, while the old `/msb volumes` and `/msb export` commands are
-still available, inventory every retained volume and export or copy any work
-you need. After upgrading, use Microsandbox itself:
+Before upgrading, use the old version's `/msb volumes` and `/msb export` to
+inventory and rescue needed work. If you've already upgraded, use the
+Microsandbox CLI from a trusted **host shell**:
 
 ```sh
 msb volume ls
@@ -68,12 +74,13 @@ msb run --name pi-msb-recovery \
 msb rm pi-msb-recovery
 ```
 
-Verify the copied files, then remove the old volume with:
+Copy the exact volume name from `msb volume ls`; a mistyped named mount can
+create a new empty volume. Use an empty recovery directory and an already-cached
+recovery image if `alpine` is unavailable. This is a manual runtime operation,
+not something current `/msb` manages.
+
+**Verify the recovered files before deleting the original volume.** Only then:
 
 ```sh
 msb volume rm pi-msb-vol-REPLACE_ME
 ```
-
-Copy the exact name from `msb volume ls`: a mistyped named mount can create a
-new empty volume. Choose an already-cached recovery image if `alpine` is
-unavailable. pi-microsandbox no longer lists, removes, or exports volumes.

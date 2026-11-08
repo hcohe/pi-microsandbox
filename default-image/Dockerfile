@@ -14,7 +14,10 @@ ARG IMAGE_VARIANT
 ARG TOOLCHAINS
 ARG UBUNTU_SNAPSHOT
 
-ENV CARGO_HOME=/usr/local/cargo \
+# Follow the system trust store when Microsandbox adds its runtime interception CA.
+ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_HOME=/usr/local/cargo \
     GOPATH=/go \
     GOTOOLCHAIN=local \
     LANG=C.UTF-8 \
@@ -67,6 +70,7 @@ RUN set -eux; \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         file \
         git \
         ripgrep \
@@ -82,6 +86,8 @@ COPY verify/ /opt/pi-image-verify/
 RUN set -eux; \
     test -n "${IMAGE_VARIANT}"; \
     /opt/pi-image-install/docker.sh; \
+    /opt/pi-image-install/gcloud.sh; \
+    /opt/pi-image-install/aws.sh; \
     /opt/pi-image-install/dispatch.sh "${TOOLCHAINS}"; \
     rm -rf /opt/pi-image-install; \
     /opt/pi-image-verify/dispatch.sh "${IMAGE_VARIANT}" "${TOOLCHAINS}"; \
@@ -118,7 +124,10 @@ LABEL org.opencontainers.image.source="https://github.com/hcohe/pi-microsandbox"
 
 COPY --from=assembled / /
 
-ENV CARGO_HOME=/usr/local/cargo \
+# COPY carries files, not the assembled stage's ENV. Keep runtime trust configured.
+ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_HOME=/usr/local/cargo \
     GOPATH=/go \
     GOTOOLCHAIN=local \
     LANG=C.UTF-8 \

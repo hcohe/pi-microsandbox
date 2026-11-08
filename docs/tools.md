@@ -1,6 +1,19 @@
-# Diagnostics and configuration tools
+# Agent tool reference
 
-[Back to README](../README.md)
+[Back to README](../README.md) · [Copy-and-paste agent recipes](agent-recipes.md)
+
+Want to configure the sandbox in plain English? Start with the recipes. This
+page is the precise contract for tool arguments, approval, and results.
+
+| Tool | Job | Needs approval? |
+| --- | --- | --- |
+| `msb_diagnostics` | Passive cached report, even when sandbox execution is blocked | No |
+| `msb_config_get` | Inspect settings, schemas, origins, desired/adopted policy | No |
+| `msb_config_set` | Propose one scoped edit or an atomic same-scope batch | **Every call**, through interactive UI |
+
+Use **Session** for memory-only changes, **Project** for this exact canonical
+cwd, and **Global** for a saved baseline. Inspect first, propose the smallest
+change, then distinguish saved policy from successful runtime activation.
 
 The model can discover and inspect settings with **`msb_config_get`** and propose
 one operation or an atomic same-scope batch with **`msb_config_set`**. Use
@@ -66,8 +79,14 @@ Examples:
 
 ```json
 {"sections":["summary","desired","policy"],"paths":["network"]}
+```
+
+```json
 {"sections":["schema"],"paths":["network.mode","secrets"],"format":"json"}
-{"sections":["desired","runtime"],"paths":["cpus"],"knownSchemaVersion":2}
+```
+
+```json
+{"sections":["desired","runtime"],"paths":["cpus"]}
 ```
 
 The selected inventory contains:
@@ -160,9 +179,21 @@ Examples:
 
 ```json
 {"scope":"project","path":"cpus","operation":"set","value":4}
+```
+
+```json
 {"scope":"session","path":"network.allow_hosts","operation":"upsert","value":"api.example.com"}
+```
+
+```json
 {"scope":"project","path":"secrets","operation":"upsert","value":{"env":"SERVICE_TOKEN","hostEnv":"SERVICE_TOKEN","allowHosts":["api.example.com"]}}
+```
+
+```json
 {"scope":"global","path":"mounts","operation":"remove","identity":"/mnt/cache"}
+```
+
+```json
 {"scope":"project","path":"cpus","operation":"inherit"}
 ```
 

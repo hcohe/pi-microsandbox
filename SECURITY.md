@@ -63,9 +63,9 @@ artifacts, so a private report is not a reason to include unnecessary secrets.
 execution is blocked. It does not execute host or secret commands, load the native
 SDK, fetch logs, read configuration files or environment values, start a VM, or
 change policy. Reports redact literal credentials, bound output, and identify
-unknown checks instead of exposing raw exceptions. Host variable names and host
-command source text are intentionally readable metadata; do not embed credentials
-in command text.
+unknown checks instead of exposing raw exceptions. Unlike passive diagnostics,
+configuration inspection exposes host variable names and host command source text
+as readable metadata; do not embed credentials in command text.
 
 Diagnostic access does not grant general host execution. Only exact tool names
 registered by this extension receive the management-tool exemption. Settings

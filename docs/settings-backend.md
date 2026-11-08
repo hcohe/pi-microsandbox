@@ -34,8 +34,9 @@ intentional approval, review and reload differences.
   injected/third-party control adapters compatible). Construct one per integration,
   never one per screen. The internal `temporary` layer is the public **Session**
   scope, not a fourth scope. `MsbIntegration.endSession()` clears it.
-- `SETTINGS_PATHS` enumerates every public schema leaf in TOML spelling. `network`
-  and `docker` are individual leaf fields; arrays are complete collections.
+- `SETTINGS_PATHS` enumerates every public schema leaf in TOML spelling, including
+  dotted leaves such as `network.mode` and `docker.mode`. Bare `network`/`docker`
+  groups are inspection filters, not writable leaves; arrays are complete collections.
 - `await editor.open("temporary" | "project" | "global")` captures raw target
   data, the effective baseline, and a draft revision. No file is created.
 - `draft.set(path, value)` marks exactly one schema leaf dirty. For arrays this
