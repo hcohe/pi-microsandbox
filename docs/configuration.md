@@ -244,6 +244,12 @@ from host code you independently choose to load or execute.
   extension's custom footer), preserves the standard location, usage, model,
   and shared status fields, but cannot show Pi-only indicators such as the
   auto-compaction and experimental-feature markers.
+  The dot is green for an active sandbox, red when sandbox execution is blocked,
+  and orange for other states, including sleep and explicit host execution.
+  Flashing orange means booting or reloading configuration. Docker capability
+  warnings alone do not turn an active sandbox red. While visible, the indicator
+  periodically checks VM state without waking the guest; it is not a continuous
+  health guarantee.
 - The default image is the complete Node.js, Python, Rust, and Go `1.1.0`
   variant, pinned to its immutable multi-platform digest. Image releases have
   an independent version stream from package releases. The default

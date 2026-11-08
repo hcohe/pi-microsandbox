@@ -42,6 +42,7 @@ export interface SandboxManagerDeps {
   disposed?(): void;
   /** Successful adoption, or conservative loss of VM-instance certainty after inspection. */
   adopted?(request: BootRequest, verification: "created" | "reconnected" | "live"): void;
+  onState?(state: RuntimeState): void;
   now?: () => number;
 }
 
@@ -174,6 +175,28 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   let activeUses = 0;
   let pendingUses = 0;
   const usageDrainWaiters: Array<() => void> = [];
+  let observation: RuntimeState["observation"];
+  let revision = 0;
+  let pendingLifecycle = 0;
+  let passiveInspection: Promise<InspectedSandbox | null> | undefined;
+
+  function notifyState(): void {
+    try { deps.onState?.(manager.getState()); }
+    catch { /* Display observers must never change execution or cleanup. */ }
+  }
+
+  function publish(next: RuntimeState): RuntimeState {
+    state = next;
+    observation = undefined;
+    notifyState();
+    return state;
+  }
+
+  function observe(next: RuntimeState["observation"]): void {
+    if (observation === next) return;
+    observation = next;
+    notifyState();
+  }
 
   // Lifecycle transitions are serialized, but the tool callback itself is not
   // put on this queue. This permits concurrent guest commands while ensuring a
@@ -183,6 +206,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   // Failed-generation cleanup must not hold the preflight queue: an active
   // callback may be awaiting a reentrant preflight on that same queue.
   let retirement: Promise<void> = Promise.resolve();
+
+  function beginLifecycle(): void {
+    revision += 1;
+    pendingLifecycle += 1;
+    if (state.status === "active") observe("unknown");
+  }
 
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const result = lifecycle.then(fn, fn);
@@ -204,11 +233,11 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
   function setFailure(request: BootRequest | null, error: unknown): RuntimeState {
     const reason = redactMessage(error, request?.config, deps.redactError);
-    state = {
+    publish({
       status: request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
       info: null,
       reason,
-    };
+    });
     return state;
   }
 
@@ -350,7 +379,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
 
     lastRequest = request;
-    state = { status: "booting", info: null };
+    publish({ status: "booting", info: null });
     let owner: LockHandle | null;
     try {
       owner = await deps.acquireOwnerLock(request);
@@ -362,11 +391,11 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     if (!owner) {
       // A live owner is not a stale-resource condition. Do not inspect, prune,
       // or otherwise mutate anything when the non-blocking lock says busy.
-      state = {
+      publish({
         status: "unavailable",
         info: null,
         reason: "another process owns this session",
-      };
+      });
       return state;
     }
     lock = owner;
@@ -440,7 +469,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       };
       deps.persist(persisted);
       retainedState = persisted;
-      state = { status: "active", info: currentRequestInfo };
+      publish({ status: "active", info: currentRequestInfo });
       deps.adopted?.(request, created ? "created" : "reconnected");
       return state;
     } catch (error) {
@@ -496,12 +525,14 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       // transport that may still have active callers. Labels alone cannot prove
       // that an external same-name replacement is the instance we created.
       deps.adopted?.(lastRequest, "reconnected");
+      observe(undefined);
       return runtime;
     }
 
     // A stopped/unknown sandbox or invalid running handle requires a
     // replacement transport. Do not start or dispose the old one until every
     // earlier callback has released its runtime-use reservation.
+    observe("unknown");
     await waitForActiveUses();
     let raw: unknown;
     if (isStopped(inspected)) {
@@ -545,7 +576,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const previous = runtime;
     runtime = replacement;
     runtimeInvalid = false;
-    if (state.info) state = { ...state, info: { ...state.info, docker: { ...preparation.docker } } };
+    if (state.info) publish({ ...state, info: { ...state.info, docker: { ...preparation.docker } } });
     // A same-name guest is not a trustworthy instance identity. Reconnected VM
     // policy must become unknown even when the previous transport was ours.
     deps.adopted?.(lastRequest, "reconnected");
@@ -568,7 +599,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const name = sandboxName;
     const request = lastRequest;
     const oldInfo = state.info;
-    state = { status: "stopping", info: oldInfo };
+    publish({ status: "stopping", info: oldInfo });
 
     await waitForActiveUses();
     await disposeRuntime();
@@ -617,15 +648,15 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
 
     if (cleanupError) {
-      state = {
+      publish({
         status: "unavailable",
         info: null,
         reason: redactMessage(cleanupError, request?.config, deps.redactError),
-      };
+      });
     } else if (persistDisabled) {
-      state = { status: "off", info: null };
+      publish({ status: "off", info: null });
     } else {
-      state = { status: "disabled", info: null };
+      publish({ status: "disabled", info: null });
     }
     deps.disposed?.();
   }
@@ -640,7 +671,43 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         status: state.status,
         info: state.info ? { ...state.info, docker: { ...state.info.docker } } : null,
         ...(state.reason ? { reason: state.reason } : {}),
+        ...(observation ? { observation } : {}),
       };
+    },
+
+    async refreshState(): Promise<RuntimeState> {
+      return enqueueTransition(async () => {
+        if (state.status !== "active" || !runtime || !lastRequest || !sandboxName) return manager.getState();
+        if (pendingLifecycle || passiveInspection) {
+          observe("unknown");
+          return manager.getState();
+        }
+        const expected = revision;
+        const request = lastRequest;
+        const name = sandboxName;
+        // Keep at most one underlying passive read in flight, even if the SDK
+        // never settles. The timeout releases the preflight/lifecycle queue.
+        const inspection = Promise.resolve().then(() => deps.inspectSandbox(name));
+        passiveInspection = inspection;
+        void inspection.finally(() => {
+          if (passiveInspection === inspection) passiveInspection = undefined;
+        }).catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let next: RuntimeState["observation"] = "unknown";
+        try {
+          const inspected = await Promise.race([
+            inspection,
+            new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 2_000); }),
+          ]);
+          if (inspected && inspected.name === name && matchesWorkspace(inspected, request)) {
+            if (isStopped(inspected) || ["sleeping", "asleep"].includes(statusOf(inspected) ?? "")) next = "asleep";
+            else if (isRunning(inspected) && !runtimeInvalid) next = undefined;
+          }
+        } catch { /* An unverifiable guest is not evidence of active isolation. */ }
+        finally { clearTimeout(timer); }
+        if (revision === expected && !pendingLifecycle && state.status === "active") observe(next);
+        return manager.getState();
+      });
     },
 
     async withRuntime<T>(callback: (value: RuntimeExecution) => Promise<T>): Promise<T> {
@@ -653,6 +720,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       let current: RuntimeExecution;
       try {
         current = await enqueueTransition(async () => {
+          revision += 1;
           try {
             const value = await wakeIfNeeded();
             activateUse();
@@ -674,7 +742,10 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       try {
         return await callback(current);
       } catch (error) {
-        if (runtime === current && invalidatesRuntime(error)) runtimeInvalid = true;
+        if (runtime === current && invalidatesRuntime(error)) {
+          runtimeInvalid = true;
+          observe("unknown");
+        }
         throw error;
       } finally {
         releaseUse(true);
@@ -682,14 +753,17 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     },
 
     async boot(request: BootRequest): Promise<RuntimeState> {
-      return enqueue(() => bootInternal(request));
+      beginLifecycle();
+      return enqueue(() => bootInternal(request)).finally(() => { pendingLifecycle -= 1; });
     },
 
     async shutdown(): Promise<void> {
-      return enqueue(() => shutdownInternal(false));
+      beginLifecycle();
+      return enqueue(() => shutdownInternal(false)).finally(() => { pendingLifecycle -= 1; });
     },
 
     async setEnabled(enabled: boolean): Promise<RuntimeState> {
+      beginLifecycle();
       return enqueue(async () => {
         if (!enabled) {
           if (state.status === "off" && !lock && !runtime) return manager.getState();
@@ -699,7 +773,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
         if (state.status === "active") return manager.getState();
         if (!lastRequest) {
-          state = { status: "unavailable", info: null, reason: "no sandbox boot request" };
+          publish({ status: "unavailable", info: null, reason: "no sandbox boot request" });
           return manager.getState();
         }
         const request: BootRequest = {
@@ -707,7 +781,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
           restored: retainedState ?? lastRequest.restored,
         };
         return bootInternal(request);
-      });
+      }).finally(() => { pendingLifecycle -= 1; });
     },
   };
 

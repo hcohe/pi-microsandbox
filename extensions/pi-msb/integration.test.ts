@@ -807,3 +807,102 @@ test("prune diagnostic details redact current and boot-time credential bytes bef
   assert.ok(report.errors.length); assert.doesNotMatch(JSON.stringify(report), /BOOT_PRIVATE_SENTINEL|CURRENT_PRIVATE_SENTINEL/); assert.match(report.errors.join(" "), /REDACTED/);
   await integration.manager.shutdown();
 });
+
+test("UI refresh and manager notifications track sleep, wake, blocked preflight and session replacement", async (t) => {
+  const root = await temp(t, "liveness");
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const calls: string[] = [];
+  const sdk = fakeSdk(calls);
+  const states: Array<{ status: string; observation?: string }> = [];
+  let entered!: () => void, release!: () => void;
+  const enteredPoll = new Promise<void>((resolve) => { entered = resolve; });
+  const releasedPoll = new Promise<void>((resolve) => { release = resolve; });
+  const get = sdk.Sandbox.get;
+  let deferPoll = false, missing = false;
+  sdk.Sandbox.get = async (name: string) => {
+    if (deferPoll) { entered(); await releasedPoll; }
+    if (missing) throw Object.assign(new Error("missing"), { code: "NOT_FOUND" });
+    return get(name);
+  };
+  const integration = createMsbIntegration({
+    sessionId: "liveness", cwd, configDirName: ".pi", agentDir: join(root, "agent"), env: { HOME: root },
+    sdkLoader: async () => sdk, onState: (state) => states.push(state),
+    acquireOwnerLock: async () => ({ path: "unused", release: async () => undefined }),
+  });
+  t.after(() => integration.manager.shutdown());
+  const setup = { sessionId: "liveness", cwd, projectTrusted: true, config: resolved(config()) };
+  await integration.configureSession(setup);
+  const handle = await get(sandboxNameFor("liveness"));
+  handle.status = "stopped";
+  const before = calls.length;
+  assert.equal((await integration.provider.refreshState!()).observation, "asleep");
+  assert.equal(integration.provider.isActive(), true);
+  assert.equal(calls.length, before, "refresh must not start, connect or execute commands");
+  await integration.control.getDiagnostics!();
+  assert.equal(calls.length, before, "diagnostics must not probe");
+  await integration.provider.withRuntime(async () => undefined);
+  assert.equal(states.at(-1)?.status, "active");
+  assert.equal(states.at(-1)?.observation, undefined);
+  assert.ok(states.some((state) => state.observation === "unknown"));
+  missing = true;
+  await assert.rejects(integration.provider.withRuntime(async () => undefined));
+  assert.equal(states.at(-1)?.status, "unavailable");
+  missing = false;
+  await integration.configureSession(setup);
+  deferPoll = true;
+  const refreshing = integration.provider.refreshState!();
+  await enteredPoll;
+  const replacing = integration.configureSession({ ...setup, sessionId: "replacement" });
+  const count = states.length;
+  deferPoll = false;
+  release();
+  await refreshing;
+  await replacing;
+  assert.deepEqual(states.slice(count).map((state) => state.status), ["active"]);
+});
+
+test("reload presents booting until success or failure without changing tool routing", async (t) => {
+  const root = await temp(t, "reload-display");
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const env = { HOME: root, PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false", PI_MSB_DOCKER__MODE: "disabled" };
+  const states: Array<{ status: string; observation?: string }> = [];
+  const integration = createMsbIntegration({
+    sessionId: "reload-display", cwd, configDirName: ".pi", agentDir: join(root, "agent"), env,
+    onState: (state) => states.push(state), sdkLoader: async () => fakeSdk([]),
+    acquireOwnerLock: async () => ({ path: "unused", release: async () => undefined }),
+  });
+  t.after(() => integration.manager.shutdown());
+  await integration.configureSession({ sessionId: "reload-display", cwd, projectTrusted: true, config: resolved(config()) });
+  states.length = 0;
+  const reloading = integration.control.reload();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(states[0]?.status, "booting");
+  assert.equal(integration.provider.getState().status, "active", "presentation must not change routing");
+  assert.equal((await integration.provider.refreshState!()).status, "booting");
+  await reloading;
+  assert.equal(states.at(-1)?.status, "active");
+  env.PI_MSB_AUTO_START = "not-a-boolean";
+  await assert.rejects(integration.control.reload());
+  assert.equal(states.at(-1)?.status, "active");
+  assert.equal(states.at(-1)?.observation, "unknown", "invalid configuration must not retain an unverified green dot");
+  assert.equal(integration.control.getState().observation, "unknown", "later synchronous renders must also remain uncertain");
+  await integration.control.setEnabled(false);
+  await assert.rejects(integration.control.reload());
+  assert.equal(states.at(-1)?.status, "unavailable");
+});
+
+for (const mode of ["disabled", "invalid"]) test(`passive UI refresh never loads the SDK for ${mode} configuration`, async (t) => {
+  const root = await temp(t, "passive-no-sdk");
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  let loads = 0;
+  const integration = createMsbIntegration({
+    sessionId: "passive", cwd, configDirName: ".pi", agentDir: join(root, "agent"),
+    env: { HOME: root, ...(mode === "disabled" ? { PI_MSB_DISABLE: "1" } : { PI_MSB_CPUS: "invalid" }) },
+    sdkLoader: async () => { loads++; throw new Error("must not load"); },
+  });
+  await integration.configureSession({ sessionId: "passive", cwd, projectTrusted: true });
+  for (let i = 0; i < 3; i++) await integration.provider.refreshState!();
+  assert.equal(loads, 0);
+  assert.equal(integration.provider.getState().status, mode === "disabled" ? "off" : "unavailable");
+  await integration.manager.shutdown();
+});

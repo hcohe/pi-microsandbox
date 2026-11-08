@@ -804,3 +804,146 @@ test("live routing/footer settings adopt without disposal; forced recreation nev
   assert.ok(events.indexOf("lock") < events.lastIndexOf("stop-remove"));
   await manager.shutdown();
 });
+
+test("passive refresh observes sleep and uncertainty without waking or changing execution eligibility", async () => {
+  const events: string[] = [];
+  const states: Array<{ status: string; observation?: string }> = [];
+  const req = request();
+  let inspected: InspectedSandbox | null = null;
+  let inspectError = false;
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => {
+      events.push("inspect");
+      if (inspectError) throw new Error("private SDK error");
+      return inspected;
+    },
+    onState: (state) => states.push(state),
+  }));
+  assert.equal((await manager.refreshState!()).status, "disabled");
+  assert.equal(events.length, 0);
+  await manager.boot(req);
+  for (const [status, observation] of [["running", undefined], ["stopped", "asleep"], ["idle", "asleep"], ["sleeping", "asleep"], ["mystery", "unknown"], ["running", undefined]] as const) {
+    inspected = { name: sandboxNameFor(sessionId), status, labels: labels(req) };
+    events.length = 0;
+    const refreshed = await manager.refreshState!();
+    assert.equal(refreshed.status, "active");
+    assert.equal(refreshed.observation, observation);
+    assert.equal(manager.isActive(), true);
+    assert.deepEqual(events, ["inspect"]);
+  }
+  for (const invalid of [null, { name: "wrong-name", status: "running", labels: labels(req) },
+    { name: sandboxNameFor(sessionId), status: "running", labels: { ...labels(req), "pi-msb.root": "/changed" } }]) {
+    inspected = invalid;
+    assert.equal((await manager.refreshState!()).observation, "unknown");
+  }
+  inspectError = true;
+  assert.equal((await manager.refreshState!()).observation, "unknown");
+  assert.equal(manager.getState().reason, undefined, "passive errors must not leak SDK text");
+  inspectError = false;
+  inspected = { name: sandboxNameFor(sessionId), status: "stopped", labels: labels(req) };
+  await manager.refreshState!();
+  events.length = 0;
+  await manager.withRuntime(async () => undefined);
+  assert.ok(events.includes("start"));
+  assert.equal(manager.getState().observation, undefined);
+  assert.ok(states.some((state) => state.observation === "asleep"));
+  assert.ok(states.some((state) => state.observation === "unknown"));
+  assert.equal(states.at(-1)?.status, "active");
+  await manager.shutdown();
+});
+
+test("runtime-down callbacks and failed preflight publish uncertainty, blocked state, and recovery", async () => {
+  const states: Array<{ status: string; observation?: string }> = [];
+  let missing = false;
+  const manager = createSandboxManager(depsFor([], {
+    inspectSandbox: async () => missing ? null : { name: sandboxNameFor(sessionId), status: "running", labels: labels() },
+    onState: (state) => states.push(state),
+  }));
+  await manager.boot(request());
+  await assert.rejects(manager.withRuntime(async () => { throw Object.assign(new Error("down"), { code: "SANDBOX_DOWN" }); }));
+  assert.equal(states.at(-1)?.observation, "unknown");
+  await manager.withRuntime(async () => undefined);
+  assert.equal(states.at(-1)?.status, "active");
+  assert.equal(states.at(-1)?.observation, undefined);
+  missing = true;
+  await assert.rejects(manager.withRuntime(async () => undefined));
+  assert.equal(states.at(-1)?.status, "unavailable");
+  missing = false;
+  await manager.boot(request());
+  assert.equal(states.at(-1)?.status, "active");
+  await manager.shutdown();
+});
+
+test("passive inspection serializes with preflight and cannot publish after shutdown is requested", async () => {
+  const entered = deferred(), release = deferred();
+  let poll = false;
+  const states: Array<{ status: string; observation?: string }> = [];
+  const events: string[] = [];
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => {
+      if (poll) {
+        entered.resolve();
+        await release.promise;
+      }
+      return { name: sandboxNameFor(sessionId), status: "running", labels: labels() };
+    },
+    onState: (state) => states.push(state),
+  }));
+  await manager.boot(request());
+  poll = true;
+  const observing = manager.refreshState!();
+  await entered.promise;
+  let used = false;
+  const using = manager.withRuntime(async () => { used = true; });
+  await Promise.resolve();
+  assert.equal(used, false);
+  const stopping = manager.shutdown();
+  const before = states.length;
+  release.resolve();
+  await bounded(Promise.all([observing, using, stopping]));
+  assert.equal(used, true);
+  assert.deepEqual(states.slice(before).map((state) => state.status), ["active", "stopping", "disabled"], "only the queued preflight may publish active before teardown");
+});
+
+test("hung passive reads time out without overlapping polls or blocking shutdown; late results are ignored", async (t) => {
+  const entered = deferred(), release = deferred();
+  let poll = false, count = 0;
+  const states: Array<{ status: string; observation?: string }> = [];
+  const manager = createSandboxManager(depsFor([], {
+    inspectSandbox: async () => {
+      if (poll) { count++; entered.resolve(); await release.promise; }
+      return { name: sandboxNameFor(sessionId), status: "running", labels: labels() };
+    },
+    onState: (state) => states.push(state),
+  }));
+  await manager.boot(request());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  poll = true;
+  const observing = manager.refreshState!();
+  await entered.promise;
+  t.mock.timers.tick(2_000);
+  assert.equal((await observing).observation, "unknown");
+  assert.equal((await manager.refreshState!()).observation, "unknown");
+  assert.equal(count, 1);
+  await manager.shutdown();
+  const before = states.length;
+  release.resolve();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(states.length, before);
+  assert.equal(manager.getState().status, "disabled");
+});
+
+test("throwing display observers cannot change lifecycle, tool execution or cleanup", async () => {
+  const events: string[] = [];
+  const manager = createSandboxManager(depsFor(events, {
+    inspectSandbox: async () => ({ name: sandboxNameFor(sessionId), status: "running", labels: labels() }),
+    onState: () => { throw new Error("UI failure"); },
+  }));
+  assert.equal((await manager.boot(request())).status, "active");
+  await manager.refreshState!();
+  assert.equal(await manager.withRuntime(async () => "executed"), "executed");
+  await manager.shutdown();
+  assert.equal(manager.getState().status, "disabled");
+  assert.ok(events.includes("stop-remove"));
+  assert.ok(events.includes("release"));
+});

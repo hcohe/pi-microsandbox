@@ -301,6 +301,8 @@ export interface ToolOpsProvider {
   readonly execution?: SessionExecutionContext;
   isActive(): boolean;
   getState(): RuntimeState;
+  /** Passive, non-waking liveness snapshot for UI; never acquires a tool runtime. */
+  refreshState?(): Promise<RuntimeState>;
   withRuntime<T>(callback: (runtime: RuntimeExecution) => Promise<T>): Promise<T>;
 }
 export interface GrepFormattingHelpers {
@@ -363,6 +365,8 @@ export interface RuntimeState {
   status: RuntimeStatus;
   info: SandboxInfo | null;
   reason?: string;
+  /** Display-only liveness; does not change routing or wake eligibility. */
+  observation?: "asleep" | "unknown";
 }
 export interface BootRequest {
   sessionId: string;

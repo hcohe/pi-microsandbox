@@ -25,7 +25,7 @@ export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: 
   if (!visible) return undefined;
   const sessionDisplayId = sessionId ? displayId(sessionId) : undefined;
   switch (state.status) {
-    case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}`;
+    case "active": return `msb-${state.info?.displayId ?? sessionDisplayId ?? "…"}${state.observation === "asleep" ? " asleep" : state.observation === "unknown" ? " uncertain" : ""}`;
     case "off": return "Microsandbox disabled - Running on host";
     case "host-fallback": return "MSB host fallback";
     case "unavailable": return "Microsandbox Blocked";
@@ -36,14 +36,11 @@ export function footerStatus(state: RuntimeState, visible: boolean, sessionId?: 
 }
 
 export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "fg">, text: string, state: RuntimeState, frame = 0): string {
-  const { status, info } = state;
-  const needsAttention = status === "off" || status === "unavailable" || status === "host-fallback"
-    || status === "active" && (info?.docker.readiness === "missing" || info?.docker.readiness === "unavailable");
-  let circleColor: "success" | "warning" | "dim" | "error" = "dim";
-  if (needsAttention) circleColor = "error";
-  else if (status === "active") circleColor = "success";
+  const { status, observation } = state;
+  let circleColor: "success" | "warning" | "dim" | "error" = "warning";
+  if (status === "unavailable" || status === "disabled") circleColor = "error";
+  else if (status === "active" && !observation) circleColor = "success";
   else if (status === "booting") circleColor = frame % 2 === 0 ? "warning" : "dim";
-  else if (status === "stopping") circleColor = "warning";
   return `\x1b[22m${theme.fg("dim", text)} ${theme.fg(circleColor, "●")}\x1b[22m`;
 }
 
@@ -68,9 +65,43 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   let currentContext: ExtensionContext | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
+  let bootGeneration = 0;
   let customFooterInstalled = false;
+  let uiGeneration = 0;
+  let observationTimer: ReturnType<typeof setInterval> | undefined;
+  let observationGeneration = 0;
+
+  const stopObservation = (): void => {
+    observationGeneration += 1;
+    clearInterval(observationTimer);
+    observationTimer = undefined;
+  };
+
+  const startObservation = (ctx: ExtensionContext): void => {
+    if (!ctx.hasUI || observationTimer !== undefined || !currentProvider.refreshState) return;
+    const generation = observationGeneration;
+    let pending = false;
+    observationTimer = setInterval(() => {
+      if (pending || generation !== observationGeneration || !integration.configRef.value.showFooter) return;
+      const ctx = currentContext;
+      const identity = currentProvider.execution!.current();
+      if (!ctx?.hasUI) return;
+      pending = true;
+      void currentProvider.refreshState!().then((state) => {
+        if (generation !== observationGeneration || currentContext !== ctx
+          || currentProvider.execution!.current() !== identity) return;
+        updateStatus(ctx, state);
+      }).catch(() => {
+        if (generation !== observationGeneration || currentContext !== ctx
+          || currentProvider.execution!.current() !== identity) return;
+        const state = currentProvider.getState();
+        updateStatus(ctx, state.status === "active" ? { ...state, observation: "unknown" } : state);
+      }).finally(() => { pending = false; });
+    }, 2_000);
+  };
 
   const stopBootAnimation = (): void => {
+    bootGeneration += 1;
     if (bootAnimation !== undefined) {
       clearInterval(bootAnimation);
       bootAnimation = undefined;
@@ -78,12 +109,13 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   };
 
   const startBootAnimation = (): void => {
-    if (bootAnimation !== undefined) return;
+    if (!currentContext?.hasUI || bootAnimation !== undefined) return;
+    const generation = bootGeneration;
     let frame = 0;
     const render = (): void => {
       // Read the current session and theme on every tick, never a previous context.
       const ctx = currentContext;
-      if (!ctx) return;
+      if (!ctx || generation !== bootGeneration || !integration.configRef.value.showFooter) return;
       const state: RuntimeState = { status: "booting", info: null };
       const text = footerStatus(state, true, ctx.sessionManager.getSessionId())!;
       ctx.ui.setStatus("pi-msb", styleFooterStatus(ctx.ui.theme, text, state, frame));
@@ -104,9 +136,11 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     if (text !== undefined) ensureCustomFooter(ctx);
     if (text === undefined) {
       stopBootAnimation();
+      stopObservation();
       ctx.ui.setStatus("pi-msb", undefined);
       return;
     }
+    startObservation(ctx);
     if (state.status === "booting") {
       startBootAnimation();
       return;
@@ -132,7 +166,9 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   registerDiagnosticsTool(pi, integration.control);
 
   pi.on("session_start", async (_event, ctx) => {
+    const generation = ++uiGeneration;
     stopBootAnimation();
+    stopObservation();
     currentContext = ctx;
     updateStatus(ctx, { status: "booting", info: null });
     try {
@@ -146,13 +182,14 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       });
       const identity = currentProvider.execution!.current();
       const state = await pending;
-      if (currentProvider.execution!.current() !== identity) return;
+      if (generation !== uiGeneration || currentProvider.execution!.current() !== identity) return;
       lastConfig = integration.control.getEffectiveConfig();
       updateStatus(ctx, state);
       for (const warning of lastConfig.warnings) ctx.ui.notify(`pi-microsandbox: ${warning}`, "warning");
     } catch (error) {
       // Invalid config and native boot failures are fail-closed. Do not throw from
       // the lifecycle hook: Pi remains usable and routed tools remain blocked.
+      if (generation !== uiGeneration) return;
       updateStatus(ctx, { status: "unavailable", info: null });
       ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
@@ -168,13 +205,16 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     warnSessionReset(ctx);
     integration.endSession();
-    await closeControlPanel();
+    uiGeneration += 1;
+    currentContext = undefined;
     stopBootAnimation();
-    await integration.manager.shutdown();
+    stopObservation();
+    customFooterInstalled = false;
     ctx.ui.setStatus("pi-msb", undefined);
+    await closeControlPanel();
+    await integration.manager.shutdown();
     // Pi tears down extension-owned UI after this hook. Do not call
     // setFooter(undefined): another extension may have replaced our footer.
-    currentContext = undefined;
   });
 
   // The tools module owns skill capture. Session identity changes must invalidate
@@ -182,23 +222,26 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   pi.on("session_info_changed", async (_event, ctx) => {
     if (!currentContext) return;
     const identity = currentProvider.execution!.current();
-    if (ctx.sessionManager.getSessionId() !== identity.sessionId || ctx.cwd !== identity.cwd) {
-      warnSessionReset(ctx);
-      integration.endSession();
-      currentContext = ctx;
-      stopBootAnimation();
-      updateStatus(ctx, { status: "booting", info: null });
-      const pending = integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
-      const replacement = currentProvider.execution!.current();
-      await closeControlPanel();
-      try {
-        await pending;
-        if (currentProvider.execution!.current() !== replacement) return;
-      } catch (error) {
-        ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
-      }
+    // Renaming a session does not affect the label; preserve any reload animation.
+    if (ctx.sessionManager.getSessionId() === identity.sessionId && ctx.cwd === identity.cwd) return;
+    warnSessionReset(ctx);
+    integration.endSession();
+    currentContext = ctx;
+    const generation = ++uiGeneration;
+    stopObservation();
+    stopBootAnimation();
+    updateStatus(ctx, { status: "booting", info: null });
+    const pending = integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+    const replacement = currentProvider.execution!.current();
+    await closeControlPanel();
+    try {
+      await pending;
+      if (generation !== uiGeneration || currentProvider.execution!.current() !== replacement) return;
+    } catch (error) {
+      if (generation !== uiGeneration) return;
+      ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
-    updateStatus(ctx, integration.control.getState());
+    if (generation === uiGeneration) updateStatus(ctx, integration.control.getState());
   });
 
   void lastConfig;

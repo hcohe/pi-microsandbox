@@ -571,9 +571,11 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     }, [request.config]);
     adopted = { identity, policy, agentPolicy };
   };
+  let managerIdentity: SessionExecutionIdentity | undefined;
   const manager = createSandboxManager(deps);
   const boot = async (request: Parameters<typeof manager.boot>[0]) => {
-    requestExecutions.set(request, execution.context.current());
+    managerIdentity = execution.context.current();
+    requestExecutions.set(request, managerIdentity);
     diagnosticFailure = "runtime_start_failed";
     capturingBootFailure = true;
     try {
@@ -582,17 +584,40 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return result;
     } finally { capturingBootFailure = false; }
   };
-  const notifyState = (state: RuntimeState) => options.onState?.(state);
+  const displayActivities = new Map<symbol, SessionExecutionIdentity>();
+  const displayState = (state = visibleState()): RuntimeState => {
+    if ([...displayActivities.values()].includes(execution.context.current())) return { status: "booting", info: null };
+    return state;
+  };
+  const notifyState = (state: RuntimeState) => options.onState?.(displayState(state));
+  const beginDisplayActivity = (): (() => void) => {
+    const token = Symbol();
+    const identity = execution.context.current();
+    displayActivities.set(token, identity);
+    notifyState(visibleState());
+    return () => {
+      displayActivities.delete(token);
+      if (execution.context.current() === identity) notifyState(visibleState());
+    };
+  };
   const visibleState = (): RuntimeState => {
     if (!execution.context.isReady()) return failureState?.status === "unavailable" ? failureState : { status: "booting", info: null };
     const state = failureState ?? manager.getState();
     if (explicitOff && (state.status === "disabled" || state.status === "off")) return { ...state, status: "off", info: null };
-    return state;
+    return state.status === "active" && !configReady ? { ...state, observation: "unknown" } : state;
+  };
+  deps.onState = () => {
+    if (execution.context.isReady() && managerIdentity === execution.context.current()) notifyState(visibleState());
   };
   const provider: ToolOpsProvider = {
     execution: execution.context,
     isActive: () => execution.context.isReady() && visibleState().status === "active" && manager.isActive(),
     getState: visibleState,
+    refreshState: async () => {
+      const identity = execution.context.current();
+      if (execution.context.isReady() && configReady && !failureState && !explicitOff) await manager.refreshState?.();
+      return execution.context.current() === identity ? displayState() : { status: "booting", info: null };
+    },
     withRuntime: async (callback) => {
       const identity = execution.context.current();
       execution.context.assertCurrent(identity);
@@ -694,6 +719,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   const configureSession = (setup: SessionSetup): Promise<RuntimeState> => {
     const previous = execution.context.current();
     const identity = execution.begin(setup.sessionId, setup.cwd);
+    displayActivities.clear();
     failureState = { status: "booting", info: null };
     if (previous.sessionId !== setup.sessionId || previous.cwd !== setup.cwd) settings.endSession();
     settingsReady = false;
@@ -773,39 +799,42 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         }
         return;
       }
-      explicitOff = !enabled;
-      failureState = null;
-      if (!enabled) {
-        await manager.setEnabled(false);
-        assertCurrent();
-        failureState = { status: "off", info: null };
-      } else {
-        try {
-          workspace = null;
-          settingsReady = false;
-          const selected = await discoverWorkspace(cwd);
+      const endDisplayActivity = enabled ? beginDisplayActivity() : () => undefined;
+      try {
+        explicitOff = !enabled;
+        failureState = null;
+        if (!enabled) {
+          await manager.setEnabled(false);
           assertCurrent();
-          workspace = selected;
-          settingsReady = true;
-          cwd = workspace.cwd;
-          activeProjectRoot = workspace.guestRoot;
-          const next = await resolveForWorkspace(workspace);
-          assertCurrent();
-          resolved = next;
-          cacheDiagnosticConfig(next.config);
-          configReady = true;
-          Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-          const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate: pendingRestart, restored: persistenceState(options.entries?.() ?? [], sessionId) });
-          assertCurrent();
-          if (result.status === "active") pendingRestart = false;
-          if (result.status === "unavailable") failureState = result;
-        } catch (error) {
-          assertCurrent();
-          configReady = false;
-          failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+          failureState = { status: "off", info: null };
+        } else {
+          try {
+            workspace = null;
+            settingsReady = false;
+            const selected = await discoverWorkspace(cwd);
+            assertCurrent();
+            workspace = selected;
+            settingsReady = true;
+            cwd = workspace.cwd;
+            activeProjectRoot = workspace.guestRoot;
+            const next = await resolveForWorkspace(workspace);
+            assertCurrent();
+            resolved = next;
+            cacheDiagnosticConfig(next.config);
+            configReady = true;
+            Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+            const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate: pendingRestart, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+            assertCurrent();
+            if (result.status === "active") pendingRestart = false;
+            if (result.status === "unavailable") failureState = result;
+          } catch (error) {
+            assertCurrent();
+            configReady = false;
+            failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+          }
         }
-      }
-      notifyState(visibleState());
+        notifyState(visibleState());
+      } finally { endDisplayActivity(); }
     },
     previewSettings: (draft) => draft.preview(configSnapshot()),
     async reload(reloadOptions) {
@@ -821,45 +850,48 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         if (reloadOptions?.guard) throw new Error("Runtime reload disabled by environment");
         return;
       }
-      let next: ResolvedConfig;
+      const endDisplayActivity = beginDisplayActivity();
       try {
-        workspace = null;
-        settingsReady = false;
-        const selected = await discoverWorkspace(cwd);
+        let next: ResolvedConfig;
+        try {
+          workspace = null;
+          settingsReady = false;
+          const selected = await discoverWorkspace(cwd);
+          assertCurrent();
+          workspace = selected;
+          settingsReady = true;
+          cwd = workspace.cwd;
+          activeProjectRoot = workspace.guestRoot;
+          next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
+          assertCurrent();
+        } catch (error) {
+          assertCurrent();
+          configReady = false;
+          if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+          notifyState(visibleState());
+          throw error;
+        }
+        await reloadOptions?.guard?.();
         assertCurrent();
-        workspace = selected;
-        settingsReady = true;
-        cwd = workspace.cwd;
-        activeProjectRoot = workspace.guestRoot;
-        next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
-        assertCurrent();
-      } catch (error) {
-        assertCurrent();
-        configReady = false;
-        if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+        pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
+        if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+          throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
+        }
+        const forceRecreate = pendingRestart;
+        resolved = next;
+        cacheDiagnosticConfig(next.config);
+        configReady = true;
+        Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+        failureState = null;
+        if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
+          const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+          assertCurrent();
+          if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
+          else if (result.status === "active") pendingRestart = false;
+        }
         notifyState(visibleState());
-        throw error;
-      }
-      await reloadOptions?.guard?.();
-      assertCurrent();
-      pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
-      if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
-        throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
-      }
-      const forceRecreate = pendingRestart;
-      resolved = next;
-      cacheDiagnosticConfig(next.config);
-      configReady = true;
-      Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-      failureState = null;
-      if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
-        const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) });
-        assertCurrent();
-        if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
-        else if (result.status === "active") pendingRestart = false;
-      }
-      notifyState(visibleState());
-      if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
+        if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
+      } finally { endDisplayActivity(); }
     },
     async pruneNow() {
       const report = await pruneStale({ port: prunePort, locks: lockPort(), currentSessionId: sessionId, stopTimeoutMs: configRef.value.stopTimeoutMs });
@@ -905,6 +937,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     endSession: () => {
       const identity = execution.context.current();
       execution.begin(identity.sessionId, identity.cwd);
+      displayActivities.clear();
       failureState = { status: "unavailable", info: null, reason: "session has ended" };
       settings.endSession();
       settingsReady = false;

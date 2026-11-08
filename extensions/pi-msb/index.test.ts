@@ -190,7 +190,7 @@ test("boot frames flash only the right-hand circle between theme warning and dim
   }
 });
 
-test("active sandbox Docker issues stay red; ready or intentionally disabled Docker stays green", () => {
+test("active sandbox stays green regardless of Docker capability readiness", () => {
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
   for (const readiness of ["missing", "unavailable", "ready", "disabled"] as const) {
@@ -198,7 +198,7 @@ test("active sandbox Docker issues stay red; ready or intentionally disabled Doc
     for (const frame of [0, 1]) {
       calls.length = 0;
       styleFooterStatus(theme, footerStatus(state, true)!, state, frame);
-      assert.deepEqual(calls, [["dim", "msb-bf9379"], [readiness === "missing" || readiness === "unavailable" ? "error" : "success", "●"]]);
+      assert.deepEqual(calls, [["dim", "msb-bf9379"], ["success", "●"]]);
     }
   }
 });
@@ -207,12 +207,178 @@ test("non-live footers retain explicit host/blocked/disabled labels and never sh
   const calls: Array<[string, string]> = [];
   const theme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } };
   for (const [status, label, color] of [
-    ["off", "Microsandbox disabled - Running on host", "error"], ["host-fallback", "MSB host fallback", "error"],
-    ["unavailable", "Microsandbox Blocked", "error"], ["stopping", "MSB stopping", "warning"], ["disabled", "MSB disabled", "dim"],
+    ["off", "Microsandbox disabled - Running on host", "warning"], ["host-fallback", "MSB host fallback", "warning"],
+    ["unavailable", "Microsandbox Blocked", "error"], ["stopping", "MSB stopping", "warning"], ["disabled", "MSB disabled", "error"],
   ] as const) {
     calls.length = 0;
     assert.equal(footerStatus({ status, info: null }, true), label);
     styleFooterStatus(theme, label, { status, info: null });
     assert.deepEqual(calls, [["dim", label], [color, "●"]]);
   }
+});
+
+test("observed asleep and unknown guests use orange without changing active routing status", () => {
+  const theme = { fg: (role: string, text: string) => `${role}:${text}` };
+  for (const observation of ["asleep", "unknown"] as const) {
+    const state: RuntimeState = { ...active, observation };
+    const label = footerStatus(state, true)!;
+    assert.match(label, observation === "asleep" ? / asleep$/ : / uncertain$/);
+    assert.match(styleFooterStatus(theme, label, state), /warning:●/);
+    assert.equal(state.status, "active");
+  }
+});
+
+test("footer polling, boot/reload animation and stale callbacks stop on hidden footer and shutdown", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-footer-lifecycle-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    const timers = new Map(), created = [];
+    let nextTimer = 0;
+    globalThis.setInterval = (callback, delay) => {
+      const id = ++nextTimer;
+      const timer = {callback, delay}; timers.set(id, timer); created.push(timer);
+      if (delay === 400) callback();
+      return id;
+    };
+    globalThis.clearInterval = (id) => timers.delete(id);
+    const {default: register} = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const tools = new Map(), hooks = new Map(), statuses = [];
+    let session = 'first', footers = 0;
+    register({registerTool(tool) {tools.set(tool.name, tool);}, registerCommand() {}, appendEntry() {},
+      on(event, handler) {hooks.set(event, [...(hooks.get(event) ?? []), handler]);}});
+    const ctx = {cwd: process.cwd(), mode: 'rpc', hasUI: true, isProjectTrusted: () => true,
+      sessionManager: {getSessionId: () => session, getEntries: () => []},
+      ui: {theme: {fg: (role, text) => role + ':' + text}, setFooter() {footers++;},
+        setStatus(_key, value) {statuses.push(value);}, notify() {}, select: async () => 'Yes'}};
+    const lifecycle = (event) => hooks.get(event).at(-1)({}, ctx);
+    await lifecycle('session_start');
+    assert.equal(timers.size, 1); assert.equal([...timers.values()][0].delay, 2000);
+    assert.ok(statuses.some(value => value?.includes('warning:●')));
+    assert.ok(statuses.some(value => value?.includes('dim:●')));
+    assert.match(statuses.at(-1), /warning:●/);
+    const run = (value) => tools.get('msb_config_set').execute('set',
+      {scope:'session', path:'show_footer', operation:'set', value}, undefined, undefined, ctx);
+    const animations = () => created.filter(timer => timer.delay === 400).length;
+    const beforeReload = animations();
+    assert.equal((await run(true)).details.outcome, 'applied');
+    assert.ok(animations() > beforeReload, 'config reload must animate');
+    assert.equal(timers.size, 1, 'reload settles and stops animation');
+    assert.equal((await run(false)).details.outcome, 'applied');
+    assert.equal(timers.size, 0); assert.equal(statuses.at(-1), undefined);
+    const hiddenCount = statuses.length;
+    for (const timer of created) timer.callback();
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(statuses.length, hiddenCount, 'hidden footer rejects stale timer callbacks');
+    session = 'replacement';
+    await lifecycle('session_info_changed');
+    assert.equal(timers.size, 1);
+    const poll = [...timers.values()][0];
+    poll.callback();
+    const shuttingDown = lifecycle('session_shutdown');
+    const shutdownCount = statuses.length;
+    for (const timer of created) timer.callback();
+    await shuttingDown; await Promise.resolve(); await Promise.resolve();
+    assert.equal(statuses.length, shutdownCount, 'late poll/animation cannot restore shutdown footer');
+    assert.equal(timers.size, 0); assert.equal(statuses.at(-1), undefined);
+    await lifecycle('session_start');
+    assert.equal(footers, 2, 'new session reinstalls the custom footer after shutdown');
+    await lifecycle('session_shutdown');
+    assert.equal(timers.size, 0);
+    console.log('PASS footer-lifecycle');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS footer-lifecycle/);
+});
+
+test("headless sessions never start footer polling or animation timers", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-headless-footer-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    const intervals = [];
+    globalThis.setInterval = (_callback, delay) => { intervals.push(delay); return intervals.length; };
+    globalThis.clearInterval = () => {};
+    const {default: register} = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const hooks = new Map();
+    register({registerTool() {}, registerCommand() {}, appendEntry() {},
+      on(event, handler) {hooks.set(event, [...(hooks.get(event) ?? []), handler]);}});
+    let session = 'headless';
+    const ctx = {cwd: process.cwd(), mode: 'print', hasUI: false, isProjectTrusted: () => true,
+      sessionManager: {getSessionId: () => session, getEntries: () => []},
+      ui: {theme: {fg: (_role, text) => text}, setFooter() {}, setStatus() {}, notify() {}}};
+    const lifecycle = (event) => hooks.get(event).at(-1)({}, ctx);
+    await lifecycle('session_start');
+    assert.deepEqual(intervals, [], 'headless boot and terminal state must not start UI timers');
+    session = 'headless-replacement';
+    await lifecycle('session_info_changed');
+    assert.deepEqual(intervals, [], 'headless session replacement must not start polling');
+    await lifecycle('session_shutdown');
+    assert.deepEqual(intervals, []);
+    console.log('PASS headless-footer');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS headless-footer/);
+});
+
+test("renaming a session during deferred reload preserves flashing until reload settles", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-footer-rename-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import {syncBuiltinESMExports} from 'node:module';
+    const timers = new Map();
+    let nextTimer = 0, watchReload = false, deferReload = false;
+    globalThis.setInterval = (callback, delay) => {
+      const id = ++nextTimer; timers.set(id, {callback, delay});
+      if (watchReload && delay === 400) deferReload = true;
+      return id;
+    };
+    globalThis.clearInterval = (id) => timers.delete(id);
+    const {default: register} = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const tools = new Map(), hooks = new Map(), statuses = [];
+    register({registerTool(tool) {tools.set(tool.name, tool);}, registerCommand() {}, appendEntry() {},
+      on(event, handler) {hooks.set(event, [...(hooks.get(event) ?? []), handler]);}});
+    let name = 'Original name';
+    const ctx = {cwd: process.cwd(), mode: 'rpc', hasUI: true, isProjectTrusted: () => true,
+      sessionManager: {getSessionId: () => 'same-identity', getSessionName: () => name, getEntries: () => []},
+      ui: {theme: {fg: (role, text) => role + ':' + text}, setFooter() {},
+        setStatus(_key, value) {statuses.push(value);}, notify() {}, select: async () => 'Yes'}};
+    const lifecycle = (event) => hooks.get(event).at(-1)({}, ctx);
+    await lifecycle('session_start');
+    let enter, release;
+    const entered = new Promise(resolve => {enter = resolve;});
+    const released = new Promise(resolve => {release = resolve;});
+    const realpath = fs.promises.realpath;
+    fs.promises.realpath = async (...args) => {
+      if (deferReload && args[0] === process.cwd()) {enter(); await released;}
+      return realpath(...args);
+    };
+    syncBuiltinESMExports();
+    watchReload = true;
+    const reloading = tools.get('msb_config_set').execute('set',
+      {scope:'session', path:'show_footer', operation:'set', value:true}, undefined, undefined, ctx);
+    await entered;
+    const animation = [...timers.values()].find(timer => timer.delay === 400);
+    assert.ok(animation, 'reload starts flashing before workspace discovery settles');
+    const count = statuses.length;
+    name = 'Renamed session';
+    await lifecycle('session_info_changed');
+    assert.equal(statuses.length, count, 'rename must not overwrite the reload presentation');
+    assert.ok([...timers.values()].includes(animation), 'rename must not stop the reload timer');
+    animation.callback();
+    assert.match(statuses.at(-1), /dim:●/);
+    animation.callback();
+    assert.match(statuses.at(-1), /warning:●/);
+    deferReload = false; release();
+    assert.equal((await reloading).details.outcome, 'applied');
+    assert.equal([...timers.values()].some(timer => timer.delay === 400), false);
+    assert.match(statuses.at(-1), /Running on host warning:●/, 'settled host state replaces flashing');
+    await lifecycle('session_shutdown');
+    assert.equal(timers.size, 0);
+    console.log('PASS rename-reload');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS rename-reload/);
 });
