@@ -13,16 +13,29 @@
 - Keep generated native binaries out of Git. Changes to the flock addon should also pass `npm run build:flock` and `npm run smoke:flock` on a supported host.
 - Live VM tests are opt-in and require virtualization: `PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh`. Never treat a skipped run as validation.
 - Update user-facing documentation with behavior or configuration changes. Preserve secure defaults: sandbox failures must not silently fall back to host execution.
-- There are no workspace modes or Git root discovery. Guest root and command
+- There are no workspace modes or Git-root-selected binds. Guest root and command
   cwd are the lexically resolved cwd; Git ancestors/siblings outside cwd are
-  never automatically exposed. Canonical cwd determines Project config identity
-  and the shared session boundary; nested cwd may need new explicit Project
-  overrides, with Global unchanged and no parent-policy inheritance.
+  never automatically exposed. Canonical cwd remains the session boundary. At
+  supported checkout roots, Project save chooses shared repository policy or a
+  higher-priority cwd-local Worktree override. Shared config atomically embeds
+  immutable host-owned repository metadata; bounded read-only catalog discovery
+  survives checkout gitfile deletion and covers future registered worktrees.
+  Nested cwd and unsupported Git layouts stay cwd-local, Global unchanged,
+  with no parent-policy inheritance. Dockerfile/context Project saves use the same
+  named Repository/Worktree choice and host-owned immutable association mechanism;
+  neither config nor source destination selection copies Dockerfiles/build contexts.
+  Owned source tools support bounded relative UTF-8 context patches, not arbitrary
+  host paths; multi-artifact saves are individually atomic, never jointly/crash
+  atomic, and partial/unknown persistence never authorizes activation.
 - Git metadata inside cwd is exposed but never selects the bind. External
   linked-worktree/submodule metadata is not separately mounted; guest Git may
   need explicit setup or mounts. Treat the read/write cwd bind (including secrets
   and `.git` within it), overlapping sessions, and nested-container access as
-  part of the security boundary. Explicit mounts and user-approved host controls
+  part of the security boundary. The main checkout's writable `.git` is an
+  authoritative cross-worktree trust boundary, not isolated by shared policy.
+  Reserve every catalogued proof tree against explicit writable mounts, including
+  unrelated sessions; stale/invalid catalog associations fail closed for host
+  repair. Explicit mounts and user-approved host controls
   are separate; cwd replacement must invalidate prior approvals.
 
 ## Pull requests and releases

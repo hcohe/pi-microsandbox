@@ -182,6 +182,10 @@ try {
             }
             terminal.columns = 80; terminal.rows = 24;
             await key("\r");
+            if (scope === 1) {
+              assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> \[ No \]/);
+              await select("Yes (Only for workspace worktree)");
+            }
             if (tui.stripTerminalSequences(panel.render(80).join("\n")).includes("Review change")) await select("Confirm");
             assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Result: Applied/);
             await key("\x1b");
@@ -222,7 +226,7 @@ try {
       assert.ok(inspect); assert.ok(setter);
       const inspection = await inspect.execute("inspect", {}, undefined, undefined, runner.createContext());
       assert.equal(inspection.details.outcome, "inspected");
-      assert.deepEqual(Object.keys(inspection.details.layers).sort(), ["global", "project", "session"]);
+      assert.deepEqual(Object.keys(inspection.details.layers).sort(), ["global", "project", "session", "worktree"]);
       assert.deepEqual(setter.parameters.properties.scope.anyOf.map((item) => item.const), ["session", "project", "global"]);
       assert.equal(inspection.details.capabilities.mutation.batch.maxReloads, 1);
       assert.deepEqual(inspection.details.settingsSchema["network.mode"].valueSchema.enum, ["default", "open", "allowlist", "deny"]);

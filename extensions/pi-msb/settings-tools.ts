@@ -1,3 +1,4 @@
+import { approveProjectSettings, prepareProjectSettings, discardProjectCandidates, type ProjectSettingsCandidate } from "./settings-project.ts";
 import { approveSettings } from "./settings-approval.ts";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -162,6 +163,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
     },
     async execute(_id, params, signal, _onUpdate, ctx) {
       let draft: SettingsDraft | undefined;
+      let projectCandidates: ProjectSettingsCandidate[] | undefined;
       let release: (() => void) | undefined;
       let phase: "validate" | "review" | "commit" | "reload" = "validate";
       let saved = false;
@@ -178,11 +180,18 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
         const abort = AbortSignal.any([lease.signal, ...(signal ? [signal] : [])]);
         const identity = session(ctx);
         const runtimeBefore = JSON.stringify(runtime(control));
+        const checkIdentity = () => { if (abort.aborted || identity !== session(ctx)) throw new SettingsConflictError(); };
         const check = () => {
-          if (abort.aborted || identity !== session(ctx)) throw new SettingsConflictError();
+          checkIdentity();
           if (runtimeBefore !== JSON.stringify(runtime(control))) throw new SettingsConflictError();
         };
-        draft = await editor.open(input.scope === "session" ? "temporary" : input.scope);
+        try { draft = await editor.open(input.scope === "session" ? "temporary" : input.scope); }
+        catch (error) {
+          // A broken shared layer may be unrepairable here while a worktree-only
+          // repair is valid (or vice versa). Never omit the layer at commit time.
+          if (input.scope !== "project" || !await editor.projectDestinations()) throw error;
+          draft = await editor.open("worktree");
+        }
         for (const [index, item] of input.operations.entries()) {
           try { mutate(draft, item); }
           catch (error) {
@@ -190,20 +199,25 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
             throw error;
           }
         }
-        const preview = await (control.previewSettings?.(draft) ?? draft.preview());
-        const review = await draft.reviewForApproval(preview.effect, runtime(control));
-        check();
-        const diff = settingsDiff(review);
-        const hostCommands = [...new Set([...(await draft.hostCommandsForApproval()), ...input.operations.flatMap((item) => {
-          if (item.path !== "secrets" || !["set", "upsert"].includes(item.operation)) return [];
-          const entries = item.operation === "set" ? item.value as Record<string, unknown>[] : [item.value as Record<string, unknown>];
-          return entries.flatMap((entry) => typeof entry.hostCmd === "string" ? [entry.hostCmd] : []);
-        })])];
-        // Refuse oversized proposals instead of hiding affected values or executable commands.
-        if (formatSettingsDiff(diff).join("\n").length + hostCommands.reduce((size, command) => size + JSON.stringify(command).length * 6, 0) > 48_000) return setterResult({ outcome: "rejected", reason: "Review too large. Use a smaller per-entry operation." });
-        phase = "review";
-        const approved = await approveSettings(ctx, diff, abort, hostCommands);
-        if (!approved || abort.aborted) return setterResult({ outcome: "cancelled" });
+        const previewDraft = (candidate: SettingsDraft) => control.previewSettings?.(candidate) ?? candidate.preview();
+        projectCandidates = input.scope === "project" ? await prepareProjectSettings(draft, previewDraft, runtime(control)) : undefined;
+        let preview;
+        let review;
+        if (projectCandidates) {
+          check(); phase = "review";
+          const selected = await approveProjectSettings(ctx, projectCandidates, abort);
+          if (!selected || abort.aborted) return setterResult({ outcome: "cancelled" });
+          draft = selected.draft; preview = selected.preview; review = selected.review;
+        } else {
+          preview = await previewDraft(draft);
+          review = await draft.reviewForApproval(preview.effect, runtime(control));
+          check();
+          const diff = settingsDiff(review);
+          const hostCommands = await draft.hostCommandsForApproval();
+          if (formatSettingsDiff(diff).join("\n").length + hostCommands.reduce((size, command) => size + JSON.stringify(command).length * 6, 0) > 48_000) return setterResult({ outcome: "rejected", reason: "Review too large. Use a smaller per-entry operation." });
+          phase = "review";
+          if (!await approveSettings(ctx, diff, abort, hostCommands) || abort.aborted) return setterResult({ outcome: "cancelled" });
+        }
         check();
         approvedReview = review;
         phase = "commit";
@@ -211,7 +225,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
         saved = applied.saved;
         if (!saved) return setterResult({ outcome: "no_op", saved: false, reloaded: false, review });
         phase = "reload";
-        await control.reload({ allowRestart: preview.effect === "restart", guard: async () => { check(); await applied.assertUnchanged?.(); check(); } });
+        await control.reload({ allowRestart: preview.effect === "restart", signal: abort, guard: async () => { checkIdentity(); await applied.assertUnchanged?.(); checkIdentity(); } });
         return setterResult({ outcome: "applied", saved: true, reloaded: true, runtimeStatus: control.getState().status, review });
       } catch (error) {
         if (phase === "reload") return setterResult({ outcome: "saved_but_reload_failed", saved, reloaded: false, review: approvedReview, reason: "Settings were saved but not fully activated. Inspect settings/runtime and request a new approved change or use /msb to reload." });
@@ -222,7 +236,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
           reason: `${validationMessage(validation)} Nothing applied. Operation indices in details are zero-based.` });
         return setterResult({ outcome: phase === "commit" ? "apply_failed" : "rejected", saved: phase === "commit" ? "unknown" : false, reloaded: false,
           reason: phase === "commit" ? "Persistence failed; storage may have changed after an I/O error. Inspect before retrying. Runtime was not reloaded." : "Invalid or unavailable settings proposal. Inspect msb_config_get schemas/constraints; check scope, value shape, secret sources and mount safety. Network domains must be exact; secret hosts also accept a single leading *. wildcard. IP/CIDR rules are network-only. Nothing applied." });
-      } finally { draft?.discard(); release?.(); }
+      } finally { discardProjectCandidates(projectCandidates); draft?.discard(); release?.(); }
     },
   });
 }

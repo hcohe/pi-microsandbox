@@ -37,8 +37,9 @@ intentional approval, review and reload differences.
 - `SETTINGS_PATHS` enumerates every public schema leaf in TOML spelling, including
   dotted leaves such as `network.mode` and `docker.mode`. Bare `network`/`docker`
   groups are inspection filters, not writable leaves; arrays are complete collections.
-- `await editor.open("temporary" | "project" | "global")` captures raw target
-  data, the effective baseline, and a draft revision. No file is created.
+- `await editor.open("temporary" | "project" | "worktree" | "global")` captures raw target
+  data, the effective baseline, and a draft revision. Worktree is internal; public
+  agent requests retain session/project/global. No file is created.
 - `draft.set(path, value)` marks exactly one schema leaf dirty. For arrays this
   is an **explicit whole-list replacement** (`[]` is an explicit clear), not CRUD.
   `inherit(path)` removes that target-layer assignment, distinct from `[]` or `""`.
@@ -63,8 +64,8 @@ intentional approval, review and reload differences.
   Native editor APIs support literals; the agent setter rejects `textValue`.
 - `await draft.forScope(scope)` transfers dirty scalar fields and **entry intent**,
   not an effective collection snapshot. On preview/apply, entry operations replay
-  over the chosen scope's at-or-below-scope baseline: Global excludes Project/Session;
-  Project excludes Session; Session includes the current effective settings.
+  over the chosen scope's at-or-below-scope baseline: Global excludes Project/Worktree/Session;
+  shared Project excludes Worktree/Session; Worktree excludes Session; Session includes the current effective settings.
   Existing target-only entries survive. Unrelated higher-scope entries never get
   imported, even when hidden target entries are absent from the displayed list.
   Use this for the three scope buttons and confirm `preview()` before applying.
@@ -151,7 +152,15 @@ before returning recent logs or prune diagnostic details; arbitrary application 
 ## File safety and bounded guarantees
 
 Targets come only from shared `hostConfigPaths`: host `default.toml` globally,
-canonical project `projects/.../config.toml` or `projects-absolute/.../config.toml`.
+cwd-local `projects/.../config.toml` or `projects-absolute/.../config.toml`, and
+checkout-root shared `repositories/<sha256(commonDir)>/config.toml`. Shared raw
+drafts privately inject immutable `[_repository]` metadata into the SAME atomic
+artifact. `repository-catalog.ts` performs bounded read-only association lookup;
+there are no per-worktree records or read-side writes. All catalog proof trees
+are reserved against explicit writable mounts, including unrelated cwd sessions.
+Nested cwd stays local. The default main cwd `.git` remains a documented
+cross-worktree trust boundary. See [configuration](configuration.md#host-owned-project-overrides)
+for bounds and fail-closed stale-catalog repair.
 Writes reject symlink targets/ancestors, dangling links, nonregular files, mounted
 workspace locations, and policy exposure through writable mounts. Every candidate
 is validated before any write or Session mutation. Changed saves use exclusive
@@ -225,7 +234,7 @@ This does not make persistence and VM activation a distributed transaction or
 remove the bounded filesystem guarantees above.
 
 `editor.inspect(runtime?, privateSources?)` reads each contributing policy once,
-returns all supported effective settings, sparse Global/Project/Session layers (`layers.global`, `.project`, `.session`),
+returns all supported effective settings, sparse Global/Project/Worktree/Session layers (`layers.global`, `.project`, optional `.worktree`, `.session`),
 origins and warnings as JSON, and does not bootstrap/write/reload. `settings-json.ts`
 whitelists schema fields and omits arbitrary unknown raw values. The dependency-free
 `settings-redaction.ts` masks literal credentials (and deprecated `value` inputs),
@@ -240,17 +249,23 @@ revision captured at open. It returns a strict masked JSON before/after review.
 through the existing atomic-write guards; stale approval conflicts without retry.
 Successful approved applies return a private `assertUnchanged` activation guard.
 Pass it through native `reload({allowRestart, guard})`, which checks before/after
-resolution and preserves the established settings context without configuration
-writes. This prevents adopting newly changed unreviewed live policy after saving. Disabled
-environment reloads fail explicitly for this guarded path. Ordinary panel/reload
-behavior is unchanged. Portable final rename races remain subject to the bounded
+resolution, inside the manager lifecycle queue and before/after SDK awaits,
+even without an AbortSignal. It preserves the established settings context
+without configuration writes. Activation guards must check sources/session/abort,
+not reject the activation's own booting/active runtime transitions. This prevents adopting newly changed unreviewed live policy after saving. Disabled
+environment reloads fail explicitly for this guarded path. The Git Project panel uses the same bound destination candidates; ordinary
+manual lifecycle actions retain their own confirmation. Portable final rename races remain subject to the bounded
 filesystem guarantees above; target metadata necessarily changes on our save,
 while its exact expected content and all other source metadata remain guarded.
 
 `editor.acquireInteraction()` is the shared integration-local panel/tool modal
 lease. Competing callers fail busy; release it in finally. Session lifecycle
 invalidates its AbortSignal. `settings-approval.ts` uses Pi's public native
-No/Yes selector in TUI and RPC, with No selected by default. There is no custom
+No-first selector in TUI and RPC. `settings-project.ts` independently prepares
+and binds shared/local Project candidates before offering their ordered
+destination choices; it never redirects an approved draft. An unavailable
+alternative cannot save and does not block an independently repairable target.
+Shared shadowing is explicit nonwarning context. There is no custom
 pagination or read-to-end gate; Pi controls presentation of the complete masked
 diff and nonwarning context, and long questions may exceed the visible terminal.
 Only semantic warning lines are filtered from tool approval and human setter

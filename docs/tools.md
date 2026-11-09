@@ -8,51 +8,141 @@ page is the precise contract for tool arguments, approval, and results.
 | Tool | Job | Needs approval? |
 | --- | --- | --- |
 | `msb_diagnostics` | Passive cached report, even when sandbox execution is blocked | No |
-| `msb_dockerfile_guide` | Read-only host paths, pinned FROM example and safe customization workflow | No (instructions only) |
+| `msb_dockerfile_get` | Read scoped Dockerfile, context inventory/requested text, exact paths and pinned FROM starter | No |
+| `msb_dockerfile_set` | Propose Project/Global Dockerfile and/or bounded context PATCH, then reload/build/restart | **Every changed proposal**, through interactive UI |
 | `msb_config_get` | Inspect settings, schemas, origins, desired/adopted policy | No |
 | `msb_config_set` | Propose one scoped edit or an atomic same-scope batch | **Every call**, through interactive UI |
 
-Use **Session** for memory-only changes, **Project** for this exact canonical
-cwd, and **Global** for a saved baseline. Inspect first, propose the smallest
+Use **Session** for memory-only configuration changes, **Project** for the
+authoritative Project identity returned by the getters, and **Global** for a saved baseline. Inspect first, propose the smallest
 change, then distinguish saved policy from successful runtime activation.
 
 The model can discover and inspect settings with **`msb_config_get`** and propose
 one operation or an atomic same-scope batch with **`msb_config_set`**. Use
 **`msb_diagnostics`** when startup fails or routed tools are blocked. None grants
-general host execution. Call **`msb_dockerfile_guide`** before creating a Dockerfile
-customization. These four exact names remain available under default third-party blocking only when public
+general host execution. Call **`msb_dockerfile_get`** before proposing a Dockerfile
+replacement with **`msb_dockerfile_set`**. These five exact names remain available under default third-party blocking only when public
 registration provenance resolves to this extension's actual entry module. Missing,
 mismatched or duplicate-winning foreign registration receives no exemption;
 other `msb_*` names have no exemption.
 
-## `msb_dockerfile_guide`
+## `msb_dockerfile_get` / `msb_dockerfile_set`
 
-Call `{}` before creating Dockerfile customization. Human-readable JSON content and
-structured `details` include `baseImage`, a usable `minimalDockerfile`, `workflow`,
-`context`, `lifecycle`, and `imageContract`. With a known canonical workspace,
-`paths.global` and `paths.project` each give exact host-owned `config`, `dockerfile`
-and `buildContext` locations, plus optional shell-quoted `createOnlyExamples`.
-`baseImage` is always the bundled published digest pin, **not** the effective
-image (which may be a custom/generated local reference).
+```json
+{"scope":"project"}
+```
 
-The tool resolves path metadata only, checks session identity across async work,
-and reads no TOML, Dockerfile, context contents or credential values. It never
-writes, executes commands, resolves host secret commands, prompts approval,
-loads the SDK, starts a VM, builds/imports, or reloads. It works off/blocked and
-headlessly when workspace identity is known. Unsafe/unavailable paths return
-`outcome: "unavailable"` with bounded generic guidance and no paths/commands;
-nonempty arguments are rejected. No repository/parent-policy discovery occurs.
+The getter accepts `scope: "project" | "global"` (**no Session**), optional
+`destination: "repository" | "worktree"` for Project, and optional `contextPaths`
+(up to 16 relative file names). Project defaults to the repository target, matching
+config Project; nonGit/nested/unsupported cwd uses its ordinary cwd-local target.
+Use `destination:"worktree"` to read a checkout override explicitly (unavailable
+when no separate Worktree target exists). `target` identifies exactly what was
+read; `paths` lists authoritative Global/Project and optional Worktree locations.
+It returns `exists`, actual Dockerfile UTF-8 `content` (or `null` plus bounded
+reason), bytes, bundled pinned `baseImage`/`minimalDockerfile`, guidance and
+last-known selection. Never use a generated/custom effective image as the starter.
+`inventory` lists bounded metadata (relative path, directory, bytes, executable);
+`inventoryComplete` is explicit. Only `contextPaths` file contents are read and
+returned in `contextFiles`, with SHA-256 for requested text. No arbitrary 32 MiB
+content dump. Reports over 256 KiB explicitly omit the inventory/contents, never
+silently truncate them. Unrequested binary/text files are not content-read.
 
-Choose one scope; inspect existing files, then create/edit using existing
-**approved HOST tools**, not ordinary sandbox Bash/read/write. Returned examples
-use `bash` with `execution_target: "host"` and refuse an existing Dockerfile.
-They are instructions, not execution or approval grants. Active host calls require
-`allowHostExecution`, an approving UI and per-call approval; blocked routing,
-denial or no UI means ask the human to use a host editor/terminal. Never enable
-host execution/fallback or disable protection automatically. After approved host
-edits and any approved image-setting inheritance changes, explicitly reload via
-`/msb` → Actions → Reload settings. See [images](images.md#host-owned-dockerfile-no-host-docker)
-for precedence, isolated contexts, input limits, cache/rebuild and network details.
+Getter is passive and works headlessly, Off or blocked when canonical workspace
+identity is known: no directories, writes, commands/credential resolution, SDK,
+VM, build or reload. Host-owned repository catalog metadata may be read; unsafe
+sources return a bounded generic error, not raw host errors or guessed paths.
+
+Setter accepts optional full Dockerfile `content` and/or a `context` **PATCH**:
+
+```json
+{"scope":"project","content":"FROM <bundled digest pin returned by get>\nCOPY scripts/setup.sh /usr/local/bin/setup\n","context":[{"path":"scripts/setup.sh","content":"#!/bin/sh\necho ready\n","executable":true},{"path":".dockerignore","content":"*.bak\n"}]}
+```
+
+For context-only changes, omit `content`. `{"path":"obsolete.txt","content":null}`
+deletes that one regular text file. Unspecified context files, including binary
+files, are preserved; this is never whole-tree replacement. Omitted `executable`
+preserves an existing executable flag (new files default nonexecutable).
+Nested paths, `.dockerignore` and executable scripts are supported. Paths must
+use the exact inventory spelling: case-folded or canonically Unicode-normalized
+aliases of existing entries/ancestors, or between proposed files/implicit
+directories, are rejected even on case-sensitive hosts. Root `Dockerfile` and
+its spelling aliases are reserved. The tool never silently retargets an alias;
+creates also require actual OS-target absence immediately before publication,
+and updates/deletes must retain the exact reviewed spelling and identity. No binary or
+base64 API, arbitrary host paths, commands, mounts, secrets or image-intent edits.
+At least one proposal is required. Context payload/read limits: 16 files,
+32 KiB UTF-8/file, 64 KiB aggregate new text, requested read text, or original
+context review text. Dockerfile remains 32 KiB. All final sources together obey
+32 MiB / 2048 entries (including Dockerfile/directories) / depth 16.
+
+Project setter first offers the **same named human Repository vs Worktree choice
+as config Project** at supported checkout roots, before opening a target baseline;
+a separate exact-target review follows. The agent cannot choose setter destination.
+Repository affects current/future registered worktrees on reload/start, subject to
+higher overrides. A first shared save also registers immutable host-owned
+`_repository` in the exact shared `config.toml`, explicitly reviewed in the same
+approval. User intent/unknown keys are preserved; adding metadata can rewrite TOML
+formatting/comments. Existing valid metadata/config is never rewritten. There is
+no automatic source copy/migration between destinations. Global and nested/nonGit
+fallbacks remain unchanged. Worktree overrides shared Project, which overrides
+Global; explicit scope `image` and Session `image` can shadow sources. Inspect
+`msb_config_get`; image inheritance requires separate config approval.
+
+These are owned source tools, **not** host Bash/write tools: no host execution
+permission or blanket host access is required.
+
+Each changed proposal requires an interactive TUI/RPC **No-first** approval showing
+the exact scope/destination/paths, every original/proposed line (JSON-quoted),
+context creates/deletes/mode changes, repository registration consequences, and build,
+public-egress, transcript and VM restart warnings. Approval covers saving AND
+settings reload, building/importing the new content image and recreating a running
+sandbox if selected. Off/environment disable and autoStart are respected. Denial,
+no approving UI, dismissal, cancellation or stale identity before commit means no
+save/reload. Cancellation after commit preserves saved bytes but blocks late runtime
+adoption. The approval guard is checked again after build/import, inside the runtime
+queue, before SDK creation and before publishing/persisting activation. Already-started
+SDK create/import operations may finish, but cancelled results cannot be adopted.
+An unchanged bundle is `no_op`: no save approval, filesystem mutation or reload
+(Project may still need destination selection), and file
+mode/mtime are preserved. Reads/previews/denials never create policy directories.
+
+The target, cwd/agent alias/ancestor identities, authoritative project identity,
+policy inputs and context metadata are pinned before review and revalidated after
+approval, throughout per-file publication, immediately before activation and after
+asynchronous build/import. Staged files stay outside `build-context/`, never COPY inputs. No silent rebase/retry occurs. Existing
+symlinks, hardlinks and nonregular files are rejected; descendants of the selected
+agent root cannot be symlinks. New files are 0600 (0700 for executable context files) and new directories 0700.
+Existing mode is preserved unless explicitly changed; the exact before/after modes
+are reviewed. Each replacement is atomic, but the bundle is **not jointly or crash
+atomic**; concurrent sessions/reloads can observe intermediate source states. This
+tool never activates its own partial/unknown save. On failure, confirmed `persistedArtifacts` and an `uncertainArtifact`
+are reported with `saved:"unknown"`, without reload/activation. Only owned staged
+files/empty created directories are cleaned; external replacements are retained.
+There is no automatic rollback over host changes. Inspect and propose a fresh
+review after a partial save.
+
+Dockerfiles accept at most **32 KiB UTF-8**, with no control/format characters except
+TAB/CR/LF. Invalid UTF-8, binary/control-containing or larger existing Dockerfiles
+return bounded metadata/reason, never truncated content; the setter refuses to
+overwrite an original it cannot fully review. Human host repair is then needed.
+Approval/report output is bounded at 256 KiB; oversized reviews are rejected,
+never truncated. Dockerfile contents are intentionally returned **verbatim to the
+model** and the full diff may enter the transcript: **never embed credentials or
+secrets** in Dockerfiles or context.
+
+Results distinguish `saved` and `reloaded` from verified activation: `applied`
+requires the selected image to be known adopted by an active runtime;
+`saved_shadowed` means the Dockerfile was saved but not selected;
+`saved_deferred` means activation is Off, deferred or unverified;
+`saved_but_reload_failed` means saved bytes remain but build/reload failed. A
+`conflict` does not reload; an I/O failure during commit can leave `saved: "unknown"`
+and requires inspection. Never claim the new image is active from a successful
+save alone. Inspect `msb_config_get` for explicit `image`/higher-scope blockers and
+propose `image` inheritance separately with its own `msb_config_set` approval.
+No automatic protection weakening, host fallback or unrelated config edits.
+See [images](images.md#host-owned-dockerfile-no-host-docker) for precedence,
+isolated contexts, cache/rebuild and network boundaries.
 
 ## `msb_diagnostics`
 
@@ -146,14 +236,14 @@ The selected inventory contains:
   desired settings are not presented as a valid resolved policy.
 - `desired`: all resolved settings, including defaults and automatic
   `sandbox_name: null`. This is **not proof of adopted VM state**.
-- `layers.global`, `.project`, `.session`: complete supported sparse raw
+- `layers.global`, `.project`, optional `.worktree`, `.session`: complete supported sparse raw
   assignments and removal controls; absent means inherit. Unknown raw values
   are omitted, malformed shadowed shapes are marked `<invalid>`, and unknown
   key names can appear in warnings/provenance. This is scope intent, not an
   effective configuration to copy back into storage.
 - `origins` and `provenance`: resolver origins, including `defaults`, `env`,
-  legacy `global`/`cli`, `host-default` (Global), `host-project` (Project), and
-  `temporary` (Session). Secret/mount identities have
+  legacy `global`/`cli`, `host-default` (Global), `host-project` (shared Project, or cwd-local Project without a shared target),
+  `host-worktree` (cwd-local override), and `temporary` (Session). Secret/mount identities have
   entry origins; scalar-list provenance is field-level, not item history.
 - `warnings` and `runtime`: status and known adopted settings/provenance,
   verification and timestamp. Reconnected VMs have only partially verified
@@ -270,9 +360,13 @@ placeholders cannot be saved as source fields. Mount entries use `type`, `hostPa
 `readonly`, `options` and the same native workspace/canonical/symlink/socket
 protections. Persistent automatic sandbox naming uses `inherit`, not null.
 
-Global/Project scopes save sparse host-owned defaults at the existing
+Global/Project scopes save sparse host-owned defaults at the selected
 [configuration locations](configuration.md#host-owned-project-overrides).
-Session is memory-only, above Project/Global, never restored from transcripts, cleared on session/workspace identity
+At a supported Git checkout root, Project confirmation chooses the shared
+repository target or only this checkout; existing cwd-keyed overrides remain
+higher priority. New registered worktrees automatically share the shared target.
+Nested cwd/non-Git retain cwd-local semantics, with no parent-policy inheritance.
+Session is memory-only, above Worktree/Project/Global, never restored from transcripts, cleared on session/workspace identity
 change, **Pi `/reload`**, or shutdown. Inherited defaults then return and may
 allow broader access. Ordinary **settings reload preserves Session overrides**;
 it is not Pi's extension `/reload`. Getter summaries, changed Session tool results,
@@ -293,7 +387,16 @@ that supports Pi's UI selector; there is no timeout/automatic approval.
 Approval looks like the HOST-command question: **Allow configuration change?**,
 a standalone `Scope: Session`, `Scope: Project`, or `Scope: Global` line
 and the affected item, a focused color-coded diff, and vertical **No / Yes**
-choices. There is no dashboard header, duplicate identity or routine source dump.
+choices for Session/Global and cwd-local non-Git Project.
+At a Git checkout root, Project instead shows exactly **No** (default),
+**Yes (For <repository> and all its worktrees)**, then
+**Yes (Only for <checkout> worktree)**. Names are safely rendered dynamically.
+Each candidate has its own bound full diff, path and command appendix; selection
+commits only that candidate, never redirects an approved draft. Shared shadowing
+is explicit nonwarning context: it can affect other/future worktrees even when
+not effective here. An independently unreviewable destination is marked
+UNAVAILABLE and cannot save; the valid repair alternative is still offered.
+There is no dashboard header or routine source dump.
 Scope names use the theme’s warning color; the `Scope:` label stays muted.
 Native entry edits omit siblings and unchanged fields. Literal credentials stay
 `<redacted>` in the diff; host source metadata is readable. Proposed host commands
@@ -311,12 +414,12 @@ Session lifetime, network/DNS limitations, and the proposal's HOST bypass policy
 explain relevant returned warnings to the user. Unrelated HOST reminders and full
 raw/desired/adopted/provenance JSON are not displayed.
 
-Approval uses Pi's standard No/Yes selector. In TUI, **No** is initially selected;
-arrows/j/k choose No/Yes, Enter selects, and Escape cancels. The complete masked,
+Approval uses Pi's standard No-first selector. In TUI, **No** is initially selected;
+arrows/j/k choose a destination/answer, Enter selects, and Escape cancels. The complete masked,
 theme-colored diff and nonwarning context are passed to Pi without pagination or a
 read-to-end gate. Pi owns layout; long questions may exceed the visible terminal
 area, and the extension does not provide scrolling or guarantee every line is
-visible. RPC receives the same plain-text question/diff with No/Yes and no ANSI.
+visible. RPC receives the same plain-text question/diff and ordered choices without ANSI.
 Oversized diffs reject instead of hiding changed values.
 Abort, cancellation, session replacement or changed sources, Session settings or
 runtime state invalidate approval; nothing is automatically rebased/retried.

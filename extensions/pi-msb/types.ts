@@ -97,7 +97,7 @@ export type DeepReadonly<T> = T extends (...args: any[]) => unknown
     : T extends object
       ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
       : T;
-export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "temporary";
+export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "host-worktree" | "temporary";
 export interface ParsedConfigLayer {
   name: ConfigLayerName;
   value: DeepPartial<Config>;
@@ -381,7 +381,7 @@ export interface BootRequest {
   blockHostFallback?: boolean;
 }
 export interface SandboxManager extends ToolOpsProvider {
-  boot(request: BootRequest): Promise<RuntimeState>;
+  boot(request: BootRequest, activationGuard?: () => Promise<void>): Promise<RuntimeState>;
   shutdown(): Promise<void>;
   setEnabled(enabled: boolean): Promise<RuntimeState>;
 }
@@ -417,8 +417,8 @@ export interface AgentRuntimePolicySnapshot {
   adoptedAt: number;
 }
 export interface MsbControl {
-  /** Read-only host path resolution, guarded by current canonical workspace/session identity. */
-  getDockerfileGuidePaths?(): Promise<import("./dockerfile-guide.ts").DockerfileGuidePaths | undefined>;
+  /** Fixed-scope owned Dockerfile backend; no host-tool routing or arbitrary paths. */
+  openDockerfile?(scope: import("./dockerfile-storage.ts").DockerfileScope, destination?: import("./dockerfile-storage.ts").DockerfileDestination): Promise<import("./dockerfile-storage.ts").DockerfileDraft | undefined>;
   /** Passive allowlisted snapshot from held state only. No settings.inspect,
    * source/environment reads, commands, SDK, logs, lifecycle or writes.
    * Cached desired/adoption is last-known, not live; raw errors are withheld.
@@ -430,7 +430,7 @@ export interface MsbControl {
   readonly settings?: import("./settings.ts").SettingsEditor;
   getState(): RuntimeState;
   setEnabled(enabled: boolean): Promise<void>;
-  reload(options?: { allowRestart?: boolean; guard?: () => Promise<void> }): Promise<void>;
+  reload(options?: { allowRestart?: boolean; guard?: () => Promise<void>; signal?: AbortSignal }): Promise<void>;
   /** Native facade compares candidate to the actual adopted runtime configuration privately. */
   previewSettings?(draft: import("./settings.ts").SettingsDraft): Promise<import("./settings.ts").SettingsPreview>;
   pruneNow(): Promise<PruneReport>;

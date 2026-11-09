@@ -55,8 +55,10 @@ test("blocked invalid startup exposes passive diagnostics and approval-bound hos
         select: async (_question, options) => { approvals++; assert.deepEqual(options, ['No', 'Yes']); return answer; } } };
     await hooks.get('session_start').at(-1)({}, ctx);
     const run = (name, args) => tools.get(name).execute(name, args, undefined, undefined, ctx);
-    const guide = await run('msb_dockerfile_guide', {});
-    assert.equal(guide.details.outcome, 'guided');
+    assert.ok(tools.has('msb_dockerfile_set'));
+    assert.equal(tools.has('msb_dockerfile_guide'), false);
+    const guide = await run('msb_dockerfile_get', {scope:'project'});
+    assert.equal(guide.details.outcome, 'inspected');
     assert.equal(guide.details.paths.global.config, paths.global);
     assert.equal(guide.details.paths.project.config, paths.project);
     assert.equal(approvals, 0);

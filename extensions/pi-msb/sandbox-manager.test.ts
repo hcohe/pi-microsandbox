@@ -1099,3 +1099,28 @@ test("a rejected owner lock clears pendingName instead of advertising a live san
   assert.equal(result.pendingName, undefined);
   assert.equal(manager.getState().pendingName, undefined);
 });
+
+test("activation approval is rechecked inside the lifecycle queue before replacing an adopted runtime", async () => {
+  const events: string[] = [];
+  const preparing = deferred(), release = deferred();
+  let preparations = 0;
+  const manager = createSandboxManager(depsFor(events, {
+    prepareRuntime: async () => {
+      if (++preparations === 1) { preparing.resolve(); await release.promise; }
+      return { docker: { mode: "disabled", readiness: "disabled" } };
+    },
+  }));
+  const initial = manager.boot(request());
+  await bounded(preparing.promise);
+  const abort = new AbortController();
+  const queued = manager.boot(request({ forceRecreate: true }), async () => abort.signal.throwIfAborted());
+  const rejected = assert.rejects(queued, { name: "AbortError" });
+  abort.abort(); release.resolve();
+  assert.equal((await bounded(initial)).status, "active");
+  await bounded(rejected);
+  assert.equal(events.filter((event) => event === "create").length, 1);
+  assert.equal(events.filter((event) => event === "persist").length, 1);
+  assert.equal(events.includes("stop-remove"), false, "queued stale approval must not destroy the old runtime");
+  assert.equal(manager.getState().status, "active");
+  await manager.shutdown();
+});

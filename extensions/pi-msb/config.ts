@@ -5,6 +5,8 @@ import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolv
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { buildImageReference, discoverDockerfile, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
+import { repositoryKey, repositoryMetadata, type RepositoryMetadata } from "./repository-catalog.ts";
+import { discoverProjectIdentity, ProjectIdentityError, type ProjectIdentity } from "./project-identity.ts";
 import { isSecretHost, networkDestinationKind } from "./network-domains.ts";
 import type {
   Config,
@@ -459,7 +461,8 @@ function withMountDefaults(value: LayerValue): LayerValue {
 }
 function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, source?: string): ParsedConfigLayer {
   assertSafeConfigValue(raw);
-  const normalized = normalizeValue(raw) as Record<string, unknown>;
+  const { _repository: _privateRepository, ...settings } = raw;
+  const normalized = normalizeValue(settings) as Record<string, unknown>;
   assertNoRemovedWorkspaceKeys(normalized);
   assertNoDeprecatedSecretSources(normalized);
   const value = withMountDefaults(normalized as LayerValue);
@@ -469,7 +472,7 @@ function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, sou
 }
 
 export function parseTomlConfig(text: string, source: string): ParsedConfigLayer {
-  const name = ["cli", "env", "project", "host-default", "host-project"].includes(source)
+  const name = ["cli", "env", "project", "host-default", "host-project", "host-worktree"].includes(source)
     ? source as ConfigLayerName
     : "global";
   return layerFromText(name, text, source);
@@ -515,7 +518,7 @@ function mergeObject(target: Record<string, any>, source: Record<string, any>, p
     if (CONTROL_KEYS.has(key) || value === undefined) continue;
     // Host policy lists are authoritative, never additive. Drop stale identity
     // provenance too, so replaced project mounts/secrets cannot retain authority.
-    if ((layer === "host-default" || layer === "host-project" || layer === "temporary") && Array.isArray(value)) {
+    if ((layer === "host-default" || layer === "host-project" || layer === "host-worktree" || layer === "temporary") && Array.isArray(value)) {
       target[key] = [];
       const field = pathKey(path);
       for (const prior of Object.keys(provenance)) if (prior.startsWith(`${field}[`)) delete provenance[prior];
@@ -794,28 +797,73 @@ export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots:
   }
 }
 
-/** Canonical I/O targets and lexical reference origins must stay distinct across an agent-root symlink. */
-export async function hostConfigTargets(input: ResolveConfigInput) {
+/** Worktree is the existing cwd-keyed override, present only for shared checkout-root policy. */
+export interface HostConfigPaths {
+  global: string;
+  project: string;
+  worktree?: string;
+}
+export interface HostConfigTargets {
+  agentDir: string;
+  canonicalAgentDir: string;
+  paths: HostConfigPaths;
+  lexicalPaths: HostConfigPaths;
+  identity: ProjectIdentity;
+  repository?: RepositoryMetadata;
+  repositoryName: string;
+  worktreeName: string;
+  isWorktree: boolean;
+}
+
+/** Canonical I/O targets and lexical reference origins stay distinct across an agent-root symlink. */
+export async function hostConfigTargets(input: ResolveConfigInput, replacement?: { file: string; text: string }): Promise<HostConfigTargets> {
   const realpath = input.realpath ?? defaultRealpath;
   const env = input.env ?? process.env;
-  const root = await realpath(input.repoRoot ?? input.cwd);
   const home = await realpath(input.homedir ?? env.HOME ?? osHomedir());
   const agentDir = resolve(input.agentDir ?? getAgentDir());
   const canonicalAgentDir = await canonicalPolicyLocation(agentDir, realpath);
-  const targets = (anchor: string) => {
+  const workspaceRoots = [resolve(input.repoRoot ?? input.cwd), await realpath(input.repoRoot ?? input.cwd)];
+  const catalogRoot = join(canonicalAgentDir, "pi-microsandbox", "repositories");
+  await assertPolicyOutsideWorkspace(join(agentDir, "pi-microsandbox", "repositories"), workspaceRoots, realpath);
+  await assertPolicyOutsideWorkspace(catalogRoot, workspaceRoots, realpath);
+  await hostPolicyAncestorLocations([join(agentDir, "pi-microsandbox", "repositories")], realpath);
+  if (await canonicalPolicyLocation(catalogRoot, realpath) !== catalogRoot) {
+    // Preserve passive legacy policy-alias reads when no catalog exists. A
+    // catalog itself may never live behind descendant symlinks; editor writes
+    // independently require non-symlink descendants even for an absent catalog.
+    try { await fs.lstat(catalogRoot); throw new ConfigError(["repository catalog requires non-symlink descendants"]); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  let identity: ProjectIdentity;
+  try { identity = await discoverProjectIdentity(input.repoRoot ?? input.cwd, realpath, { root: catalogRoot, parse: readRawConfig, replacement }); }
+  catch (error) {
+    if (error instanceof ProjectIdentityError) throw new ConfigError([error.message]);
+    throw error;
+  }
+  const association = identity.association;
+  // No parent-policy inheritance: nested cwd and unsupported Git layouts stay local.
+  const shared = identity.cwd === association.checkoutRoot && association.commonDir !== null
+    && association.mainCheckoutRoot !== null && join(association.mainCheckoutRoot, ".git") === association.commonDir;
+  const repository = shared ? repositoryMetadata(association.commonDir!, association.mainCheckoutRoot!) : undefined;
+  const targets = (anchor: string): HostConfigPaths => {
     const directory = join(anchor, "pi-microsandbox");
+    const projectPath = (root: string) => isInside(root, home)
+      ? join(directory, "projects", relative(home, root), "config.toml")
+      : join(directory, "projects-absolute", relative(parse(root).root, root), "config.toml");
     return {
       global: join(directory, "default.toml"),
-      project: isInside(root, home)
-        ? join(directory, "projects", relative(home, root), "config.toml")
-        : join(directory, "projects-absolute", relative(parse(root).root, root), "config.toml"),
+      project: repository ? join(directory, "repositories", repositoryKey(repository.common_dir), "config.toml") : projectPath(identity.cwd),
+      ...(repository ? { worktree: projectPath(identity.cwd) } : {}),
     };
   };
-  return { agentDir, canonicalAgentDir, paths: targets(canonicalAgentDir), lexicalPaths: targets(agentDir) };
+  return {
+    agentDir, canonicalAgentDir, paths: targets(canonicalAgentDir), lexicalPaths: targets(agentDir), identity, ...(repository ? { repository } : {}),
+    repositoryName: identity.repositoryName, worktreeName: identity.worktreeName, isWorktree: identity.isWorktree,
+  };
 }
 
 /** Shared host-owned targets for resolution and editing, including missing descendants. */
-export async function hostConfigPaths(input: ResolveConfigInput): Promise<{ global: string; project: string }> {
+export async function hostConfigPaths(input: ResolveConfigInput): Promise<HostConfigPaths> {
   return (await hostConfigTargets(input)).paths;
 }
 
@@ -854,17 +902,18 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (captureSanitizer) privateSources.push(readRawConfig(text));
   }
   const targets = await hostConfigTargets(input);
-  const { global: hostDefaultFile, project: hostProjectFile } = targets.paths;
+  const hostFiles: Array<["host-default" | "host-project" | "host-worktree", string, string]> = [
+    ["host-default", targets.paths.global, targets.lexicalPaths.global],
+    ["host-project", targets.paths.project, targets.lexicalPaths.project],
+    ...(targets.paths.worktree ? [["host-worktree", targets.paths.worktree, targets.lexicalPaths.worktree!] as ["host-worktree", string, string]] : []),
+  ];
   const hostLayers: ParsedConfigLayer[] = [];
+  const presentHostPolicies = new Set<string>();
   const buildSources = new Map<ConfigLayerName, Pick<DockerfileSource, "dockerfile" | "agentRoot" | "agentAlias" | "cacheDir" | "scope">>();
   const hostPolicyPaths: string[] = [];
-  for (const [name, file] of [
-    ["host-default", hostDefaultFile],
-    ["host-project", hostProjectFile],
-  ] as const) {
+  for (const [name, file, lexicalFile] of hostFiles) {
     // Protect even missing policy locations, including symlinked parents, so a
     // writable mount cannot create a higher-priority override on the next reload.
-    const lexicalFile = targets.lexicalPaths[name === "host-default" ? "global" : "project"];
     await assertPolicyOutsideWorkspace(lexicalFile, workspaceRoots, realpath);
     await assertPolicyOutsideWorkspace(file, workspaceRoots, realpath);
     hostPolicyPaths.push(lexicalFile, dirname(lexicalFile));
@@ -874,6 +923,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (protectedPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
+    if (text !== null) presentHostPolicies.add(name);
     const policy = text === null ? { name, value: {} as DeepPartial<Config>, warnings: [] } : layerFromText(name, text, lexicalFile);
     if (captureSanitizer && text !== null) privateSources.push(readRawConfig(text));
     hostLayers.push(policy);
@@ -887,10 +937,16 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     throw new ConfigError(["host configuration must be outside the mounted workspace"]);
   }
   hostPolicyPaths.push(...hostPolicyRoots);
+  // The reciprocal registration is host proof, not guest-editable discovery data.
+  // Reserve its canonical/lexical entries and retargetable ancestors against mounts.
+  hostPolicyPaths.push(...targets.identity.protectedPaths,
+    ...await hostPolicyAncestorLocations(targets.identity.protectedPaths, realpath));
   // A higher explicit image disables lower Dockerfiles completely, including reads.
   for (const policy of Object.hasOwn(input.temporaryOverrides ?? {}, "image") ? [] : [...hostLayers].reverse()) {
-    const name = policy.name as "host-default" | "host-project";
-    const file = name === "host-default" ? hostDefaultFile : hostProjectFile;
+    const name = policy.name as "host-default" | "host-project" | "host-worktree";
+    // A shared Dockerfile cannot establish an uncatalogued association by itself.
+    if (name === "host-project" && targets.repository && !presentHostPolicies.has(name)) continue;
+    const file = hostFiles.find(([scope]) => scope === name)![1];
     // Image and Dockerfile are one atomic source choice at each host scope.
     if (Object.hasOwn(policy.value, "image")) break;
     const dockerfile = join(dirname(file), "Dockerfile");
@@ -958,7 +1014,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (imageBuild && [imageBuild.dockerfile, join(dirname(imageBuild.dockerfile), "build-context")].some((path) => isInside(path, host) || isInside(host, path))) {
       policyIssues.push("host mounts must not expose Dockerfile or build-context sources");
     }
-    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || hostPolicyRoots.some((root) => isInside(host, root)))) {
+    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || hostPolicyRoots.some((root) => isInside(host, root)) || targets.identity.protectedPaths.some((root) => isInside(host, root)))) {
       policyIssues.push("writable host mounts must not expose host configuration");
     }
     let unsafe = basename(host) === "docker.sock" || knownHostDockerSockets.some((socket) => isInside(socket, host));

@@ -67,14 +67,30 @@ an updated mutable tag, or `"never"` to require a cached local image.
 
 ## Host-owned Dockerfile (no host Docker)
 
-**Call `msb_dockerfile_guide` with `{}` before creating customization.** It returns
-exact Global/Project host paths for the current canonical cwd, a directly usable
-`FROM` with the installed bundled image's digest pin, and safe create-only host
-command examples. It does not execute them or change anything. Inspect/edit via
-approved HOST tools (`execution_target: "host"`), never ordinary sandbox
-Bash/read/write. If host policy, blocked routing or lack of an approving UI
-prevents that, ask the human to use their host editor/terminal; do not enable host
-execution/fallback automatically. [Tool contract](tools.md#msb_dockerfile_guide).
+**Call `msb_dockerfile_get` with `{"scope":"project"}` (or `"global"`) first.**
+It reads the actual scoped Dockerfile, returns authoritative host paths, and gives
+a directly usable bundled digest-pinned `FROM` starter. Propose a complete
+replacement with `msb_dockerfile_set` using the same scope and `content`, and/or
+a relative `context` patch. Getter `contextPaths` requests bounded context text. Its
+No-first per-proposal review includes the exact path, full escaped replacement
+diff and build/public-egress/restart consequences. Approved changes publish each file atomically (not jointly/crash atomic)
+and reload settings only after the whole approved bundle is confirmed, building/importing and restarting with the new image when
+selected. This requires no blanket host execution permission or host-shell recipe.
+No UI/denial/stale approval means no write/reload; unchanged is a no-op.
+Report saved versus active: explicit images/higher scopes may shadow the file,
+Off/autoStart can defer activation, and build failures leave saved content without
+confirmed activation. Use a separately approved `msb_config_set` image inheritance
+change if needed; never edit other scopes silently or weaken protection.
+[Tool contract](tools.md#msb_dockerfile_get--msb_dockerfile_set).
+
+Tool Dockerfiles are bounded to 32 KiB valid UTF-8 (no unsupported controls),
+never silently truncated. Content and full diffs are intentionally exposed to the
+model/transcript: **do not embed credentials or secrets**. Context PATCH supports
+UTF-8 text, `.dockerignore`, nested files, executable scripts and single-file
+deletion (`content:null`), preserving unspecified/binary files. Limits are 16 files,
+32 KiB/file and 64 KiB aggregate text per read/proposal/original review. Getter
+inventories metadata without reading unrequested file contents. No arbitrary
+host paths or binary/base64 payloads; use a human editor for unsupported inputs.
 
 Place a Dockerfile beside your host-owned policy, outside the mounted cwd:
 
@@ -86,19 +102,29 @@ Place a Dockerfile beside your host-owned policy, outside the mounted cwd:
 ```
 
 The default Pi agent directory is `~/.pi/agent`; Pi's `getAgentDir()` (including
-`PI_CODING_AGENT_DIR`) is authoritative. Projects outside home use
-`projects-absolute/<absolute-cwd-without-leading-slash>/Dockerfile`, exactly like
-[Project configuration](configuration.md#host-owned-project-overrides). Canonical
-cwd selects the Project: aliases share it, nested cwd does not inherit a parent's
-Dockerfile. A host-selected agent-directory symlink is supported, but descendants
-must not be symlinks. Keep these paths outside the workspace and writable mounts;
+`PI_CODING_AGENT_DIR`) is authoritative. Use the getter's exact Project path, derived from the same current authoritative
+identity as [Project configuration](configuration.md#host-owned-project-overrides),
+not a guessed cwd-to-directory mapping. Project setter uses the same named human
+Repository/Worktree choice as config at supported checkout roots, before opening
+the proposal baseline. Shared saves explicitly review registration of immutable
+`_repository` in shared `repositories/<hash>/config.toml` when needed, preserving
+user configuration/image intent. This enables source discovery for current/future
+registered worktrees, including after checkout gitfile deletion. Getter Project
+defaults to repository; `destination:"worktree"` explicitly inspects the override.
+Nested/nonGit/unsupported cwd stays local; Global is unchanged. No source files
+are copied or migrated by config or source destination selection. A standalone
+shared Dockerfile without catalog metadata is not discovery authority. No policy
+identity changes the mounted cwd boundary. A
+host-selected agent-directory symlink is supported, but descendants must not be
+symlinks. Keep these paths outside the workspace and writable mounts;
 a cwd encompassing the policy location (often home itself) is rejected, not
 silently granted access. Build sources cannot be exposed through explicit mounts,
 even read-only ones.
 
 **Source precedence is atomic.** At each host scope, an explicit TOML `image`
 wins over its colocated Dockerfile. Otherwise the Dockerfile supplies that scope's
-image. Project overrides Global, and a Session `image` disables inherited
+image. Project overrides Global; a higher Worktree source can override Project where
+applicable, and a Session `image` disables inherited
 Dockerfile discovery. With neither image nor Dockerfile, the bundled digest pin
 is used. Remove a scope's explicit `image` to enable its Dockerfile; changing
 `pull_policy` alone does not disable discovery. Discovered images always use
@@ -107,7 +133,7 @@ and a Dockerfile-path warning; unrelated settings saves do **not** persist the
 generated reference. Do not copy effective settings into a policy file.
 
 A minimal Dockerfile can derive from the bundled image (use the exact digest pin
-returned by `msb_dockerfile_guide`, not effective `msb_config_get` image, which may
+returned by `msb_dockerfile_get`, not effective `msb_config_get` image, which may
 be a generated local reference or custom image):
 
 ```dockerfile

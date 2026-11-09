@@ -122,7 +122,7 @@ test("launch I/O diagnostics allow only known safe codes; programmer errors prop
 test("panel-construction failures propagate with a safe UI stage, not a hidden blanket catch", async () => {
   const f = fixture(); f.ctx.mode = "tui";
   const draft = { discard() {}, snapshot() { throw new TypeError("PRIVATE_CONSTRUCTION_SENTINEL"); } };
-  Object.defineProperty(f.control, "settings", { value: { acquireInteraction, open: async () => draft } });
+  Object.defineProperty(f.control, "settings", { value: { acquireInteraction, open: async () => draft, projectDestinations: async () => undefined } });
   f.ctx.ui.custom = async (factory: any) => factory({}, {}, {}, () => {});
   await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
     assert.ok(error instanceof Error);

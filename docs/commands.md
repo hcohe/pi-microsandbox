@@ -65,8 +65,10 @@ Each scalar edit or entry operation offers:
 - **Session:** memory-only, above Project and Global. Panel Session edits require
   a running sandbox and cannot silently boot one. Cleared on Pi `/reload`,
   session/workspace switch, or shutdown; not restored on resume.
-- **Project:** save a sparse override for this canonical cwd in its host-owned
-  `config.toml`.
+- **Project:** at supported Git checkout roots, open the No-first destination
+  menu: shared repository policy (including future registered worktrees), or
+  only this checkout. Both complete candidates are prepared before selection;
+  there is no extra Yes dialog. Elsewhere save a cwd-local sparse override.
 - **Global:** save a sparse baseline in host-owned `default.toml`.
 - **Cancel:** discard the proposal without changing storage or runtime.
 

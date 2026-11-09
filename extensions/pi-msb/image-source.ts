@@ -7,7 +7,7 @@ export interface DockerfileSource {
   agentRoot: string;
   agentAlias: string;
   cacheDir: string;
-  scope: "host-default" | "host-project";
+  scope: "host-default" | "host-project" | "host-worktree";
   identity: string;
   platform: string;
 }

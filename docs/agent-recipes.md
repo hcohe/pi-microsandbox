@@ -39,16 +39,32 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 
 ## Add a package to my image
 
-> Call msb_dockerfile_guide first. Show this Project's exact host-owned Dockerfile
-> and context locations and the bundled digest-pinned FROM example with jq.
-> Inspect existing files, then propose only approved HOST-tool edits; don't use
-> sandbox file tools, overwrite existing files, or execute the guide automatically.
-> Explain image precedence and any approved inheritance change needed, then ask
-> me to reload settings. If host tools are blocked, give me human host-editor
-> instructions instead of weakening protection.
+> Call msb_dockerfile_get with scope project first. Show this Project's current
+> Dockerfile, exact host-owned Dockerfile/context locations and bundled pinned
+> FROM starter with jq. Propose the full replacement via msb_dockerfile_set in
+> project scope; let me review the exact file diff and build/public-egress/restart
+> impact. Don't use host commands, grant blanket host access or embed secrets.
+> Explain any image/higher-scope blocker and propose image inheritance separately
+> with msb_config_set approval. After saving, distinguish whether the new image is
+> active, shadowed, deferred or failed to activate.
 
-The guide is read-only and works without a running VM when the canonical cwd is
-known. See [host-owned Dockerfiles](images.md#host-owned-dockerfile-no-host-docker)
+At supported checkout roots, Project setter asks the human to choose shared
+Repository or only this Worktree, then reviews the exact selected bundle. Getter
+Project defaults to repository; request `destination:"worktree"` when editing the
+checkout override. Neither config nor source destination choices copy existing
+sources. Shared first saves explicitly register immutable config metadata, never
+image intent. Nested/nonGit cwd remains local; Global is unchanged.
+
+> Read context inventory with msb_dockerfile_get, requesting contextPaths only for
+> the UTF-8 files I want to inspect. Propose a context-only PATCH with scope project
+> and context [{path:"scripts/setup.sh",content:"#!/bin/sh\necho ready\n",executable:true}].
+> Preserve every unspecified file; content:null deletes just one reviewed file.
+> Show full content/mode changes and build/public-egress/restart consequences.
+
+Getter is passive Off/blocked when canonical cwd is known. Changed proposals need
+interactive approval; each file is atomic but the bundle is not jointly/crash
+atomic. Partial/unknown persistence never activates. Context-only saves rebuild
+and replace the running VM when selected. See [host-owned Dockerfiles](images.md#host-owned-dockerfile-no-host-docker)
 for isolated COPY contexts, cache/rebuild behavior and the build network boundary.
 
 ## Less RAM, same ambition
@@ -57,7 +73,11 @@ for isolated COPY contexts, cache/rebuild behavior and the build network boundar
 > the restart impact, then propose both edits in one msb_config_set batch. Don't
 > change other settings. After approval, report whether both save and reload worked.
 
-Project scope remembers it for this exact canonical cwd. The agent can submit:
+At a Git checkout root, Project asks you to choose all registered worktrees
+(including future ones) or only this checkout, with **No** selected first.
+Elsewhere it remembers this exact canonical cwd; nested cwd never inherits a
+parent policy. The agent still submits `scope: "project"`; it cannot preselect
+your persistence decision. For example:
 
 ```json
 {"scope":"project","operations":[

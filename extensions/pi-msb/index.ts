@@ -17,7 +17,7 @@ import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
 import { registerConfigTools } from "./settings-tools.ts";
 import { registerDiagnosticsTool } from "./diagnostics-tools.ts";
-import { registerDockerfileGuideTool } from "./dockerfile-guide.ts";
+import { registerDockerfileTools } from "./dockerfile-tools.ts";
 import { SESSION_LIFETIME_WARNING } from "./settings-safety.ts";
 import { registerSandboxTools } from "./tools.ts";
 import type { ResolvedConfig, RuntimeState, SessionExecutionIdentity } from "./types.ts";
@@ -173,7 +173,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   registerMsbCommand(pi, integration.control);
   registerConfigTools(pi, integration.control);
   registerDiagnosticsTool(pi, integration.control);
-  registerDockerfileGuideTool(pi, integration.control, currentProvider.execution);
+  registerDockerfileTools(pi, integration.control, currentProvider.execution);
 
   pi.on("session_start", async (_event, ctx) => {
     const generation = ++uiGeneration;

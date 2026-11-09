@@ -162,7 +162,7 @@ function createHarness(options: {
   const pi = {
     registerTool(tool: any) { tools.set(tool.name, tool); },
     getAllTools() {
-      return [...tools.values(), ...["msb_config_get", "msb_config_set", "msb_diagnostics", "msb_dockerfile_guide"].map((name) => ({ name, configTool: true }))].map((tool) => ({
+      return [...tools.values(), ...["msb_config_get", "msb_config_set", "msb_diagnostics", "msb_dockerfile_get", "msb_dockerfile_set"].map((name) => ({ name, configTool: true }))].map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
@@ -401,9 +401,9 @@ test("updates skill access, tracks Bash output, and proxies user_bash", async ()
   });
   const [prompt] = await harness.emit("before_agent_start", { systemPrompt: "base" });
   assert.ok(prompt.systemPrompt.startsWith("base\n\nmode:active\n"));
-  assert.match(prompt.systemPrompt, /Before creating Dockerfile customization, call msb_dockerfile_guide/);
-  assert.match(prompt.systemPrompt, /approved HOST-tool workflow/);
-  assert.match(prompt.systemPrompt, /do not execute instructions as part of getting guidance/);
+  assert.match(prompt.systemPrompt, /Before creating Dockerfile customization, call msb_dockerfile_get/);
+  assert.match(prompt.systemPrompt, /msb_dockerfile_set.*explicit per-proposal approval/);
+  assert.match(prompt.systemPrompt, /Never use host commands or sandbox file tools/);
   const [userBash] = await harness.emit("user_bash", { type: "user_bash", command: "true", cwd: process.cwd() });
   assert.ok(userBash.operations);
   await userBash.operations.exec("true", process.cwd(), { onData: () => {} });
@@ -412,15 +412,15 @@ test("updates skill access, tracks Bash output, and proxies user_bash", async ()
   assert.deepEqual(harness.allowedReads, []);
 });
 
-test("third-party gate exempts only the exact owned configuration, diagnostics and Dockerfile guide tools", async () => {
+test("third-party gate exempts only the exact owned configuration, diagnostics and Dockerfile get/set tools", async () => {
   for (const status of ["active", "unavailable", "off", "host-fallback", "booting", "stopping", "disabled"] as const) {
     const f = createHarness({ runtimeState: state(status) });
-    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics", "msb_dockerfile_guide"]) {
+    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics", "msb_dockerfile_get", "msb_dockerfile_set"]) {
       const outcomes = await f.emit("tool_call", { toolName, toolCallId: "config", input: {} });
       assert.ok(outcomes.every((outcome) => !outcome?.block));
     }
     if (status !== "off" && status !== "host-fallback") {
-      for (const toolName of ["msb_config_get_extra", "msb_config_set_extra", "msb_diagnostics_extra", "msb_dockerfile_guide_extra", "msb_other", "external_tool"]) {
+      for (const toolName of ["msb_config_get_extra", "msb_config_set_extra", "msb_diagnostics_extra", "msb_dockerfile_guide", "msb_dockerfile_get_extra", "msb_dockerfile_set_extra", "msb_other", "external_tool"]) {
         const outcomes = await f.emit("tool_call", { toolName, toolCallId: "external", input: {} });
         assert.ok(outcomes.some((outcome) => outcome?.block), toolName);
       }
@@ -561,7 +561,7 @@ test("unready execution boundary blocks old off mode, including user bash and to
 test("management tools with missing or mismatched registration provenance receive no exemption", async () => {
   for (const configToolSource of [null, fileURLToPath(new URL("./settings-tools.ts", import.meta.url)), "/tmp/nonexistent/index.ts"]) {
     const f = createHarness({ configToolSource });
-    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics", "msb_dockerfile_guide"]) {
+    for (const toolName of ["msb_config_get", "msb_config_set", "msb_diagnostics", "msb_dockerfile_get", "msb_dockerfile_set"]) {
       const outcomes = await f.emit("tool_call", { toolName, toolCallId: "spoof", input: {} });
       assert.ok(outcomes.some((outcome) => outcome?.block));
     }

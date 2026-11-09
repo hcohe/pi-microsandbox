@@ -30,7 +30,7 @@ export interface SandboxManagerDeps {
   inspectSandbox(name: string): Promise<InspectedSandbox | null>;
   connectSandbox(value: InspectedSandbox): Promise<unknown>;
   startSandbox(value: InspectedSandbox): Promise<unknown>;
-  createSandbox(request: BootRequest, name: string): Promise<unknown>;
+  createSandbox(request: BootRequest, name: string, activationGuard?: () => Promise<void>): Promise<unknown>;
   stopAndRemove(name: string, timeoutMs: number): Promise<void>;
   createTransport(raw: unknown): SandboxTransport;
   createOperations(transport: SandboxTransport): ToolOperations;
@@ -344,11 +344,14 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
   }
 
-  async function bootInternal(request: BootRequest): Promise<RuntimeState> {
+  async function bootInternal(request: BootRequest, activationGuard?: () => Promise<void>): Promise<RuntimeState> {
     // Do not mutate or reconnect a resource while a concurrent tool preflight is
     // atomically replacing its runtime handle.
     await transition;
     await retirement;
+    // Guard inside the lifecycle queue, not only before enqueueing the request.
+    await activationGuard?.();
+    if (activationGuard) request.blockHostFallback = true;
     const previousRequest = lastRequest;
     const name = requestSandboxName(request);
     if (
@@ -375,6 +378,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       await shutdownInternal(false);
       if (manager.getState().status === "unavailable") return state;
     }
+    await activationGuard?.();
 
     lastRequest = request;
     publish({ status: "booting", info: null, pendingName: name });
@@ -384,9 +388,11 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     } catch (error) {
       // A lock implementation failure is fail-closed and must not permit any
       // SDK/storage call to run without ownership.
+      await activationGuard?.();
       return setFailure(request, error);
     }
     if (!owner) {
+      await activationGuard?.();
       // A live owner is not a stale-resource condition. Do not inspect, prune,
       // or otherwise mutate anything when the non-blocking lock says busy.
       publish({
@@ -404,23 +410,28 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     let bootedRuntime: RuntimeExecution | null = null;
 
     try {
+      await activationGuard?.();
       if (request.config.pruneOnStart) {
         await deps.pruneOthers(request.sessionId);
       }
+      await activationGuard?.();
       sandboxName = name;
       const inspected = await deps.inspectSandbox(name);
+      await activationGuard?.();
       let raw: unknown;
       if (inspected && inspected.name !== name) throw new Error(`sandbox name mismatch: expected ${name}`);
 
       if (!inspected) {
+        await activationGuard?.();
         partialSandbox = true; created = true;
-        raw = await deps.createSandbox(request, name);
+        raw = await deps.createSandbox(request, name, activationGuard);
       } else if (isLegacyManagedOwner(inspected, request)) {
         // The current session owner lock guards removal. Legacy named volumes
         // are intentionally neither inspected nor removed.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
+        await activationGuard?.();
         partialSandbox = true; created = true;
-        raw = await deps.createSandbox(request, name);
+        raw = await deps.createSandbox(request, name, activationGuard);
       } else if (!isManagedOwner(inspected, request)) {
         throw new Error(`sandbox name conflict: ${name}`);
       } else if (request.forceRecreate || !matchesWorkspace(inspected, request)) {
@@ -429,14 +440,16 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
         // The old instance was removed; a failed replacement still needs its
         // own best-effort cleanup.
+        await activationGuard?.();
         partialSandbox = true; created = true;
-        raw = await deps.createSandbox(request, name);
+        raw = await deps.createSandbox(request, name, activationGuard);
       } else if (isRunning(inspected)) {
         raw = await deps.connectSandbox(inspected);
         partialSandbox = true;
       } else if (isStopped(inspected)) {
         partialSandbox = true;
         raw = await deps.startSandbox(inspected);
+        await activationGuard?.();
         if (raw === undefined || raw === null) raw = await deps.connectSandbox(inspected);
       } else {
         // An unknown state is not safe to replace. A connect gives adapters a
@@ -445,10 +458,14 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         partialSandbox = true;
       }
 
+      // SDK create/start/connect may be uncancelable; late handles cannot be adopted.
+      await activationGuard?.();
       bootedRuntime = await connectAndBuild(raw);
       runtime = bootedRuntime;
       runtimeInvalid = false;
+      await activationGuard?.();
       const preparation = await deps.prepareRuntime(bootedRuntime, request.config);
+      await activationGuard?.();
 
       const createdAt = deps.now ? deps.now() : Date.now();
       currentRequestInfo = infoFor(request, createdAt, name, preparation);
@@ -495,6 +512,8 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
           // safe resource action to take if release itself fails.
         }
       }
+      // Obsolete approval must not publish over a newer queued Off/On/session request.
+      await activationGuard?.();
       return setFailure(request, error);
     }
   }
@@ -755,9 +774,9 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       }
     },
 
-    async boot(request: BootRequest): Promise<RuntimeState> {
+    async boot(request: BootRequest, activationGuard?: () => Promise<void>): Promise<RuntimeState> {
       beginLifecycle();
-      return enqueue(() => bootInternal(request)).finally(() => { pendingLifecycle -= 1; });
+      return enqueue(() => bootInternal(request, activationGuard)).finally(() => { pendingLifecycle -= 1; });
     },
 
     async shutdown(): Promise<void> {

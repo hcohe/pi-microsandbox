@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dockerfileGuidePaths } from "./dockerfile-guide.ts";
+import { openDockerfile } from "./dockerfile-storage.ts";
 import { BUILD_FAILURE, ensureDockerfileImage } from "./image-build.ts";
 import { isIP } from "node:net";
 import { join } from "node:path";
@@ -372,7 +372,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     connectSandbox: async (value) => objectConfig(value)._handle.connect(),
     startSandbox: async (value) => objectConfig(value)._handle.startDetached(),
-    createSandbox: async (request, name) => {
+    createSandbox: async (request, name, activationGuard) => {
       const msb = await sdk();
       const labels = buildSandboxLabels({ sessionId: request.sessionId, cwd: request.cwd, root: request.workspace.hostRoot, guestRoot: request.workspace.guestRoot, pid: process.pid, image: request.config.image });
       let builder = msb.Sandbox.builder(name).image(request.config.image).pullPolicy(request.config.pullPolicy).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeout(request.config.idleTimeoutSec).detached(request.config.detached).workdir(request.workspace.cwd).labels(labels);
@@ -389,6 +389,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const resolvedSecrets: string[] = [];
       try {
         for (const secret of request.config.secrets) {
+          await activationGuard?.();
           let value: string;
           try { value = await resolveSecretValue(secret, options.env ?? process.env); }
           catch (error) {
@@ -408,6 +409,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
             return entry;
           });
         }
+        await activationGuard?.();
         return await builder.create();
       } catch (error) {
         throw redactedError(error, request.config, resolvedSecrets);
@@ -544,7 +546,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   // Manager preflights reuse the boot request. Retain its originating lifecycle
   // identity so late boot/reconnect callbacks cannot publish obsolete metadata.
   const requestExecutions = new WeakMap<BootRequest, SessionExecutionIdentity>();
-  let adopted: { identity: SessionExecutionIdentity; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot } | undefined;
+  let adopted: { identity: SessionExecutionIdentity; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot; mounts: Config["mounts"] } | undefined;
   const currentAdoption = () => adopted?.identity === execution.context.current() ? adopted : undefined;
   deps.adopted = (request, verification) => {
     const identity = requestExecutions.get(request);
@@ -571,7 +573,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       settings: projectSettingsJson(Object.fromEntries(knownFields.map((key) => [key, request.config[key]]))), knownFields: policy.knownFields,
       provenance: policy.provenance, verification: policy.verification, adoptedAt: policy.adoptedAt,
     }, [request.config]);
-    adopted = { identity, policy, agentPolicy };
+    adopted = { identity, policy, agentPolicy, mounts: structuredClone(request.config.mounts) };
   };
   let managerIdentity: SessionExecutionIdentity | undefined;
   const manager = createSandboxManager(deps);
@@ -583,13 +585,21 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     buildAbort.abort();
     buildAbort = new AbortController();
   };
-  const boot = async (request: Parameters<typeof manager.boot>[0]) => {
+  const boot = async (request: Parameters<typeof manager.boot>[0], approval?: { guard?: () => Promise<void>; signal?: AbortSignal }) => {
     invalidateActivation();
     const generation = activationGeneration;
     const identity = execution.context.current();
     const source = resolved.imageBuild;
-    const signal = buildAbort.signal;
+    const signal = AbortSignal.any([buildAbort.signal, ...(approval?.signal ? [approval.signal] : [])]);
     const current = () => generation === activationGeneration && execution.context.current() === identity && !signal.aborted;
+    const approvalBound = !!(approval?.guard || approval?.signal);
+    const assertApproval = async () => {
+      approval?.signal?.throwIfAborted();
+      if (approvalBound && !current()) throw new Error("Runtime activation superseded");
+      await approval?.guard?.();
+      approval?.signal?.throwIfAborted();
+      if (approvalBound && !current()) throw new Error("Runtime activation superseded");
+    };
     managerIdentity = identity;
     requestExecutions.set(request, managerIdentity);
     diagnosticFailure = "runtime_start_failed";
@@ -603,16 +613,27 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           if (!current()) return visibleState();
           await ensureDockerfileImage({ sdk: msb, source, signal });
         } catch {
+          await assertApproval();
           if (!current()) return visibleState();
           // This path deliberately bypasses manager fallback, even if host fallback was configured.
           return { status: "unavailable", info: null, reason: BUILD_FAILURE } as RuntimeState;
         }
       }
+      // Build/import awaits do not retain approval; revalidate before runtime handoff.
+      await assertApproval();
       if (!current()) return visibleState();
-      const result = await manager.boot(request);
+      // Keep recovery's reviewed runtime status stable until approval is revalidated.
+      failureState = null;
+      const result = await manager.boot(request, approvalBound ? assertApproval : undefined);
+      if (approvalBound) await assertApproval();
       if (!current()) return visibleState();
       if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
       return result;
+    } catch (error) {
+      if (approvalBound && generation === activationGeneration && execution.context.current() === identity && !manager.isActive()) {
+        failureState = { status: "unavailable", info: null, reason: "Approved runtime activation was cancelled or superseded; no host fallback was attempted." };
+      }
+      throw error;
     } finally { if (generation === activationGeneration) capturingBootFailure = false; }
   };
   const displayActivities = new Map<symbol, SessionExecutionIdentity>();
@@ -788,16 +809,18 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return settings;
     },
     getState: visibleState,
-    async getDockerfileGuidePaths() {
+    async openDockerfile(scope, destination) {
       const selected = workspace;
       const identity = execution.context.current();
       if (!selected || !settingsReady) return undefined;
+      const revision = settings.contextRevision;
+      const temporary = JSON.stringify(settings.temporary());
       const check = () => {
-        if (execution.context.current() !== identity || workspace !== selected || !settingsReady) throw new Error("Workspace/session changed");
+        if (execution.context.current() !== identity || settings.contextRevision !== revision
+          || JSON.stringify(settings.temporary()) !== temporary) throw new Error("Workspace/session/settings changed");
       };
-      const paths = await dockerfileGuidePaths(settingsInput(), selected.hostRoot, check);
-      check();
-      return paths;
+      return openDockerfile(settingsInput(), selected.hostRoot, scope, check,
+        [...configSnapshot().mounts, ...(currentAdoption()?.mounts ?? [])], destination);
     },
     async getDiagnostics() {
       const state = visibleState();
@@ -891,7 +914,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     previewSettings: (draft) => draft.preview(configSnapshot()),
     async reload(reloadOptions) {
       const identity = execution.context.current();
-      const assertCurrent = () => execution.context.assertCurrent(identity);
+      const assertCurrent = () => { execution.context.assertCurrent(identity); reloadOptions?.signal?.throwIfAborted(); };
       assertCurrent();
       await reloadOptions?.guard?.();
       assertCurrent();
@@ -934,13 +957,12 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         cacheDiagnosticConfig(next.config);
         configReady = true;
         Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-        failureState = null;
         if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
-          const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+          const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) }, reloadOptions);
           assertCurrent();
           if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
           else if (result.status === "active") pendingRestart = false;
-        }
+        } else failureState = null;
         notifyState(visibleState());
         if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
       } finally { endDisplayActivity(); }

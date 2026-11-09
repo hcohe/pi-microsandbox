@@ -74,7 +74,7 @@ export function inspectSettings(inspection: Record<string, any>, request: Inspec
   if (selected.has("desired") && inspection.desired) output.desired = paths ? pickLeaves(inspection.desired, paths) : inspection.desired;
   if (selected.has("layers") && inspection.layers) {
     const layerPaths = paths?.flatMap((path) => [path, ...(COLLECTION_REMOVALS[path] ? [COLLECTION_REMOVALS[path]!] : [])]);
-    output.layers = Object.fromEntries(["global", "project", "session"].map((scope) => [scope, layerPaths ? pickLeaves(inspection.layers[scope], layerPaths) : inspection.layers[scope]]));
+    output.layers = Object.fromEntries(["global", "project", ...(inspection.layers.worktree ? ["worktree"] : []), "session"].map((scope) => [scope, layerPaths ? pickLeaves(inspection.layers[scope], layerPaths) : inspection.layers[scope]]));
     output.layerSemantics = inspection.layerSemantics;
   }
   if (selected.has("origins")) {

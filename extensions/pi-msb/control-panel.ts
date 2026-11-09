@@ -1,3 +1,5 @@
+import { prepareProjectSettings, projectSettingsQuestion, projectCandidateAvailable, discardProjectCandidates, type ProjectSettingsCandidate, type PreparedProjectSettingsCandidate } from "./settings-project.ts";
+import { SettingsConflictError } from "./settings-conflict.ts";
 import { visibleWidth, matchesKey, decodeKittyPrintable, isKeyRelease, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { ConfigError, DEFAULT_CONFIG, normalizeConfigPath, parseTomlConfig } from "./config.ts";
@@ -42,6 +44,7 @@ export class ControlPanel implements Component, Focusable {
   focused = true;
   #draft: SettingsDraft;
   #pending?: SettingsDraft;
+  #projectPending?: ProjectSettingsCandidate[];
   #control: MsbControl;
   #ctx: Context;
   #tui: Pick<TUI, "terminal" | "requestRender">;
@@ -105,7 +108,7 @@ export class ControlPanel implements Component, Focusable {
     return this.#propose((draft) => { draft.inherit(path); this.#scalarIntent.set(path, undefined); });
   }
   async #cancelProposal(): Promise<void> {
-    this.#pending?.discard(); this.#pending = undefined; this.#formCleanup?.();
+    this.#pending?.discard(); this.#pending = undefined; discardProjectCandidates(this.#projectPending); this.#projectPending = undefined; this.#formCleanup?.();
     this.#proposal = false; this.#scalarIntent.clear();
     if (this.#proposalTree) { this.#treeFocus = this.#proposalTree.focus; this.#expanded = this.#proposalTree.expanded; this.#proposalTree = undefined; }
     try { await this.#reopenDraft(); this.#home(); }
@@ -193,7 +196,7 @@ export class ControlPanel implements Component, Focusable {
       status,
       { id: "configuration/sources", label: "Sources", children: [
         ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${settingsSourceLabel(scope)} target`, value: path })),
-        { id: "precedence", label: "Inheritance", value: "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host cwd is read/write." },
+        { id: "precedence", label: "Inheritance", value: this.#paths.worktree ? "default → environment → Global → Project → Worktree → Session" : "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host cwd is read/write." },
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
@@ -336,6 +339,48 @@ export class ControlPanel implements Component, Focusable {
     ], back);
     this.#focus = 1;
   }
+  async #projectChoice(target: SettingsDraft): Promise<boolean> {
+    const runtimeBefore = JSON.stringify([this.#control.getState(), this.#control.getRuntimePolicy?.()]);
+    const candidates = await prepareProjectSettings(target, (draft) => this.#control.previewSettings?.(draft) ?? draft.preview(), this.#control.getRuntimePolicy?.());
+    if (!candidates) return false;
+    this.#projectPending = candidates;
+    if (this.#closed) { discardProjectCandidates(candidates); return true; }
+    const check = () => {
+      if (this.#closed || runtimeBefore !== JSON.stringify([this.#control.getState(), this.#control.getRuntimePolicy?.()])) throw new SettingsConflictError();
+    };
+    const apply = async (candidate: PreparedProjectSettingsCandidate) => {
+      let saved = false; let applied = false; let successful = false; let message = "";
+      try {
+        await this.#ctx.waitForIdle(); check();
+        const result = await candidate.draft.apply({ guard: check }); saved = result.saved; applied = true;
+        if (saved) await this.#control.reload({ allowRestart: candidate.preview.effect === "restart", guard: async () => {
+          if (this.#closed) throw new SettingsConflictError();
+          await result.assertUnchanged?.();
+        } });
+        successful = true;
+        message = `${saved ? "Applied" : "No changes"}${result.shadowed.length ? `; shadowed: ${result.shadowed.join(", ")}` : ""}. Runtime: ${this.#control.getState().status}`;
+      } catch { message = applied ? `${saved ? "Saved" : "Settings unchanged"}, but runtime failed. Inspect before retrying; no automatic host escape.` : "Apply failed. Sources, workspace, runtime or metadata changed; request a fresh review. No automatic retry."; }
+      finally {
+        discardProjectCandidates(candidates); this.#projectPending = undefined; this.#pending = undefined;
+        if (!this.#closed) {
+          if (applied) {
+            this.#proposal = false; this.#scalarIntent.clear();
+            try { await this.#reopenDraft(); } catch { successful = false; message += " Settings refresh failed; repair host configuration and reopen."; }
+            this.#report(`${message} · ${candidate.label}`, successful);
+          } else this.#proposalError(message);
+        }
+      }
+    };
+    // Exactly one destination menu, No selected; selecting Yes commits THIS already-bound draft.
+    const question = projectSettingsQuestion(candidates, undefined, true);
+    if (question.length > 48_000) throw new Error("Project review too large");
+    this.#page([
+      { id: "cancel-project", label: "No", button: true, instructions: "Allow configuration change? Choose one destination below; only that candidate is authorized. No leaves settings unchanged.", action: () => this.#cancelProposal() },
+      ...candidates.map((candidate, index) => ({ id: `project-destination:${index}`, label: candidate.label, button: true,
+        instructions: projectSettingsQuestion([candidate], undefined, true), disabled: !projectCandidateAvailable(candidate), action: projectCandidateAvailable(candidate) ? () => apply(candidate) : undefined })),
+    ], () => this.#cancelProposal());
+    return true;
+  }
   async #applyScope(scope: SettingsScope): Promise<void> {
     if (scope === "temporary" && this.#control.getState().status !== "active") { this.#proposalError("Session unavailable: no running sandbox. Choose Project or Global, or cancel."); return; }
     let target: SettingsDraft | undefined;
@@ -345,6 +390,7 @@ export class ControlPanel implements Component, Focusable {
     }
     try {
       target = await this.#draft.forScope(scope);
+      if (scope === "project" && await this.#projectChoice(target)) return;
       if (this.#closed) { target.discard(); return; }
       const preview = await (this.#control.previewSettings?.(target) ?? target.preview());
       if (this.#closed) { target.discard(); return; }
@@ -401,7 +447,7 @@ export class ControlPanel implements Component, Focusable {
       const needsConfirmation = hostCommand || hostBoundaryWarnings.length > 0 || preview.effect === "restart" || preview.collections.some((entry) => entry.promoted || entry.operation === "remove") || preview.shadowed.length > 0 || [...this.#scalarIntent.values()].includes(undefined) || preview.changes.some((change) => /network|mount|host|fallback|docker/.test(change.path));
       if (needsConfirmation) this.#confirm("Review change", summary, apply, () => this.#cancelProposal());
       else await apply();
-    } catch { target?.discard(); this.#pending = undefined; this.#proposalError("Validation failed. Check types/ranges, required secret hosts, sources and mount/host policy guards. Nothing applied."); }
+    } catch { target?.discard(); discardProjectCandidates(this.#projectPending); this.#projectPending = undefined; this.#pending = undefined; this.#proposalError("Validation failed. Check types/ranges, required secret hosts, sources and mount/host policy guards. Nothing applied."); }
   }
   #load(): void {
     const snapshot = this.#draft.snapshot(); this.#values = displayConfig(snapshot.effectiveToml);
@@ -482,7 +528,7 @@ export class ControlPanel implements Component, Focusable {
   dispose(): void {
     if (this.#closed) return; this.#closed = true; this.focused = false;
     this.#editing?.input.clear();
-    this.#editing = undefined; this.#formCleanup?.(); this.#pending?.discard(); this.#pending = undefined; this.#draft.discard(); this.#scalarIntent.clear(); this.#values = {}; this.#rows = [];
+    this.#editing = undefined; this.#formCleanup?.(); discardProjectCandidates(this.#projectPending); this.#projectPending = undefined; this.#pending?.discard(); this.#pending = undefined; this.#draft.discard(); this.#scalarIntent.clear(); this.#values = {}; this.#rows = [];
   }
   handleInput(data: string): void {
     if (this.#closed || this.#busy) return;
@@ -669,6 +715,7 @@ export async function openControlPanel(ctx: Context, control: MsbControl): Promi
     draft = await settings.open("temporary");
     const paths: Record<string, string> = { temporary: "Memory only (no disk writes)" };
     for (const scope of ["project", "global"] as const) { stage = scope === "project" ? "Project settings" : "Global settings"; const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
+    if (await settings.projectDestinations()) { const source = await settings.open("worktree"); paths.worktree = source.path!; source.discard(); }
     const selected = draft;
     if (generation !== currentGeneration) return;
     stage = "interactive overlay";

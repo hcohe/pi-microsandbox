@@ -53,8 +53,9 @@ Prefer knobs and buttons? **`/msb`** opens the control panel. Use arrows or
 
 No need to teach it our TOML dialect. `msb_config_get` exposes settings, schemas,
 origins, and safety context. `msb_config_set` proposes a scoped edit or a batch
-of related edits. **You approve every request** in a No/Yes dialog showing the
-scope and diff. Without an interactive approval UI, changes are rejected.
+of related edits. **You approve every request** in a No-first dialog showing the
+scope and diff. At a Git checkout root, Project offers repository-wide or
+checkout-only persistence. Without an interactive approval UI, changes are rejected.
 
 Try a few prompts:
 
@@ -84,31 +85,36 @@ and a write-denied test to check the boundary.
 | Scope | What it means |
 | --- | --- |
 | **Session** | Memory-only. Resets on Pi `/reload`, session/workspace switch, or shutdown; not restored from the transcript. |
-| **Project** | Saved for this exact canonical working directory, outside the mounted workspace. |
+| **Project** | At a Git checkout root, choose all registered worktrees or only this checkout; otherwise this canonical cwd. Always host-owned. |
 | **Global** | Saved as your baseline for all projects. |
 
-Precedence is **built-ins < environment < Global < Project < Session**.
+Precedence is **built-ins < environment < Global < shared Project < Worktree < Session**
+when a Git shared policy applies; otherwise Global < cwd-local Project < Session.
 Ordinary **settings reload** preserves Session overrides; Pi's extension
 **`/reload` does not**. When a Session restriction disappears, inherited settings
 may allow broader access. Use Project or Global for restrictions you want to keep.
 
 Setup and inspection create no config files. Saving Global settings creates
-`~/.pi/agent/pi-microsandbox/default.toml`; Project settings for `~/Code/app` go in
-`~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml`.
+`~/.pi/agent/pi-microsandbox/default.toml`. Cwd-local overrides for `~/Code/app` go in
+`~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml`; shared Git policies
+go in `repositories/<sha256(canonical-common-git-dir)>/config.toml` under the same
+host-owned directory. New registered worktrees automatically share them.
 There is no in-repository policy file or parent-project inheritance. Starting in
 `~/Code/app/subdir` has a different Project identity. [Configuration →](docs/configuration.md)
 
 ## A sandbox, not a spare checkout
 
 **Your cwd is mounted read/write.** The host source is canonical `realpath(cwd)`;
-its lexically resolved path is the guest root and command cwd. Git roots are not
-discovered, and ancestors or siblings outside cwd are not automatically mounted.
+its lexically resolved path is the guest root and command cwd. Git metadata is
+used only for policy association, never to mount ancestors or siblings outside cwd.
 
 That means `.env`, `.git`, ignored files, and untracked files **inside cwd are
 accessible**, and writes reach the host immediately. Overlapping sessions share
 those files. Use separate worktrees or checkouts for independent changes—not as
 secret filtering. External worktree/submodule Git metadata is not separately
-mounted, so guest Git may need explicit setup.
+mounted, so guest Git may need explicit setup. A main checkout's writable `.git`
+contains authoritative cross-worktree registration: sharing policy trusts that
+metadata and any overlapping sessions able to modify it.
 
 Docker runs **inside the VM**, never through your host Docker socket. Containers
 can still access the workspace and extra mounts. Explicit mounts and approved

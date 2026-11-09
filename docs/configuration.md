@@ -16,12 +16,17 @@ Three ways to turn the knobs:
 | Scope | Storage | Lifetime |
 | --- | --- | --- |
 | **Session** | Memory only | Until Pi `/reload`, session/workspace switch, or shutdown. Never restored from transcripts. |
-| **Project** | Host-owned `config.toml` for one canonical cwd | Until you change or remove it. |
+| **Project** | Host-owned `config.toml`: choose shared Git repository or only this checkout at checkout roots; otherwise one canonical cwd | Until you change or remove it. |
 | **Global** | Host-owned `default.toml` | Baseline for all projects, until changed. |
 
 Normal precedence, lowest to highest:
 
-**built-ins → environment → Global → Project → Session**
+**built-ins → environment → Global → shared Project → Worktree → Session**
+
+Without a shared repository target, the cwd-local Project layer replaces the
+shared Project/Worktree pair. Public agent requests still use only
+`session`, `project`, or `global`; the human Project confirmation chooses the
+actual destination.
 
 An omitted field inherits. Nested tables override individual fields.
 **Lists in host-owned files replace lower-layer lists**; `[]` explicitly clears
@@ -57,11 +62,49 @@ For example:
 | Your home directory | `projects/config.toml` |
 | `/srv/app` outside home | `projects-absolute/srv/app/config.toml` |
 
-Identity comes from **canonical `realpath(cwd)`**, not Git. Symlink aliases of
-the same directory share Project settings and the shared session boundary.
-Nested directories have separate identities: **no parent-policy inheritance**.
-Global remains unchanged. The agent can inspect origins and source locations so
-you don't need to guess the right file.
+The table above describes **cwd-local** overrides. Identity uses canonical
+`realpath(cwd)`; aliases share those overrides and the session boundary.
+At a supported Git checkout root, Project confirmation instead offers, in order:
+
+1. **No** (default; cancel/unknown selections also do not save).
+2. **Yes (For pi-microsandbox and all its worktrees)**.
+3. **Yes (Only for remove-in-repo-config worktree)**.
+
+Names are dynamically derived from the repository/main checkout and current
+checkout, with terminal controls removed. Both `/msb` and native TUI/RPC tool
+approval show independently prepared destination reviews. Selecting one saves
+only that candidate, with at most one atomic save/reload, not a second Yes dialog.
+An unavailable repair destination is marked unavailable; it cannot authorize a
+save and does not block the independently reviewable alternative.
+
+Shared policy lives at
+`<Pi agent dir>/pi-microsandbox/repositories/<sha256(canonical-common-git-dir)>/config.toml`.
+The shared save atomically includes an immutable reserved `[_repository]` table
+(version, canonical common Git directory and main root) in that same file. It is
+private association metadata, not an editable setting; retain it during host
+edits. There is no separate registry transaction, per-worktree record, symlink,
+or read-side setup. New **registered** external or in-repository worktrees
+(`.worktrees/...` included) automatically find shared policy. Filesystem-only
+reciprocal Git registration is checked without executing Git, shell, hooks or
+repository config. The bounded read-only catalog is consulted before a checkout
+`.git` pointer: deleting that pointer cannot silently drop a saved shared policy,
+even in a fresh process. Surviving conflicting pointers fail closed.
+
+Existing cwd-keyed files are **higher-priority Worktree overrides**, including in
+the main checkout. They are never silently moved, deleted or merged. Shared saves
+report which paths remain shadowed here but can affect other/future worktrees.
+Inspect origins before removing a local override with a separately approved edit.
+**Nested cwd remains cwd-local with no parent-policy inheritance**; submodules,
+bare and unsupported separate-Git-directory layouts also stay local. Global,
+mounts, guest cwd and session identity do not become repository-wide.
+
+Catalog bounds are 256 repositories, 4096 registrations per repository and 1 MiB
+per shared config artifact; proof pointer files are limited to 16 KiB. Invalid,
+unreadable, symlinked, conflicting or stale catalog metadata fails closed,
+including an unrelated catalog entry whose main/common directory was removed.
+Restore that host-owned repository location or have a human review/remove its
+obsolete catalog policy; do not automatically discard policy to unblock loading.
+The agent can inspect origins and source locations rather than guessing paths.
 
 Pi's `getAgentDir()` selects the agent directory, including `PI_CODING_AGENT_DIR`
 and distribution-specific defaults. A host-selected symlink for that directory
@@ -71,17 +114,30 @@ outside the workspace and all writable mounts, including alias/ancestor paths
 that could replace the selected link. Retargeting the directory invalidates an
 open proposal; cancel and reopen it.
 
-Both host-owned layers load regardless of Pi's project trust state. They do not
+All host-owned layers load regardless of Pi's project trust state. They do not
 sandbox project-local extensions or other code you choose to load on the host.
 
 ### Host-owned Dockerfile sources
 
-You may put `Dockerfile` beside `default.toml` (Global) or the exact canonical
-cwd's `config.toml` (Project), with an optional dedicated `build-context/` beside
-it. No repository context or parent Project source is inherited. At each scope,
-an explicit `image` wins over its colocated Dockerfile; otherwise the Dockerfile
-supplies that scope's image. Project overrides Global; Session `image` overrides
-both. Runtime settings show the content-addressed local image, source scope/path
+You may put `Dockerfile` beside the selected host-owned policy (Global,
+Repository, Worktree, or cwd-local fallback), with an optional dedicated
+`build-context/` beside it. No repository tree or parent cwd context is inherited.
+An explicit scope `image` wins over its colocated Dockerfile; otherwise that
+Dockerfile supplies its image. Worktree overrides shared Project, which overrides
+Global; Session `image` overrides all. Dockerfile/context Project saves use the
+same named human Repository/Worktree destination choice as config at supported
+checkout roots, with an exact-target source review after destination selection.
+A first shared source save explicitly registers the same immutable `_repository`
+metadata in shared config; it preserves user/unknown keys and image intent (TOML
+formatting/comments may change only when adding metadata). Existing valid config
+metadata is never rewritten. This covers current/future registered worktrees,
+including after gitfile deletion. Getter defaults Project reads to repository;
+`destination:"worktree"` reads the checkout override. Nested/nonGit/unsupported
+cwd stays local. Neither config nor source destination selection copies existing
+Dockerfiles/contexts. Source tools support bounded relative UTF-8 context PATCH
+(create/update/delete/executable), preserving unspecified and binary files.
+Multi-artifact saves are individually, not jointly/crash atomic; partial/unknown
+persistence never reloads. Runtime settings show the content-addressed local image, source scope/path
 in warnings and effective `pull_policy="never"`; raw scope files remain sparse.
 Do not save a generated image reference as policy unless you intend to disable
 discovery. Unrelated edits preserve source discovery.
@@ -101,7 +157,8 @@ refresh behavior and the opt-in roundtrip are documented in
 
 Setup, inspection, and reload create **no policy files or directories**. Saving
 Global settings creates only the saved assignments in `default.toml`, not a
-commented template. A Project save creates its override; Session creates nothing.
+commented template. A Project save creates only its selected override (including association metadata
+for a shared save); Session creates nothing.
 Existing files—even empty ones—are left alone until explicitly saved. Dockerfile
 activation may separately create build cache records and SDK images; it does not
 create or modify policy/source files.
@@ -111,6 +168,11 @@ umask). Saves revalidate targets, reject stale proposals, and replace files
 atomically. Changed saves preserve unknown keys but not original comments/layout;
 no-ops leave the file untouched. Portable filesystem checks cannot eliminate all
 host-process races: keep policy host-owned and inaccessible to guest writes.
+The catalog and every catalogued repository's reciprocal proof tree are reserved
+against explicit writable mounts, even from unrelated projects. The default main
+checkout bind still exposes its `.git` read/write: it is a cross-worktree trust
+boundary, as are overlapping/broader cwd binds able to edit that metadata. This
+is not protection from an authorized main-checkout write or host control.
 Unreadable or invalid configuration fails closed by default, not silently
 ignored. [Backend guarantees →](settings-backend.md#file-safety-and-bounded-guarantees)
 

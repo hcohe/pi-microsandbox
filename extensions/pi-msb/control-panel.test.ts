@@ -16,9 +16,15 @@ const APPLY = ["Session", "Project", "Global"];
 const ROOT_GROUPS = ["Resources", "Network", "Secrets", "Variables", "Mounts", "Tools", "Image", "Sources", "Actions", "Status", "General", "Advanced"];
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text } as any;
-async function fixture(t: any, theme = plainTheme, native = false) {
+async function fixture(t: any, theme = plainTheme, native = false, gitProject = false) {
   const root = await realpath(await mkdtemp("/tmp/msb-panel-")); t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = join(root, "workspace"); await mkdir(cwd);
+  const main = join(root, "repository"); const registration = join(main, ".git", "worktrees", "workspace");
+  if (gitProject) {
+    await mkdir(registration, { recursive: true });
+    await writeFile(join(registration, "commondir"), "../..\n"); await writeFile(join(registration, "gitdir"), `${join(cwd, ".git")}\n`);
+    await writeFile(join(cwd, ".git"), `gitdir: ${registration}\n`);
+  }
   const input = { cwd, repoRoot: cwd, configDirName: ".pi", projectTrusted: true, env: {}, agentDir: join(root, "agent") };
   const calls: string[] = []; const sdk = fakeSdk(calls);
   const entries: unknown[] = [];
@@ -37,6 +43,7 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   const terminal = { rows: 24, columns: 80 }; let closed = false;
   const draft = await settings.open("temporary"); const paths: Record<string, string> = { temporary: "Memory only (no disk writes)" };
   for (const scope of ["global", "project"] as const) { const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
+  if (gitProject) { const source = await settings.open("worktree"); paths.worktree = source.path!; source.discard(); }
   const panel = new ControlPanel({ draft, control, ctx, tui: { terminal, requestRender() {} } as any, theme, paths, done: () => { closed = true; } });
   const key = async (data: string) => { panel.handleInput(data); await tick(); await panel.waitForIdle(); };
   const text = () => stripTerminalSequences(panel.render(terminal.columns).join("\n"));
@@ -55,7 +62,7 @@ async function fixture(t: any, theme = plainTheme, native = false) {
   const list = async (group: string, label: string) => { await node(group, label); await expand(label); };
   const number = async (value: string) => { await edit("Resources", "Virtual CPUs:"); await key("\x15"); await key(value); await key("\r"); };
   t.after(() => panel.dispose());
-  return { root, input, settings, control, integration, sdk, entries, ctx, calls, panel, terminal, key, seek, choose, tree, expand, node, edit, save, apply, action, list, number, selected, full, text, paths, closed: () => closed };
+  return { root, input, main, registration, settings, control, integration, sdk, entries, ctx, calls, panel, terminal, key, seek, choose, tree, expand, node, edit, save, apply, action, list, number, selected, full, text, paths, closed: () => closed };
 }
 
 test("Session scope selection and review explain Pi reload resets without changing settings reload semantics", async (t) => {
@@ -1054,4 +1061,35 @@ test("long instructions preserve paragraphs safely and never displace masked inp
     assert.match(f.text(), /First paragraph *\n *\nSecond paragraph *\nExample: 2/);
     assert.doesNotMatch(f.panel.render(80).join("\n"), /\x1b\[2J|unsafe-title/);
   } finally { field.editorHelp = original; }
+});
+
+
+for (const selectedScope of ["shared", "local"] as const) test(`Project panel exact No-first destination menu, no duplicate Yes, selected ${selectedScope} candidate only`, async (t) => {
+  const f = await fixture(t, plainTheme, false, true);
+  const shared = "Yes (For repository and all its worktrees)";
+  const local = "Yes (Only for workspace worktree)";
+  await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(1);
+  assert.equal(f.selected(), "No");
+  const menu = f.full().split("\n").filter((line) => /^[> ] \[ /.test(line)).map((line) => line.trim().replace(/^> /, "").replace(/^\[ (.*) \]$/, "$1"));
+  assert.deepEqual(menu, ["No", shared, local]);
+  await assert.rejects(readFile(f.paths.project!), { code: "ENOENT" });
+  await f.key("\r"); // No is the default and never writes, even for a simple scalar.
+  await assert.rejects(readFile(f.paths.project!), { code: "ENOENT" });
+  await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(1);
+  await f.choose(selectedScope === "shared" ? shared : local);
+  assert.equal(f.full().includes("Review change"), false);
+  assert.deepEqual(f.calls, ["idle", "reload"]);
+  const selected = selectedScope === "shared" ? f.paths.project! : f.paths.worktree!;
+  const other = selectedScope === "shared" ? f.paths.worktree! : f.paths.project!;
+  assert.equal(parseTomlConfig(await readFile(selected, "utf8"), "global").value.showFooter, false);
+  await assert.rejects(readFile(other), { code: "ENOENT" });
+});
+
+test("Project panel rejects metadata retarget while destination menu is open", async (t) => {
+  const f = await fixture(t, plainTheme, false, true); await f.number("2"); await f.save(1);
+  await writeFile(join(f.registration, "gitdir"), `${join(f.input.cwd, ".git")}\n\n`);
+  await f.choose("Yes (For repository and all its worktrees)");
+  assert.match(f.full(), /Apply failed/); assert.deepEqual(f.calls, ["idle"]);
+  await assert.rejects(readFile(f.paths.project!), { code: "ENOENT" });
+  await assert.rejects(readFile(f.paths.worktree!), { code: "ENOENT" });
 });

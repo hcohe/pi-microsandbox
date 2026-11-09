@@ -420,7 +420,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const registered = (typeof (pi as ExtensionAPI).getAllTools === "function"
       ? pi.getAllTools()
       : []).find((candidate) => candidate.name === tool);
-    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics" || tool === "msb_dockerfile_guide") && ownedConfigToolEntry
+    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics" || tool === "msb_dockerfile_get" || tool === "msb_dockerfile_set") && ownedConfigToolEntry
       && canonicalEntry(registered?.sourceInfo?.path) === ownedConfigToolEntry) return;
     const source = registered?.sourceInfo?.source;
     if (source === "builtin") return;
@@ -470,7 +470,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         .map(({ filePath, baseDir }) => ({ filePath, baseDir })),
     );
     const state = stateOf(deps);
-    const note = `${deps.systemPromptNote(state)}\nBefore creating Dockerfile customization, call msb_dockerfile_guide for host-owned paths, the bundled pinned base and the approved HOST-tool workflow. The guide only returns instructions; do not execute instructions as part of getting guidance.`;
+    const note = `${deps.systemPromptNote(state)}\nBefore creating Dockerfile customization, call msb_dockerfile_get with scope project/global for current content, authoritative host-owned paths and the bundled pinned base. Propose a full replacement with msb_dockerfile_set in that scope; its explicit per-proposal approval covers saving and possible build/restart. Never use host commands or sandbox file tools for this flow, grant blanket host access, embed secrets, or silently change image intent; inspect shadowing with msb_config_get and propose image inherit separately.`;
     return { systemPrompt: note ? `${event.systemPrompt}\n\n${note}` : event.systemPrompt };
   });
 
