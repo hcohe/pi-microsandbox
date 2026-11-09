@@ -27,8 +27,8 @@ async function fixture(t: TestContext) {
   let failReload = false;
   let busy = false;
   const control = {
-    openDockerfile: (scope: "project" | "global", destination?: "repository" | "worktree") => openDockerfile(input, cwd, scope, () => {}, [], destination),
-    settings: { projectDestinations: () => editor.projectDestinations(), reviewState: () => editor.reviewState(), acquireInteraction() {
+    openDockerfile: (scope: "project" | "global") => openDockerfile(input, cwd, scope, () => {}, []),
+    settings: { sharedProject: () => editor.sharedProject(), reviewState: () => editor.reviewState(), acquireInteraction() {
       if (busy) return undefined; busy = true;
       return { signal: new AbortController().signal, release() { busy = false; } };
     } },
@@ -425,32 +425,46 @@ test("cancelled activation of a shadowed Dockerfile cannot fall back to host wit
 });
 
 
-for (const catalogued of [false, true]) test(`Dockerfile Project Worktree destination preserves shared source and getter explicitly disambiguates shadowing: catalogued=${catalogued}`, async (t) => {
+test("Dockerfile Project ignores and preserves conflicting legacy config/source, rejecting retired destinations", async (t) => {
   const f = await fixture(t); execFileSync("git", ["init", "-q", f.cwd]);
-  const paths = await hostConfigPaths(f.input); assert.ok(paths.worktree);
-  if (catalogued) {
-    const editor = new SettingsEditor(f.input, "dockerfile"); const draft = await editor.open("project"); draft.set("cpus", 2); await draft.apply();
-    await fs.writeFile(join(dirname(paths.project), "Dockerfile"), from);
-  }
-  const sharedBefore = catalogued ? await fs.readFile(paths.project, "utf8") : null;
-  await fs.mkdir(dirname(paths.worktree!), { recursive: true });
-  await fs.writeFile(paths.worktree!, `image = ${JSON.stringify(DEFAULT_CONFIG.image)}\n`);
-  const desired = await resolveConfig(f.input); f.control.getEffectiveConfig = () => desired;
+  const targets = await hostConfigTargets(f.input); const legacy = targets.ignoredLegacyPaths[0]!;
+  await fs.mkdir(join(dirname(legacy), "build-context"), { recursive: true });
+  await fs.writeFile(legacy, "invalid legacy PRIVATE");
+  const unsafe = Buffer.from([0xff, 0xfe]);
+  const legacyDockerfile = join(dirname(legacy), "Dockerfile"); await fs.writeFile(legacyDockerfile, unsafe);
+  const before = await fs.stat(legacyDockerfile);
+  await fs.writeFile(join(dirname(legacy), "build-context", "private"), "PRIVATE");
   const inspected = await f.run(false, { scope: "project" });
-  assert.equal(inspected.paths.project.config, paths.project);
-  assert.equal(inspected.paths.project.dockerfile, join(dirname(paths.project), "Dockerfile"));
-  assert.match(inspected.warnings.join(" "), /shared Repository or this Worktree/);
-  const saved = await f.run(true, { scope: "project", content: from });
-  assert.equal(saved.saved, true); assert.equal(saved.outcome, "saved_shadowed");
-  assert.ok(f.question().includes("worktree"));
-  const after = await f.run(false, { scope: "project", destination: "worktree" });
-  assert.equal(after.target.config, paths.worktree);
-  assert.equal(after.content, from); assert.equal(after.lastKnownSelection.selected, false);
-  assert.equal(await fs.readFile(paths.worktree!, "utf8"), `image = ${JSON.stringify(DEFAULT_CONFIG.image)}\n`);
-  if (catalogued) {
-    assert.equal(await fs.readFile(paths.project, "utf8"), sharedBefore);
-    assert.equal(await fs.readFile(join(dirname(paths.project), "Dockerfile"), "utf8"), from);
-  } else await assert.rejects(fs.readFile(paths.project), { code: "ENOENT" });
+  assert.equal(inspected.content, null);
+  assert.match(inspected.warnings.join(" "), /Ignored legacy Worktree storage/);
+  assert.doesNotMatch(inspected.warnings.join(" "), /PRIVATE/);
+  for (const destination of ["repository", "worktree"]) {
+    assert.equal((await f.run(false, { scope: "project", destination })).outcome, "rejected");
+    assert.equal((await f.run(true, { scope: "project", destination, content: from })).outcome, "rejected");
+  }
+  f.configure({ answer: "This worktree — old approval" });
+  assert.equal((await f.run(true, { scope: "project", content: from })).saved, false);
+  f.configure({ answer: "Yes" });
+  assert.equal((await f.run(true, { scope: "project", content: from })).saved, true);
+  assert.equal((await f.run(false, { scope: "project" })).content, from);
+  assert.equal(await fs.readFile(legacy, "utf8"), "invalid legacy PRIVATE");
+  assert.deepEqual(await fs.readFile(legacyDockerfile), unsafe);
+  assert.equal((await fs.stat(legacyDockerfile)).ino, before.ino);
+  assert.equal(await fs.readFile(join(dirname(legacy), "build-context", "private"), "utf8"), "PRIVATE");
+  assert.doesNotMatch(f.question(), /This worktree|All worktrees|PRIVATE/);
+});
+
+test("retired positional Dockerfile destinations fail closed in storage and control, never becoming shared writes", async (t) => {
+  const f = await fixture(t); execFileSync("git", ["init", "-q", f.cwd]);
+  for (const destination of ["repository", "worktree"]) {
+    await assert.rejects((openDockerfile as any)(f.input, f.cwd, "project", () => {}, [], destination), /Retired Dockerfile destinations/);
+  }
+  const integration = createMsbIntegration({ ...f.input, sessionId: "retired", env: { ...f.input.env, PI_MSB_DISABLE: "1" }, sdkLoader: async () => { throw new Error("must not load SDK"); } });
+  await integration.configureSession({ sessionId: "retired", cwd: f.cwd, projectTrusted: true });
+  for (const destination of ["repository", "worktree"]) {
+    await assert.rejects((integration.control.openDockerfile as any)("project", destination), /Retired Dockerfile destinations/);
+  }
+  await assert.rejects(fs.lstat(f.agentDir), { code: "ENOENT" });
 });
 
 async function realLinkedCheckout(f: Awaited<ReturnType<typeof fixture>>) {
@@ -463,35 +477,36 @@ async function realLinkedCheckout(f: Awaited<ReturnType<typeof fixture>>) {
   return main;
 }
 
-for (const destination of ["repository", "worktree"] as const) test(`Dockerfile Project real linked Git ${destination}: exact config destination, no copies, current/future discovery`, async (t) => {
+test("Dockerfile Project linked/main/nested writes share config and context, including future worktrees and deleted gitfiles", async (t) => {
   const f = await fixture(t); const main = await realLinkedCheckout(f);
   const targets = await hostConfigTargets(f.input);
-  f.configure({ answer: "Yes", destination });
   const saved = await f.run(true, { scope: "project", content: from, context: [{ path: "nested/bootstrap.sh", content: "#!/bin/sh\necho ready\n", executable: true }] });
   assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(saved.reloaded, true);
-  const target = destination === "repository" ? targets.paths.project : targets.paths.worktree!;
+  const target = targets.paths.project;
   assert.equal(saved.review.target.config, target);
-  assert.equal(await fs.readFile(join(dirname(target), "Dockerfile"), "utf8"), from);
   assert.equal((await fs.stat(join(dirname(target), "build-context", "nested", "bootstrap.sh"))).mode & 0o777, 0o700);
-  const other = destination === "repository" ? targets.paths.worktree! : targets.paths.project;
-  await assert.rejects(fs.lstat(join(dirname(other), "Dockerfile")), { code: "ENOENT" });
-  await assert.rejects(fs.lstat(join(dirname(other), "build-context")), { code: "ENOENT" });
-  if (destination === "repository") {
-    assert.deepEqual(JSON.parse(JSON.stringify(readRawConfig(await fs.readFile(target, "utf8"))._repository)), targets.repository);
-    assert.doesNotMatch(f.question(), /immutable host-owned repository association|formatting\/comments/);
-    assert.match(saved.review.registration.consequence, /immutable host-owned repository association/);
-    assert.equal((await resolveConfig({ ...f.input, cwd: main })).imageBuild?.dockerfile, join(dirname(target), "Dockerfile"));
-    const future = join(f.root, "future-worktree");
-    execFileSync("git", ["-C", main, "worktree", "add", "-q", "-b", "future", future]);
-    await fs.unlink(join(future, ".git"));
-    assert.equal((await resolveConfig({ ...f.input, cwd: future })).imageBuild?.dockerfile, join(dirname(target), "Dockerfile"));
-    await fs.unlink(join(f.cwd, ".git"));
-    assert.equal((await f.run(false, { scope: "project" })).content, from);
-  } else {
-    await assert.rejects(fs.lstat(targets.paths.project), { code: "ENOENT" });
-    assert.equal((await resolveConfig({ ...f.input, cwd: main })).imageBuild, undefined);
-    assert.equal((await f.run(false, { scope: "project" })).content, null);
-    assert.equal((await f.run(false, { scope: "project", destination: "worktree" })).content, from);
+  assert.deepEqual(JSON.parse(JSON.stringify(readRawConfig(await fs.readFile(target, "utf8"))._repository)), targets.repository);
+  const future = join(f.root, "future-worktree");
+  execFileSync("git", ["-C", main, "worktree", "add", "-q", "-b", "future", future]);
+  const nested = join(f.cwd, "nested"); const mainNested = join(main, "nested");
+  await fs.mkdir(nested); await fs.mkdir(mainNested);
+  await fs.unlink(join(future, ".git")); await fs.unlink(join(f.cwd, ".git"));
+  for (const cwd of [main, f.cwd, nested, mainNested, future]) {
+    assert.equal((await resolveConfig({ ...f.input, cwd })).imageBuild?.dockerfile, join(dirname(target), "Dockerfile"));
+    const draft = await openDockerfile({ ...f.input, cwd }, cwd, "project", () => {});
+    assert.equal(draft.target.config, target); assert.equal(draft.source.content, from);
+    assert.equal((await draft.readContext(["nested/bootstrap.sh"]))[0] && draft.context.length > 0, true);
+  }
+  // A nested-main write is immediately readable from the linked checkout.
+  const draft = await openDockerfile({ ...f.input, cwd: mainNested }, mainNested, "project", () => {});
+  const changed = from + "RUN echo updated\n";
+  await draft.prepare(changed, [{ path: "nested/bootstrap.sh", content: "echo updated\n" }]);
+  await draft.save(changed, async () => {});
+  const linked = await f.run(false, { scope: "project", contextPaths: ["nested/bootstrap.sh"] });
+  assert.equal(linked.content, changed); assert.equal(linked.contextFiles[0].content, "echo updated\n");
+  for (const legacy of targets.ignoredLegacyPaths) {
+    await assert.rejects(fs.lstat(join(dirname(legacy), "Dockerfile")), { code: "ENOENT" });
+    await assert.rejects(fs.lstat(join(dirname(legacy), "build-context")), { code: "ENOENT" });
   }
 });
 
@@ -503,7 +518,7 @@ for (const change of ["association", "alias", "config", "chooser-association"] a
   const mutate = async () => {
     if (change === "association" || change === "chooser-association") await fs.appendFile(join(main, ".git", "worktrees", await fs.readdir(join(main, ".git", "worktrees")).then((names) => names[0]!), "gitdir"), "\n");
     else if (change === "alias") { await fs.unlink(alias); const other = join(f.root, "other-agent"); await fs.mkdir(other); await fs.symlink(other, alias); }
-    else { await fs.mkdir(dirname(targets.paths.worktree!), { recursive: true }); await fs.writeFile(targets.paths.worktree!, "cpus=3\n"); }
+    else { await fs.mkdir(dirname(targets.paths.project), { recursive: true }); await fs.writeFile(targets.paths.project, "cpus=3\n"); }
   };
   f.configure({ answer: "Yes", destination: "repository", ...(change === "chooser-association" ? { duringDestination: mutate } : { duringApproval: mutate }) });
   const saved = await f.run(true, { scope: "project", content: from, context: [{ path: "new", content: "text" }] });
@@ -670,19 +685,19 @@ test("Dockerfile context read/proposal limits reject complete oversize requests,
   assert.equal((await fs.stat(join(root, "one"))).size, 32768);
 });
 
-test("Dockerfile nested cwd under real linked Git stays cwd-local with no shared registration/source copying", async (t) => {
+test("Dockerfile nested cwd under real linked Git registers the shared main-root source without copying", async (t) => {
   const f = await fixture(t); await realLinkedCheckout(f);
   const nested = join(f.cwd, "nested"); await fs.mkdir(nested);
   const input = { ...f.input, cwd: nested };
-  const targets = await hostConfigTargets(input); assert.equal(targets.repository, undefined);
+  const targets = await hostConfigTargets(input); assert.ok(targets.repository);
   const draft = await openDockerfile(input, nested, "project", () => {});
   assert.equal(draft.paths.project.config, targets.paths.project);
   const review = await draft.prepare(from, [{ path: ".dockerignore", content: "ignore\n" }]);
-  assert.equal(review.registration, undefined);
+  assert.ok(review.registration);
   const applied = await draft.save(from, async () => {}); await applied.assertUnchanged();
-  await assert.rejects(fs.lstat(targets.paths.project), { code: "ENOENT" });
+  assert.ok((await fs.lstat(targets.paths.project)).isFile());
   const parent = await hostConfigPaths(f.input);
-  await assert.rejects(fs.lstat(join(dirname(parent.project), "Dockerfile")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(join(dirname(parent.project), "Dockerfile"), "utf8"), from);
 });
 
 for (const alias of ["file-case", "directory-case", "file-normalization", "directory-normalization"] as const) test(`Dockerfile context rejects existing ${alias} aliases before review/read/publication`, async (t) => {
@@ -754,58 +769,28 @@ for (const externalName of ["created.bin", "CREATED.BIN"]) test(`Dockerfile cont
   assert.ok(!(await fs.readdir(dirname(root))).some((name) => name.startsWith(".dockerfile-")));
 });
 
-for (const destination of ["repository", "worktree"] as const) test(`Dockerfile combined Project approval prepares both own baselines once and saves only chosen ${destination}`, async (t) => {
+test("Dockerfile shared Project review prepares only the shared baseline and never imports legacy source", async (t) => {
   const f = await fixture(t); await realLinkedCheckout(f);
-  const paths = await hostConfigPaths(f.input);
-  for (const [config, original] of [[paths.project, "repository-original"], [paths.worktree!, "worktree-original"]]) {
+  const targets = await hostConfigTargets(f.input); const legacy = targets.ignoredLegacyPaths[0]!;
+  for (const [config, original] of [[targets.paths.project, "shared-original"], [legacy, "legacy-original"]]) {
     await fs.mkdir(join(dirname(config!), "build-context"), { recursive: true });
     await fs.writeFile(join(dirname(config!), "Dockerfile"), from + `RUN ${original}\n`);
     await fs.writeFile(join(dirname(config!), "build-context", "setup.sh"), `echo ${original}\n`);
-    await fs.writeFile(join(dirname(config!), "build-context", `${original}.txt`), original!);
   }
-  const opened: Array<string | undefined> = [];
-  const open = f.control.openDockerfile!;
-  f.control.openDockerfile = async (scope, target) => { opened.push(target); return open(scope, target); };
-  f.configure({ answer: "Yes", destination, duringApproval: async () => {
-    assert.deepEqual(opened, ["worktree", "repository"], "both candidates must be pinned/prepared before the one question");
-    const review = f.question();
-    const local = review.slice(review.indexOf("This worktree"), review.indexOf("All worktrees"));
-    const shared = review.slice(review.indexOf("All worktrees"));
-    assert.match(local, /-RUN worktree-original/); assert.match(local, /-echo worktree-original/);
-    assert.ok(!local.includes("repository-original")); assert.ok(!local.includes("Register immutable"));
-    assert.match(shared, /-RUN repository-original/); assert.match(shared, /-echo repository-original/);
-    assert.ok(!shared.includes("worktree-original")); assert.doesNotMatch(shared, /Register immutable|Shared on next reload/);
-    assert.ok(!review.includes('"metadata"') && !review.includes("modeBefore") && !review.includes(f.agentDir));
+  let opened = 0; const open = f.control.openDockerfile!;
+  f.control.openDockerfile = async (scope) => { opened++; return open(scope); };
+  f.configure({ answer: "Yes", duringApproval: async () => {
+    assert.equal(opened, 1);
+    assert.match(f.question(), /-RUN shared-original/);
+    assert.match(f.question(), /-echo shared-original/);
+    assert.doesNotMatch(f.question(), /legacy-original|This worktree|All worktrees/);
   } });
-  const content = from + "RUN apt-get update && apt-get install -y --no-install-recommends cowsay\r\n";
-  const saved = await f.run(true, { scope: "project", content, context: [{ path: "setup.sh", content: "echo cowsay", executable: true }] });
+  const content = from + "RUN echo changed\r\n";
+  const saved = await f.run(true, { scope: "project", content, context: [{ path: "setup.sh", content: "echo changed", executable: true }] });
   assert.equal(saved.saved, true, JSON.stringify(saved)); assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
-  const chosen = destination === "repository" ? paths.project : paths.worktree!;
-  const other = destination === "repository" ? paths.worktree! : paths.project;
-  assert.equal(saved.review.target.config, chosen);
-  assert.equal(await fs.readFile(join(dirname(chosen), "Dockerfile"), "utf8"), content, "persist original proposal CRLF bytes, not escaped review text");
-  assert.equal(await fs.readFile(join(dirname(chosen), "build-context", "setup.sh"), "utf8"), "echo cowsay");
-  assert.equal((await fs.stat(join(dirname(chosen), "build-context", "setup.sh"))).mode & 0o777, 0o700);
-  const otherOriginal = destination === "repository" ? "worktree-original" : "repository-original";
-  assert.equal(await fs.readFile(join(dirname(other), "Dockerfile"), "utf8"), from + `RUN ${otherOriginal}\n`);
-  await assert.rejects(fs.lstat(join(dirname(chosen), "build-context", `${otherOriginal}.txt`)), { code: "ENOENT" });
-});
-
-test("Dockerfile combined Project approval shows an unavailable candidate but cannot approve it or copy its source", async (t) => {
-  const f = await fixture(t); await realLinkedCheckout(f);
-  const paths = await hostConfigPaths(f.input);
-  await fs.mkdir(dirname(paths.worktree!), { recursive: true });
-  const unsafe = Buffer.from([0xff, 0xfe]); await fs.writeFile(join(dirname(paths.worktree!), "Dockerfile"), unsafe);
-  let prompts = 0;
-  f.ctx.ui.select = async (question: string, choices: string[]) => {
-    prompts++; assert.match(question, /This worktree[\s\S]*UNAVAILABLE/);
-    assert.equal(choices.length, 2); assert.equal(choices[0], "No"); assert.match(choices[1]!, /^All worktrees/);
-    return choices[1];
-  };
-  const saved = await f.run(true, { scope: "project", content: from });
-  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(prompts, 1);
-  assert.deepEqual(await fs.readFile(join(dirname(paths.worktree!), "Dockerfile")), unsafe);
-  assert.equal(await fs.readFile(join(dirname(paths.project), "Dockerfile"), "utf8"), from);
+  assert.equal(await fs.readFile(join(dirname(targets.paths.project), "Dockerfile"), "utf8"), content);
+  assert.equal(await fs.readFile(join(dirname(legacy), "Dockerfile"), "utf8"), from + "RUN legacy-original\n");
+  assert.equal(await fs.readFile(join(dirname(legacy), "build-context", "setup.sh"), "utf8"), "echo legacy-original\n");
 });
 
 test("Dockerfile combined Project headless and competing lease remain write-free", async (t) => {

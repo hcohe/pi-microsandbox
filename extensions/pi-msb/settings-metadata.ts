@@ -1,7 +1,7 @@
 import { DEFAULT_CONFIG } from "./config.ts";
 
 /** Static discovery version shared by schema capabilities and inspection. */
-export const SETTINGS_SCHEMA_VERSION = 5;
+export const SETTINGS_SCHEMA_VERSION = 6;
 const snake = (key: string): string => key.replace(/MiB/g, "Mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 /** Complete schema leaf inventory. Arrays are edited as collections, never indexed paths. */
 export const SETTINGS_PATHS: readonly string[] = Object.freeze(Object.entries(DEFAULT_CONFIG).flatMap(([key, value]) =>

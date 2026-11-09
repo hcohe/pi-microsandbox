@@ -59,7 +59,7 @@ function result(report: Record<string, unknown>, format: "text" | "json" = "text
 export function registerDiagnosticsTool(pi: ExtensionAPI, control: MsbControl): void {
   pi.registerTool({
     name: "msb_diagnostics", label: "Microsandbox diagnostics",
-    description: "Passive read-only diagnostics available even when off or blocked. Only already held state and cached safe configuration projections; no settings inspection, source/environment reads, commands, SDK, logs, credential resolution, live checks, bootstrap or writes. Optional format=text/json only. Both text and details bounded to 48 KiB; no overflow files.",
+    description: "Passive read-only diagnostics available even when off or blocked. Only already held state and cached safe configuration projections; no settings inspection, source/environment reads, commands, SDK, logs, credential resolution, live checks, bootstrap or writes. Start here and use msb_config_get before explaining a narrow live diagnostic need and requesting one explicitly approved host bash command (finite positive timeout <=120 seconds, fixed session cwd, ready identity/configuration and existing host permission required). Never disable protection or enable fallback as a workaround. Optional format=text/json only. Both text and details bounded to 48 KiB; no overflow files.",
     parameters,
     renderCall() { return new Text("Microsandbox diagnostics (passive, read-only)", 0, 0); },
     renderResult() { return new Text("Passive diagnostics; no live checks or changes. See tool content for results.", 0, 0); },

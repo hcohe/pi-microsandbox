@@ -16,17 +16,15 @@ Three ways to turn the knobs:
 | Scope | Storage | Lifetime |
 | --- | --- | --- |
 | **Session** | Memory only | Until Pi `/reload`, session/workspace switch, or shutdown. Never restored from transcripts. |
-| **Project** | Host-owned `config.toml`: choose shared Git repository or only this checkout at checkout roots; otherwise one canonical cwd | Until you change or remove it. |
+| **Project** | Host-owned `config.toml`: shared main/root Git project from main, linked and nested cwd; otherwise canonical cwd | Until you change or remove it. |
 | **Global** | Host-owned `default.toml` | Baseline for all projects, until changed. |
 
 Normal precedence, lowest to highest:
 
-**built-ins → environment → Global → shared Project → Worktree → Session**
+**built-ins → environment → Global → Project → Session**
 
-Without a shared repository target, the cwd-local Project layer replaces the
-shared Project/Worktree pair. Public agent requests still use only
-`session`, `project`, or `global`; the human Project confirmation chooses the
-actual destination.
+Public agent requests use only `session`, `project`, or `global`. Project always
+selects one authoritative record; there is no persistent checkout-only override.
 
 An omitted field inherits. Nested tables override individual fields.
 **Lists in host-owned files replace lower-layer lists**; `[]` explicitly clears
@@ -62,41 +60,46 @@ For example:
 | Your home directory | `projects/config.toml` |
 | `/srv/app` outside home | `projects-absolute/srv/app/config.toml` |
 
-The table above describes **cwd-local** overrides. Identity uses canonical
-`realpath(cwd)`; aliases share those overrides and the session boundary.
-At a supported Git checkout root, Project confirmation instead offers, in order:
-
-1. **No** (default; cancel/unknown selections also do not save).
-2. **Yes (For pi-microsandbox and all its worktrees)**.
-3. **Yes (Only for remove-in-repo-config worktree)**.
-
-Names are dynamically derived from the repository/main checkout and current
-checkout, with terminal controls removed. Both `/msb` and native TUI/RPC tool
-approval show independently prepared destination reviews. Selecting one saves
-only that candidate, with at most one atomic save/reload, not a second Yes dialog.
-An unavailable repair destination is marked unavailable; it cannot authorize a
-save and does not block the independently reviewable alternative.
-
-Shared policy lives at
+The table above describes **non-Git and unsupported-layout** cwd-local storage.
+Supported Git main, linked and nested cwd all use the SAME main/root Project:
 `<Pi agent dir>/pi-microsandbox/repositories/<sha256(canonical-common-git-dir)>/config.toml`.
-The shared save atomically includes an immutable reserved `[_repository]` table
-(version, canonical common Git directory and main root) in that same file. It is
-private association metadata, not an editable setting; retain it during host
-edits. There is no separate registry transaction, per-worktree record, symlink,
-or read-side setup. New **registered** external or in-repository worktrees
-(`.worktrees/...` included) automatically find shared policy. Filesystem-only
-reciprocal Git registration is checked without executing Git, shell, hooks or
-repository config. The bounded read-only catalog is consulted before a checkout
-`.git` pointer: deleting that pointer cannot silently drop a saved shared policy,
-even in a fresh process. Surviving conflicting pointers fail closed.
+Canonical aliases share policy; Session ownership and replacement checks remain
+per current cwd, not repository-wide. There is no persistent Worktree scope.
 
-Existing cwd-keyed files are **higher-priority Worktree overrides**, including in
-the main checkout. They are never silently moved, deleted or merged. Shared saves
-report which paths remain shadowed here but can affect other/future worktrees.
-Inspect origins before removing a local override with a separately approved edit.
-**Nested cwd remains cwd-local with no parent-policy inheritance**; submodules,
-bare and unsupported separate-Git-directory layouts also stay local. Global,
-mounts, guest cwd and session identity do not become repository-wide.
+Git Project confirmation is **No** (default) / **Apply shared Project (<name>)**.
+The name is safely rendered. One freshly prepared diff/path/command review binds
+approval to the shared target. Old checkout-only labels or destinations are rejected,
+never reinterpreted as shared authorization. A broken Project requires repair of
+that Project, not a lower-priority Worktree fallback.
+
+Shared saves atomically include immutable reserved `[_repository]` metadata
+(version, canonical common Git directory and main root) in the SAME config file.
+It is private association metadata, not an editable setting; retain it during host
+edits. Existing compatible shared `repositories/<hash>` data remains authoritative.
+There is no separate registry transaction, per-worktree record, symlink or read-side
+setup. New **registered** external or in-repository worktrees (`.worktrees/...`
+included) automatically find the same Project. Read-only discovery checks reciprocal
+Git registration without executing Git, shell, hooks, repository config or ambient
+Git environment. The bounded host-owned catalog survives checkout gitfile deletion,
+including nested cwd in a fresh process. Conflicting pointers fail closed. A nearer
+nested repository/submodule/bare boundary cannot inherit an outer catalog entry.
+
+**Migration: old cwd-keyed Git files are ignored and preserved**, even at the main
+checkout. They are not parsed, merged, moved, copied, deleted or promoted. Diagnostics
+check only bounded presence/type metadata at the current cwd, checkout root and main
+root's legacy host-storage locations; they do not scan other storage or read ignored
+policy/source/context contents. Review the reported files with a human host editor.
+Deliberately propose only intended settings into Project with a **fresh shared
+approval**. Separately review Dockerfile and each build-context input; do not copy
+credentials, old approvals, broad permissions or a complete resolved policy. All
+worktrees may adopt these changes on their next start/reload. Keep legacy files for
+manual recovery until you decide what to do with them; tools never clean them up.
+
+Non-Git cwd, submodules, bare and unsupported separate-Git-directory layouts remain
+cwd-local, without parent-policy inheritance. `core.worktree` cannot redirect policy.
+Global is unchanged. **Policy identity never changes mounts or execution cwd**:
+only canonical current cwd is automatically bound read/write at lexical current cwd.
+Git ancestors, the main root and other worktrees are NEVER implicit mounts.
 
 Catalog bounds are 256 repositories, 4096 registrations per repository and 1 MiB
 per shared config artifact; proof pointer files are limited to 16 KiB. Invalid,
@@ -119,22 +122,19 @@ sandbox project-local extensions or other code you choose to load on the host.
 
 ### Host-owned Dockerfile sources
 
-You may put `Dockerfile` beside the selected host-owned policy (Global,
-Repository, Worktree, or cwd-local fallback), with an optional dedicated
+You may put `Dockerfile` beside the selected host-owned policy (Global or Project), with an optional dedicated
 `build-context/` beside it. No repository tree or parent cwd context is inherited.
 An explicit scope `image` wins over its colocated Dockerfile; otherwise that
-Dockerfile supplies its image. Worktree overrides shared Project, which overrides
-Global; Session `image` overrides all. Dockerfile/context Project saves use the
-same named human Repository/Worktree destination choice as config at supported
-checkout roots, with an exact-target source review after destination selection.
+Dockerfile supplies its image. Project overrides Global; Session `image` overrides
+all. Dockerfile/context Project saves use the same shared main-root record as config
+from main, linked and nested cwd, with one exact-target source review.
 A first shared source save explicitly registers the same immutable `_repository`
 metadata in shared config; it preserves user/unknown keys and image intent (TOML
 formatting/comments may change only when adding metadata). Existing valid config
 metadata is never rewritten. This covers current/future registered worktrees,
-including after gitfile deletion. Getter defaults Project reads to repository;
-`destination:"worktree"` reads the checkout override. Nested/nonGit/unsupported
-cwd stays local. Neither config nor source destination selection copies existing
-Dockerfiles/contexts. Source tools support bounded relative UTF-8 context PATCH
+including after gitfile deletion. Getter and setter expose only Project or Global,
+with no Repository/Worktree destination argument. Non-Git/unsupported layouts stay
+local. Neither config nor source saves copy existing Dockerfiles/contexts. Source tools support bounded relative UTF-8 context PATCH
 (create/update/delete/executable), preserving unspecified and binary files.
 Multi-artifact saves are individually, not jointly/crash atomic; partial/unknown
 persistence never reloads. Runtime settings show the content-addressed local image, source scope/path
@@ -394,8 +394,8 @@ sandbox; saving settings cannot override it.
   Their order is built-ins → legacy XDG → explicit file → environment → internal
   CLI overrides → host Global → host Project → Session. New approved saves target
   host Global/Project files, not these compatibility inputs.
-- **No Git-root search or workspace modes.** Only cwd is mounted. Nested cwd
-  doesn't inherit parent Project policy, and external worktree metadata isn't
-  separately mounted. [Storage and legacy-volume recovery →](storage.md)
+- **No Git-root-selected mounts or workspace modes.** Only cwd is mounted. Nested
+  Git cwd shares main-root Project policy but never an ancestor bind. External
+  worktree metadata isn't separately mounted. [Storage and legacy-volume recovery →](storage.md)
 - **`/msb` is now the panel, not a subcommand family.** Use its Actions tree for
   lifecycle controls and agent tools for approved settings edits.

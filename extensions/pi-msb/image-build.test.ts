@@ -39,6 +39,8 @@ test("builder uses isolated pinned-image root VM, public-only policy and argv; s
   await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
   assert.ok(calls.includes("builder-cpus:2"));
   assert.ok(calls.includes("builder-memory:4096"));
+  assert.ok(calls.includes("builder-rootDisk:8192"));
+  assert.ok(calls.findIndex((call) => call.startsWith("builder-image:")) < calls.indexOf("builder-rootDisk:8192"));
   assert.ok(calls.includes("builder-security:default"));
   assert.ok(calls.includes("builder-user:root"));
   assert.ok(calls.includes("builder-detached:false"));
@@ -104,7 +106,11 @@ for (const failStep of ["create", "build", "import"]) test(`build ${failStep} fa
   const f = await fixture(t);
   const calls: string[] = [];
   await assert.rejects(ensureDockerfileImage({ sdk: buildSdk(calls, { failStep }), source: f.source, acquireLock }), { message: BUILD_FAILURE });
-  if (failStep !== "create") assert.ok(calls.includes("builder-destroy"));
+  assert.ok(calls.includes("builder-destroy"));
+  if (failStep === "create") {
+    assert.equal(calls.filter((call) => call.startsWith("builder-get:")).length, 1);
+    assert.match(calls.find((call) => call.startsWith("builder-record-destroy:"))!, /:10000$/);
+  }
   assert.equal(await fs.stat(join(f.source.cacheDir, `${f.source.identity}.json`)).then(() => true, () => false), false);
   await assertClean(calls);
 });
@@ -317,4 +323,142 @@ test("delayed SDK acquisition cannot borrow a replacement activation source/cont
   assert.equal(calls.some((call) => call.startsWith("create:")), false);
   assert.equal(persisted.some((entry) => entry.enabled === true), false);
   assert.equal(await fs.stat(f.source.cacheDir).then(() => true, () => false), false);
+});
+
+test("builder canonicalizes both private staging binds through an aliased temporary root", async (t) => {
+  const f = await fixture(t);
+  const alias = join(f.root, "temporary-alias");
+  await fs.symlink(f.root, alias);
+  const mkdtemp = fs.mkdtemp.bind(fs);
+  t.mock.method(fs, "mkdtemp", async () => mkdtemp(join(alias, "pi-msb-build-")));
+  const calls: string[] = [];
+  const sdk = buildSdk(calls, { create: async () => {
+    const [input, output] = temporaryPaths(calls);
+    assert.ok(input && output);
+    assert.notEqual(input, output);
+    assert.equal(dirname(input), dirname(output));
+    for (const path of [dirname(input), input, output]) {
+      assert.equal(path, await fs.realpath(path));
+      assert.equal((await fs.stat(path)).mode & 0o777, 0o700);
+    }
+    assert.equal(calls.includes("builder-readonly:/pi-msb-input"), true);
+    assert.equal(calls.includes("builder-readonly:/pi-msb-output"), false);
+    assert.equal(calls.some((call) => /follow.*symlink/i.test(call)), false);
+  } });
+  await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
+  await assertClean(calls);
+});
+
+for (const retarget of [false, true]) test(`staging realpath failure cleans only the original owned directory (retarget=${retarget})`, async (t) => {
+  const f = await fixture(t);
+  const mkdtemp = fs.mkdtemp.bind(fs);
+  const realpath = fs.realpath.bind(fs);
+  let owned = "";
+  const moved = join(f.root, "original-staging");
+  t.mock.method(fs, "mkdtemp", async () => { owned = await mkdtemp(join(f.root, "pi-msb-build-")); return owned; });
+  t.mock.method(fs, "realpath", async (path: string) => {
+    if (path !== owned || !owned) return realpath(path);
+    if (retarget) {
+      await fs.rename(owned, moved);
+      await fs.mkdir(owned);
+      await fs.writeFile(join(owned, "foreign"), "untouched");
+    }
+    throw new Error("PRIVATE REALPATH FAILURE");
+  });
+  const calls: string[] = [];
+  await assert.rejects(ensureDockerfileImage({ sdk: buildSdk(calls), source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  assert.equal(calls.includes("builder-create"), false);
+  if (retarget) {
+    assert.equal(await fs.readFile(join(owned, "foreign"), "utf8"), "untouched");
+    assert.ok((await fs.stat(moved)).isDirectory());
+  } else assert.equal(await fs.stat(owned).then(() => true, () => false), false);
+});
+
+test("failed create before persistence removes staging on authoritative local database absence", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const sdk = buildSdk(calls, { failStep: "create", persistBeforeCreate: false });
+  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  assert.equal(calls.filter((call) => call.startsWith("builder-get:")).length, 1);
+  assert.equal(calls.includes("builder-destroy"), false);
+  await assertClean(calls);
+});
+
+test("failed boot cleanup accepts persisted labels arrays without a handle lifecycle flag", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const sdk = buildSdk(calls, { failStep: "create" });
+  const get = sdk.Sandbox.get;
+  sdk.Sandbox.get = async (name: string) => {
+    const handle = await get(name);
+    assert.equal("ownsLifecycle" in handle, false);
+    const config = handle.config();
+    handle.config = () => ({ ...config, labels: Object.entries(config.labels) });
+    return handle;
+  };
+  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  assert.ok(calls.includes("builder-destroy"));
+  await assertClean(calls);
+});
+
+for (const failure of ["label", "name", "config-name", "backend", "id", "inspection", "config", "unknown-not-found", "backend-switch", "lookup-backend-switch", "destroy", "replacement"]) test(`failed boot ${failure} refuses uncertain cleanup and preserves staging`, async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const sdk = buildSdk(calls, { failStep: "create", create: async () => {
+    if (failure === "backend-switch") sdk.defaultBackendKind = () => "cloud";
+  } });
+  const get = sdk.Sandbox.get;
+  let original: any;
+  sdk.Sandbox.get = async (name: string) => {
+    assert.match(name, /^pi-msb-builder-[a-f0-9-]+$/);
+    if (failure === "inspection") throw new Error("PRIVATE DATABASE FAILURE");
+    if (failure === "unknown-not-found") throw Object.assign(new Error("not found"), { code: "NOT_FOUND" });
+    if (failure === "lookup-backend-switch") {
+      sdk.defaultBackendKind = () => "cloud";
+      throw Object.assign(new Error("not found"), { code: "sandboxNotFound" });
+    }
+    const handle = original = await get(name);
+    const config = handle.config();
+    if (failure === "label") handle.config = () => ({ ...config, labels: { "pi-msb.builder": "foreign" } });
+    if (failure === "name") handle.name = "pi-msb-builder-foreign";
+    if (failure === "config-name") handle.config = () => ({ ...config, name: "foreign" });
+    if (failure === "backend") handle.backendKind = "cloud";
+    if (failure === "id") handle.id = "";
+    if (failure === "config") handle.config = () => { throw new Error("PRIVATE CONFIG FAILURE"); };
+    if (failure === "destroy") handle.destroy = async () => { throw new Error("PRIVATE DESTROY FAILURE"); };
+    if (failure === "replacement") {
+      const destroy = handle.destroy;
+      handle.destroy = async (options: { timeoutMs: number }) => {
+        // Persist a foreign same-name record between inspection and destruction.
+        await sdk.Sandbox.builder(name).labels({ "pi-msb.builder": "foreign" }).create().catch(() => undefined);
+        await destroy(options);
+      };
+    }
+    return handle;
+  };
+  let released = false;
+  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock: async () => ({ path: "test", release: async () => { released = true; } }) }), { message: BUILD_FAILURE });
+  assert.ok(released);
+  assert.equal(calls.includes("builder-destroy"), false);
+  assert.equal(calls.some((call) => /connect:|start:|image-load:/.test(call)), false);
+  if (failure === "replacement") {
+    const replacement = await get(original.name);
+    assert.notEqual(replacement, original);
+    assert.equal(replacement.config().labels["pi-msb.builder"], "foreign");
+  }
+  if (failure === "backend-switch") assert.equal(calls.some((call) => call.startsWith("builder-get:")), false);
+  for (const path of temporaryPaths(calls)) assert.ok((await fs.stat(path)).isDirectory());
+  // No real VM exists in this fixture; only its retained staging needs teardown.
+  for (const directory of new Set(temporaryPaths(calls).map(dirname))) await fs.rm(directory, { recursive: true, force: true });
+});
+
+test("failed boot cleanup never sweeps previously registered builder names", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const sdk = buildSdk(calls, { failStep: "create" });
+  const previous = Array.from({ length: 4 }, (_, i) => `pi-msb-builder-00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+  for (const name of previous) await sdk.Sandbox.builder(name).labels({ "pi-msb.builder": "previous-owner" }).create().catch(() => undefined);
+  calls.length = 0;
+  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  const lookups = calls.filter((call) => call.startsWith("builder-get:"));
+  assert.equal(lookups.length, 1);
+  assert.equal(previous.some((name) => lookups[0] === `builder-get:${name}`), false);
+  for (const name of previous) assert.equal((await sdk.Sandbox.get(name)).config().labels["pi-msb.builder"], "previous-owner");
+  await assertClean(calls);
 });

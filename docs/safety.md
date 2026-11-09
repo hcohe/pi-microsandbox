@@ -8,7 +8,7 @@ our deal, without the force-field marketing.
 ## Fail closed by default
 
 With the default `fallback_mode = "block"`, failed configuration, startup,
-images, or tool execution block routed tools: `read`, `write`, `edit`, `ls`,
+images, or tool execution block ordinary routed tools: `read`, `write`, `edit`, `ls`,
 `find`, `grep`, and `bash`. A broken VM is **not** permission to retry on your
 host. Malformed/truncated command completion is an error even if some output
 arrived; cleanup is best-effort and never becomes a host retry.
@@ -17,11 +17,25 @@ There are explicit ways to leave that boundary:
 
 | Control | What you authorize |
 | --- | --- |
-| Routed call with `execution_target = "host"` | One exact tool/cwd/argument set, with interactive No-first approval when the sandbox is active. Headless use is unavailable. |
+| Routed call with `execution_target = "host"` | One exact tool/cwd/argument set, with interactive No-first approval when active; unavailable/disabled recovery permits only Bash with ready identity/configuration and an explicit finite positive timeout ≤120 seconds. Headless use is unavailable. |
 | `/msb` → Actions → Turn off | An explicit handoff to unsandboxed host tools after confirmation. |
 | `PI_MSB_DISABLE=1` | Launch in explicit unsandboxed off mode. |
 | `fallback_mode = "host"` | Automatic unsandboxed tool execution after sandbox failure, visibly marked as host fallback. |
 | Pass-through tools / permitted third-party tools | Execution outside the VM, without per-call host approval. |
+
+Host recovery first uses passive `msb_diagnostics` and `msb_config_get`. The agent
+must explain the narrow live diagnostic need before requesting approval of the
+exact command, timeout and fixed session cwd. Existing host permission is required;
+unresolved configuration/identity and booting/stopping remain blocked. Every call
+needs fresh approval; no grant or automatic host retry is created. Recovery binds
+to the canonical cwd and physical directory identity captured during workspace
+discovery, rechecked before the prompt, after approval, and before host handoff.
+Changed aliases, replaced directories, and missing/unprovable roots fail closed;
+restoring a path never restores a failed approval. Public filesystem path checks
+and process spawning are not jointly atomic against host filesystem races.
+Shell commands
+have real host-user privileges, are not guaranteed read-only, and timeout does not
+guarantee descendant confinement.
 
 Keep block mode for untrusted work. The default pass-throughs are `web_search`,
 `source_check`, and `fetch_content`; other third-party tools are blocked unless
@@ -77,9 +91,11 @@ preventable; the directory must remain host-controlled.
 
 Session restrictions reset on Pi `/reload`, session/workspace switch, or
 shutdown; transcript resume doesn't restore them. Ordinary settings reload keeps
-them. Persist lasting restrictions in Project or Global. Nested cwd has a
-separate canonical Project identity and shared session boundary, with **no parent
-Project inheritance**; Global stays unchanged.
+them. Persist lasting restrictions in Project or Global. Git main, linked and
+nested cwd share main-root Project policy, never a broader mount or Session grant.
+Session ownership and replacement safety remain per canonical current cwd.
+Non-Git/unsupported layouts remain cwd-local; Global stays unchanged. Ignored
+legacy Worktree files never become shared grants without fresh manual review.
 
 ## Approved configuration tools
 

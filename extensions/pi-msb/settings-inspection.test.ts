@@ -72,6 +72,19 @@ test("new secret source discovery invalidates old schema caches", () => {
   assert.equal(current.settingsSchema, undefined);
   assert.equal(current.capabilities, undefined);
 });
+test("shared Project discovery refreshes legacy Worktree schema caches without projecting a Worktree layer", () => {
+  assert.ok(SETTINGS_SCHEMA_VERSION > 5);
+  const details = inspectSettings({ ...snapshot, layers: { ...snapshot.layers, worktree: { cpus: 64 } } },
+    inspectionRequest({ sections: ["schema", "capabilities", "layers"], knownSchemaVersion: 5 }));
+  assert.equal(details.schemaUnchanged, undefined);
+  assert.deepEqual(details.capabilities.scopes, ["session", "project", "global"]);
+  assert.match(details.capabilities.project, /shared main\/root/);
+  assert.match(details.capabilities.project, /ignored and preserved/);
+  assert.deepEqual(Object.keys(details.layers), ["global", "project", "session"]);
+  for (const field of Object.values(details.settingsSchema) as Array<{ scopes: string[] }>) {
+    assert.deepEqual(field.scopes, ["session", "project", "global"]);
+  }
+});
 test("JSON projection masks literal credentials but exposes camelCase, snake_case and uppercase host source metadata", () => {
   for (const [textValue, hostEnv, hostCmd] of [["textValue", "hostEnv", "hostCmd"], ["text_value", "host_env", "host_cmd"], ["TEXT_VALUE", "HOST_ENV", "HOST_CMD"]]) {
     const raw = { hostEnv: ["PUBLIC_FORWARDING"], secrets: [{

@@ -815,7 +815,7 @@ test("msb_config_set: real controller reconciliation, no bootstrap outside selec
   env.PI_MSB_DISABLE = "1";
   // Git Project saves now require a destination, not a bare Yes.
   (f.ctx.ui as any).select = async (_question: string, choices: string[]) => {
-    assert.deepEqual(choices, ["No", "Yes (For workspace and all its worktrees)", "Yes (Only for workspace worktree)"]);
+    assert.deepEqual(choices, ["No", "Apply shared Project (workspace)"]);
     return choices[1];
   };
   assert.equal((await call(set("project"))).details.outcome, "saved_but_reload_failed"); assert.equal(boots, 0);

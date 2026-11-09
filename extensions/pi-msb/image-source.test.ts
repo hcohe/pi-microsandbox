@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { DEFAULT_CONFIG, hostConfigPaths, resolveConfig } from "./config.ts";
-import { BUILD_LIMITS, snapshotDockerfile } from "./image-source.ts";
+import { BUILD_LIMITS, BUILD_ROOT_DISK_MIB, BUILD_VERSION, snapshotDockerfile } from "./image-source.ts";
 import { SettingsEditor } from "./settings.ts";
 
 async function fixture(t: TestContext) {
@@ -71,6 +72,25 @@ test("Dockerfile context hashes exact dedicated bytes and modes, not adjacent po
   assert.notEqual((await resolveConfig(f.input)).config.image, changed.config.image);
   await f.write(f.project, "FROM scratch\nLABEL changed=true\n");
   assert.notEqual((await resolveConfig(f.input)).config.image, changed.config.image);
+});
+
+test("builder writable disk size participates in Dockerfile cache identity", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM scratch\n");
+  const resolved = await resolveConfig(f.input);
+  const snapshot = await snapshotDockerfile(resolved.imageBuild!, DEFAULT_CONFIG.image);
+  const identity = (diskSize?: number) => {
+    const options = [BUILD_VERSION, DEFAULT_CONFIG.image, snapshot.platform, 2, 4096];
+    if (diskSize !== undefined) options.push(diskSize);
+    const hash = createHash("sha256").update(JSON.stringify(options));
+    for (const entry of snapshot.entries) {
+      hash.update(JSON.stringify([entry.path, entry.mode, entry.data?.length ?? null]));
+      if (entry.data) hash.update(entry.data);
+    }
+    return hash.digest("hex");
+  };
+  assert.equal(snapshot.identity, identity(BUILD_ROOT_DISK_MIB));
+  assert.notEqual(snapshot.identity, identity());
 });
 
 test("Dockerfile uses canonical exact cwd identity, never parent project policy", async (t) => {

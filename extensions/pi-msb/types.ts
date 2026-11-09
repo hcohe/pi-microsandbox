@@ -97,7 +97,7 @@ export type DeepReadonly<T> = T extends (...args: any[]) => unknown
     : T extends object
       ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
       : T;
-export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "host-worktree" | "temporary";
+export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "temporary";
 export interface ParsedConfigLayer {
   name: ConfigLayerName;
   value: DeepPartial<Config>;
@@ -300,6 +300,13 @@ export interface ToolOpsProvider {
   readonly execution?: SessionExecutionContext;
   isActive(): boolean;
   getState(): RuntimeState;
+  /** Cached authorization epoch; undefined while identity/configuration or lifecycle is unresolved.
+   * Replaced on runtime/configuration lifecycle changes, even if the same state returns.
+   * Recovery host execution requires this signal and a ready execution context; fixed active-only adapters may omit it. */
+  hostExecutionToken?(): object | undefined;
+  /** Recovery-only filesystem validation against the original discovery-time canonical root/device/inode.
+   * Must reject absent proof and identity/token changes across filesystem awaits. */
+  validateHostRecoveryRoot?(identity: SessionExecutionIdentity, token: object): Promise<void>;
   /** Passive, non-waking liveness snapshot for UI; never acquires a tool runtime. */
   refreshState?(): Promise<RuntimeState>;
   withRuntime<T>(callback: (runtime: RuntimeExecution) => Promise<T>): Promise<T>;
@@ -418,7 +425,7 @@ export interface AgentRuntimePolicySnapshot {
 }
 export interface MsbControl {
   /** Fixed-scope owned Dockerfile backend; no host-tool routing or arbitrary paths. */
-  openDockerfile?(scope: import("./dockerfile-storage.ts").DockerfileScope, destination?: import("./dockerfile-storage.ts").DockerfileDestination): Promise<import("./dockerfile-storage.ts").DockerfileDraft | undefined>;
+  openDockerfile?(scope: import("./dockerfile-storage.ts").DockerfileScope, ...retiredDestinations: never[]): Promise<import("./dockerfile-storage.ts").DockerfileDraft | undefined>;
   /** Passive allowlisted snapshot from held state only. No settings.inspect,
    * source/environment reads, commands, SDK, logs, lifecycle or writes.
    * Cached desired/adoption is last-known, not live; raw errors are withheld.

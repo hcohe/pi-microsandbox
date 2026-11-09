@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import { normalize, resolve } from "node:path";
 import {
-  applyOverride, assertPolicyOutsideWorkspace, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, legacyConfigSources,
+  applyOverride, assertPolicyOutsideWorkspace, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, ignoredLegacyProjectWarnings, legacyConfigSources,
   normalizeConfigPath, parseEnvConfig, parseTomlConfig, readRawConfig, removeOverride,
   resolveConfig, toEffectiveToml, validateConfig, type ResolveConfigInput, type HostConfigPaths, type HostConfigTargets,
 } from "./config.ts";
@@ -18,7 +18,7 @@ export { COLLECTION_REMOVALS, SETTINGS_PATHS } from "./settings-metadata.ts";
 export { classifySettingsEffect, LIVE_SETTINGS_KEYS, type SettingsEffect } from "./settings-effect.ts";
 export { SettingsConflictError } from "./settings-conflict.ts";
 
-export type SettingsScope = "temporary" | "project" | "worktree" | "global";
+export type SettingsScope = "temporary" | "project" | "global";
 export interface SettingsChange { path: string; operation: "set" | "inherit"; before: unknown; after: unknown }
 export interface SettingsPreview {
   changes: SettingsChange[];
@@ -75,9 +75,9 @@ interface EntryEdit {
   origin: EntryOrigin;
 }
 interface DraftPatch { inherit: boolean; value?: unknown; entries?: EntryEdit[] }
-const LAYER_RANK: Record<string, number> = { defaults: 0, global: 1, project: 1, env: 2, cli: 3, "host-default": 4, "host-project": 5, "host-worktree": 6, temporary: 7 };
-const scopeRank = (scope: SettingsScope): number => scope === "global" ? 4 : scope === "project" ? 5 : scope === "worktree" ? 6 : 7;
-const scopeSource = (scope: SettingsScope): string => scope === "global" ? "host-default" : scope === "project" ? "host-project" : scope === "worktree" ? "host-worktree" : "temporary";
+const LAYER_RANK: Record<string, number> = { defaults: 0, global: 1, project: 1, env: 2, cli: 3, "host-default": 4, "host-project": 5, temporary: 7 };
+const scopeRank = (scope: SettingsScope): number => scope === "global" ? 4 : scope === "project" ? 5 : 7;
+const scopeSource = (scope: SettingsScope): string => scope === "global" ? "host-default" : scope === "project" ? "host-project" : "temporary";
 function entryIdentity(path: string, entry: any): string {
   if (path === "secrets") return String(typeof entry === "object" ? entry?.env : entry);
   if (path === "mounts") {
@@ -435,7 +435,7 @@ export class SettingsDraft {
     await assertAnchor(this.#source.anchor);
     return this.#transfer(await this.#editor.open(this.scope));
   }
-  projectDestinations(): Promise<{ repositoryName: string; worktreeName: string } | undefined> { return this.#editor.projectDestinations(); }
+  sharedProject(): Promise<{ repositoryName: string } | undefined> { return this.#editor.sharedProject(); }
   /** Rebase only deliberate dirty edits onto another scope; original draft remains unchanged. */
   async forScope(scope: SettingsScope): Promise<SettingsDraft> {
     this.#assertOpen();
@@ -520,7 +520,7 @@ export class SettingsDraft {
     const key = path === "secrets" || path === "mounts" ? `${path}[${identity}]` : normalizeConfigPath(path).join(".");
     const owned = this.#recovery && this.#ownCollection(path)?.some((entry) => entryIdentity(path, entry) === identity);
     const source = owned ? scopeSource(this.scope) : this.#base.provenance[key] ?? "defaults";
-    return { source, path: source === "host-worktree" ? this.#policyPaths.worktree! : source === "host-project" ? this.#policyPaths.project : source === "host-default" ? this.#policyPaths.global : null, rank: LAYER_RANK[source] ?? 0 };
+    return { source, path: source === "host-project" ? this.#policyPaths.project : source === "host-default" ? this.#policyPaths.global : null, rank: LAYER_RANK[source] ?? 0 };
   }
   #ownCollection(path: string): unknown[] | undefined {
     const ownRaw = rawValue(this.#source.raw, normalizeConfigPath(path));
@@ -825,20 +825,19 @@ export class SettingsEditor {
   /** Call on session shutdown even when the same session may later resume. */
   endSession(): void { this.#interaction?.abort(); this.#temporary = {}; this.#revision++; this.#contextRevision++; }
   assertRevision(revision: number): void { if (revision !== this.#revision) throw new ConfigError(["stale settings draft; reopen it"]); }
-  async projectDestinations(): Promise<{ repositoryName: string; worktreeName: string } | undefined> {
+  async sharedProject(): Promise<{ repositoryName: string } | undefined> {
     const targets = await hostConfigTargets(this.#input);
-    return targets.repository ? { repositoryName: targets.repositoryName, worktreeName: targets.worktreeName } : undefined;
+    return targets.repository ? { repositoryName: targets.repositoryName } : undefined;
   }
   async open(scope: SettingsScope): Promise<SettingsDraft> {
     const revision = this.#revision;
-    if (!["temporary", "project", "worktree", "global"].includes(scope)) throw new ConfigError(["invalid settings scope"]);
+    if (!["temporary", "project", "global"].includes(scope)) throw new ConfigError(["invalid settings scope"]);
     if (resolve(this.#input.repoRoot ?? this.#input.cwd) !== this.#workspaceIdentity) throw new SettingsConflictError();
     const targets = await hostConfigTargets(this.#input);
     const roots = [resolve(this.#input.repoRoot ?? this.#input.cwd), await fs.realpath(this.#input.repoRoot ?? this.#input.cwd)];
     const paths = targets.paths;
     const anchor = await captureAnchor(targets.agentDir, targets.canonicalAgentDir);
     const path = scope === "temporary" ? null : paths[scope];
-    if (path === undefined) throw new ConfigError(["worktree settings unavailable for this cwd"]);
     const source = path ? await readSource(path) : { text: null, raw: structuredClone(this.#temporary) as Record<string, unknown>, version: "memory" };
     if (scope === "project" && targets.repository) source.raw._repository = structuredClone(targets.repository);
     for (const file of [...Object.values(targets.paths), ...Object.values(targets.lexicalPaths)]) await assertPolicyOutsideWorkspace(file, roots);
@@ -921,7 +920,6 @@ export class SettingsEditor {
     const layers = {
       global: projectSettingsJson(raw[targets.paths.global] ?? {}),
       project: projectSettingsJson(raw[targets.paths.project] ?? {}),
-      ...(targets.paths.worktree ? { worktree: projectSettingsJson(raw[targets.paths.worktree] ?? {}) } : {}),
       session: projectSettingsJson(this.#temporary),
     };
     const origins = Object.fromEntries(SETTINGS_PATHS.map((path) => [path, view.resolved.provenance[normalizeConfigPath(path).join(".")] ?? "defaults"]));
@@ -953,7 +951,7 @@ export class SettingsEditor {
         sources[scope!] = raw;
         try { validateLayerValues(parseTomlConfig(text ?? "", "global").value); }
         catch (error) {
-          if (scope === "global" || scope === "project" || scope === "worktree") scopes.push(scope);
+          if (scope === "global" || scope === "project") scopes.push(scope);
           const constraints = error instanceof ConfigError ? error.issues.slice(0, 32).flatMap((issue) => {
             const match = /^([A-Za-z][A-Za-z0-9.]*)(?:\[\d+\])?(?:\.[A-Za-z]+)?: (.*)$/.exec(issue);
             if (!match) return [];
@@ -977,15 +975,16 @@ export class SettingsEditor {
     let environment: unknown = {};
     try { environment = parseEnvConfig(env).value; } catch { /* Never publish environment/parser errors. */ }
     const supported: SettingsScope[] = [];
-    if (!malformed) for (const scope of ["global", "project", ...(targets.paths.worktree ? ["worktree" as const] : []), "temporary"] as const) {
+    if (!malformed) for (const scope of ["global", "project", "temporary"] as const) {
       try { await this.#readView(scope); supported.push(scope); } catch { /* Not an independently repairable target. */ }
     }
     this.assertRevision(revision);
     const sanitize = createSettingsSanitizer([...Object.values(sources), ...sourcePrivacy(texts), ...environmentPrivacy(env), environment, this.#temporary, ...privateSources]);
     return sanitize({
       supportedPaths: SETTINGS_PATHS,
-      ...(!malformed ? { sources: { global: { path: targets.lexicalPaths.global, source: "host-default" }, project: { path: targets.lexicalPaths.project, source: "host-project" }, ...(targets.lexicalPaths.worktree ? { worktree: { path: targets.lexicalPaths.worktree, source: "host-worktree" } } : {}), session: { path: null, source: "temporary" } } } : {}),
-      ...(!malformed ? { runtime: extra, layers: { global: projectSettingsJson(sources.global ?? {}), project: projectSettingsJson(sources.project ?? {}), ...(targets.paths.worktree ? { worktree: projectSettingsJson(sources.worktree ?? {}) } : {}), session: projectSettingsJson(this.#temporary) } } : {}),
+      ...(!malformed ? { sources: { global: { path: targets.lexicalPaths.global, source: "host-default" }, project: { path: targets.lexicalPaths.project, source: "host-project" }, session: { path: null, source: "temporary" } } } : {}),
+      ...(!malformed ? { runtime: extra, layers: { global: projectSettingsJson(sources.global ?? {}), project: projectSettingsJson(sources.project ?? {}), session: projectSettingsJson(this.#temporary) } } : {}),
+      warnings: await ignoredLegacyProjectWarnings(targets),
       recovery: {
         available: supported.length > 0, configurationValid: false, manualRepairRequired: !supported.length,
         scopes: [...new Set([...scopes, ...supported])],
@@ -1012,7 +1011,7 @@ export class SettingsEditor {
     return resolveConfig({ ...this.#input, temporaryOverrides: temporary, readFile: async (file) => {
       const original = await read(file);
       recoveryRaw(original ?? "");
-      return (ceiling === "global" && file === paths.project || ["global", "project"].includes(ceiling) && file === paths.worktree) ? null : file === path ? text : original;
+      return (ceiling === "global" && file === paths.project) ? null : file === path ? text : original;
     } });
   }
   async commit(revision: number, scope: SettingsScope, path: string | null, source: Source, raw: Record<string, unknown>, temporary: DeepPartial<Config>, approvalGuard?: (resolved?: ResolvedConfig) => Promise<void>, recovery = false): Promise<ResolvedConfig> {
@@ -1023,7 +1022,7 @@ export class SettingsEditor {
       const targetInfo = await hostConfigTargets(this.#input);
       const targets = targetInfo.paths;
       if (scope === "project" && targetInfo.repository && !equal(raw._repository, targetInfo.repository)) throw new SettingsConflictError();
-      if (scope === "temporary" ? path !== null : !["global", "project", "worktree"].includes(scope) || path !== targets[scope]) throw new ConfigError(["invalid settings target"]);
+      if (scope === "temporary" ? path !== null : !["global", "project"].includes(scope) || path !== targets[scope]) throw new ConfigError(["invalid settings target"]);
       validateLayerValues(scope === "temporary" ? temporary : parseTomlConfig(serializeRaw(raw), "global").value);
       let validated: ResolvedConfig;
       const guard = async () => {

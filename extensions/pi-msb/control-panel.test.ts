@@ -43,7 +43,6 @@ async function fixture(t: any, theme = plainTheme, native = false, gitProject = 
   const terminal = { rows: 24, columns: 80 }; let closed = false;
   const draft = await settings.open("temporary"); const paths: Record<string, string> = { temporary: "Memory only (no disk writes)" };
   for (const scope of ["global", "project"] as const) { const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
-  if (gitProject) { const source = await settings.open("worktree"); paths.worktree = source.path!; source.discard(); }
   const panel = new ControlPanel({ draft, control, ctx, tui: { terminal, requestRender() {} } as any, theme, paths, done: () => { closed = true; } });
   const key = async (data: string) => { panel.handleInput(data); await tick(); await panel.waitForIdle(); };
   const text = () => stripTerminalSequences(panel.render(terminal.columns).join("\n"));
@@ -1064,32 +1063,28 @@ test("long instructions preserve paragraphs safely and never displace masked inp
 });
 
 
-for (const selectedScope of ["shared", "local"] as const) test(`Project panel exact No-first destination menu, no duplicate Yes, selected ${selectedScope} candidate only`, async (t) => {
+test("Project panel exact No-first shared Project approval with no Worktree destination", async (t) => {
   const f = await fixture(t, plainTheme, false, true);
-  const shared = "Yes (For repository and all its worktrees)";
-  const local = "Yes (Only for workspace worktree)";
+  const shared = "Apply shared Project (repository)";
   await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(1);
   assert.equal(f.selected(), "No");
   const menu = f.full().split("\n").filter((line) => /^[> ] \[ /.test(line)).map((line) => line.trim().replace(/^> /, "").replace(/^\[ (.*) \]$/, "$1"));
-  assert.deepEqual(menu, ["No", shared, local]);
+  assert.deepEqual(menu, ["No", shared]);
   await assert.rejects(readFile(f.paths.project!), { code: "ENOENT" });
   await f.key("\r"); // No is the default and never writes, even for a simple scalar.
   await assert.rejects(readFile(f.paths.project!), { code: "ENOENT" });
   await f.edit("General", "Show Footer:"); await f.choose("false"); await f.save(1);
-  await f.choose(selectedScope === "shared" ? shared : local);
+  await f.choose(shared);
   assert.equal(f.full().includes("Review change"), false);
   assert.deepEqual(f.calls, ["idle", "reload"]);
-  const selected = selectedScope === "shared" ? f.paths.project! : f.paths.worktree!;
-  const other = selectedScope === "shared" ? f.paths.worktree! : f.paths.project!;
+  const selected = f.paths.project!;
   assert.equal(parseTomlConfig(await readFile(selected, "utf8"), "global").value.showFooter, false);
-  await assert.rejects(readFile(other), { code: "ENOENT" });
 });
 
 test("Project panel rejects metadata retarget while destination menu is open", async (t) => {
   const f = await fixture(t, plainTheme, false, true); await f.number("2"); await f.save(1);
   await writeFile(join(f.registration, "gitdir"), `${join(f.input.cwd, ".git")}\n\n`);
-  await f.choose("Yes (For repository and all its worktrees)");
+  await f.choose("Apply shared Project (repository)");
   assert.match(f.full(), /Apply failed/); assert.deepEqual(f.calls, ["idle"]);
   await assert.rejects(readFile(f.paths.project!), { code: "ENOENT" });
-  await assert.rejects(readFile(f.paths.worktree!), { code: "ENOENT" });
 });

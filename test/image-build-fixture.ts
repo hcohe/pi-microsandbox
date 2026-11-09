@@ -37,10 +37,20 @@ export function buildSdk(calls: string[], hooks: {
   build?: () => Promise<void>;
   import?: () => Promise<void>;
   failStep?: string;
+  persistBeforeCreate?: boolean;
 } = {}): MicrosandboxModule {
   const sdk = fakeSdk(calls);
   const runtimeBuilder = sdk.Sandbox.builder;
+  const runtimeGet = sdk.Sandbox.get;
+  const records = new Map<string, any>();
   const images = new Map<string, any>();
+  sdk.Sandbox.get = async (name: string) => {
+    if (!name.startsWith("pi-msb-builder-")) return runtimeGet(name);
+    calls.push(`builder-get:${name}`);
+    const handle = records.get(name);
+    if (!handle) throw Object.assign(new Error("PRIVATE NOT FOUND"), { code: "sandboxNotFound" });
+    return handle;
+  };
   sdk.defaultBackendKind = () => "local";
   sdk.NetworkPolicy = { fromProfiles: (profiles: string[]) => {
     calls.push(`builder-profiles:${profiles.join(",")}`);
@@ -63,7 +73,7 @@ export function buildSdk(calls: string[], hooks: {
     let reference = "";
     let labels: Record<string, string> = {};
     const builder: any = {};
-    for (const method of ["image", "pullPolicy", "cpus", "memory", "security", "user", "detached", "maxDuration", "idleTimeout", "workdir"]) builder[method] = (value: unknown) => { calls.push(`builder-${method}:${value}`); return builder; };
+    for (const method of ["image", "rootDisk", "pullPolicy", "cpus", "memory", "security", "user", "detached", "maxDuration", "idleTimeout", "workdir"]) builder[method] = (value: unknown) => { calls.push(`builder-${method}:${value}`); return builder; };
     builder.labels = (value: Record<string, string>) => { labels = value; calls.push(`builder-labels:${JSON.stringify(value)}`); return builder; };
     builder.network = (configure: (network: any) => void) => { configure({ policy: (policy: any) => { calls.push(`builder-network:${JSON.stringify(policy)}`); } }); return builder; };
     builder.volume = (guest: string, configure: (mount: any) => void) => {
@@ -72,11 +82,22 @@ export function buildSdk(calls: string[], hooks: {
     };
     builder.create = async () => {
       calls.push("builder-create");
+      const handle = {
+        name, id: `record-${name}`, backendKind: "local", config: () => ({ name, labels }),
+        destroy: async (options: { timeoutMs: number }) => {
+          calls.push(`builder-record-destroy:${name}:${options.timeoutMs}`);
+          if (records.get(name) !== handle) throw new Error("Sandbox replaced");
+          calls.push("builder-destroy");
+          if (hooks.failStep === "destroy") throw new Error("PRIVATE CLEANUP");
+          records.delete(name);
+        },
+      };
+      if (hooks.persistBeforeCreate !== false) records.set(name, handle);
       await hooks.create?.();
       if (hooks.failStep === "create") throw new Error("PRIVATE CREATE OUTPUT");
       const raw: any = {
-        ownsLifecycle: true, backendKind: "local", config: async () => ({ labels }),
-        destroy: async () => { calls.push("builder-destroy"); if (hooks.failStep === "destroy") throw new Error("PRIVATE CLEANUP"); },
+        name, ownsLifecycle: true, backendKind: "local", config: async () => ({ name, labels }),
+        destroy: async (options: { timeoutMs: number }) => handle.destroy(options),
         execStreamWith: async (_command: string, configure: (exec: any) => void) => {
           let args: string[] = [];
           const exec: any = { args: (value: string[]) => { args = value; return exec; }, timeout: () => exec };

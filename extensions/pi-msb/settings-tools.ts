@@ -143,7 +143,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
   });
   pi.registerTool({
     name: "msb_config_set", label: "Propose Microsandbox setting",
-    description: "Propose one setting operation OR an ordered operations array in ONE explicit scope. A batch uses one combined No-first approval, one atomic settings commit and at most one reload; no intermediate VM policy is adopted. Inspect msb_config_get for value schemas and policy semantics. Works without a running sandbox; supported invalid-configuration repairs still require a fully valid final candidate. No headless mutation. Array set replaces/clears the whole list; prefer upsert/remove to preserve siblings/credentials. Session is memory-only. No lifecycle/reset/file-path overrides. After completion, explain relevant returned safety/impact warnings to the user.",
+    description: "Propose one setting operation OR an ordered operations array in ONE explicit scope. A batch uses one combined No-first approval, one atomic settings commit and at most one reload; no intermediate VM policy is adopted. Inspect msb_config_get for value schemas and policy semantics. Works without a running sandbox; supported invalid-configuration repairs still require a fully valid final candidate. No headless mutation. Array set replaces/clears the whole list; prefer upsert/remove to preserve siblings/credentials. Session is memory-only. Project shares the main/root Git record from main, linked and nested cwd; non-Git/unsupported layouts remain cwd-local. There is no persistent Worktree destination; legacy overlays are ignored and preserved, never promoted. No lifecycle/reset/file-path overrides. After completion, explain relevant returned safety/impact warnings to the user.",
     parameters, executionMode: "sequential",
     // Arguments may contain credentials or repeat them in arbitrary identity fields.
     // Until execute has produced a bound sanitized review, display no argument data.
@@ -185,13 +185,7 @@ export function registerConfigTools(pi: ExtensionAPI, control: MsbControl): void
           checkIdentity();
           if (runtimeBefore !== JSON.stringify(runtime(control))) throw new SettingsConflictError();
         };
-        try { draft = await editor.open(input.scope === "session" ? "temporary" : input.scope); }
-        catch (error) {
-          // A broken shared layer may be unrepairable here while a worktree-only
-          // repair is valid (or vice versa). Never omit the layer at commit time.
-          if (input.scope !== "project" || !await editor.projectDestinations()) throw error;
-          draft = await editor.open("worktree");
-        }
+        draft = await editor.open(input.scope === "session" ? "temporary" : input.scope);
         for (const [index, item] of input.operations.entries()) {
           try { mutate(draft, item); }
           catch (error) {

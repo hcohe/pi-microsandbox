@@ -65,9 +65,9 @@ operations must not publish into a replacement session lifetime.
 
 Workspace resolution has no Git discovery: canonical `realpath(cwd)` is the
 host bind source, while the lexically resolved cwd is guest root and command
-cwd. Canonical cwd determines Project config identity and the shared session
-boundary. Nested directories have distinct identities with no parent Project
-inheritance; Global is unchanged. Cwd replacement invalidates prior host
+cwd. Git main, linked and nested cwd share the main/root host-owned Project
+record; non-Git/unsupported layouts stay local. Canonical current cwd determines
+the session boundary independently; Global is unchanged. Cwd replacement invalidates prior host
 approvals and read grants. Git metadata within cwd does not select the bind,
 and external linked-worktree/submodule metadata is not separately mounted.
 Explicit mounts and user-approved host controls remain separate access paths.
@@ -321,9 +321,10 @@ for both Git and non-Git directories. A Git subdirectory must not automatically
 expose Git ancestors or siblings outside cwd; routed writes must appear
 immediately on the host. Git metadata inside cwd must not select the bind, and
 external linked-worktree/submodule metadata must not be separately mounted.
-Validate canonical-cwd Project identity and shared session boundaries, distinct
-nested-cwd overrides with no parent inheritance, unchanged Global settings,
-and approval invalidation on cwd replacement. They also cover off/on and
+Validate shared main-root Git Project config and Dockerfile/context read/write
+from main, linked and nested cwd; unchanged non-Git/unsupported fallback and Global;
+ignored, untouched legacy storage; nearest Git discovery boundaries; per-current-cwd
+session isolation and approval invalidation on cwd replacement. They also cover off/on and
 reload, stale-sandbox pruning, fail-closed boot errors, and approved host execution. Docker release validation must cover
 daemon readiness, bridge DNS and HTTPS, user-defined networking, Buildx,
 Compose, idle wake, double port publishing, nested-container access to the

@@ -32,13 +32,11 @@ other `msb_*` names have no exemption.
 {"scope":"project"}
 ```
 
-The getter accepts `scope: "project" | "global"` (**no Session**), optional
-`destination: "repository" | "worktree"` for Project, and optional `contextPaths`
-(up to 16 relative file names). Project defaults to the repository target, matching
-config Project; nonGit/nested/unsupported cwd uses its ordinary cwd-local target.
-Use `destination:"worktree"` to read a checkout override explicitly (unavailable
-when no separate Worktree target exists). `target` identifies exactly what was
-read; `paths` lists authoritative Global/Project and optional Worktree locations.
+The getter accepts `scope: "project" | "global"` (**no Session**) and optional
+`contextPaths` (up to 16 relative file names). Project is the same main/root record
+from main, linked and nested Git cwd; non-Git/unsupported layouts remain cwd-local.
+There is no destination argument: retired Repository/Worktree requests are rejected.
+`target` identifies exactly what was read; `paths` lists Global and Project.
 It returns `exists`, actual Dockerfile UTF-8 `content` (or `null` plus bounded
 reason), bytes, bundled pinned `baseImage`/`minimalDockerfile`, guidance and
 last-known selection. Never use a generated/custom effective image as the starter.
@@ -82,20 +80,18 @@ At least one proposal is required. Context payload/read limits: 16 files,
 context review text. Dockerfile remains 32 KiB. All final sources together obey
 32 MiB / 2048 entries (including Dockerfile/directories) / depth 16.
 
-Project setter combines destination and diff in **one approval** at supported
-checkout roots: **No / This worktree (named Worktree) / All worktrees (named
-Repository)**, matching config destination semantics. Independent baselines are
-prepared before review; switching destination previews that target’s own changes.
-Enter approves only the previewed destination, with no second prompt. RPC/select-only
-adapters show both distinct diffs in one question; unavailable targets cannot be approved. The agent cannot choose setter destination.
-Repository affects current/future registered worktrees on reload/start, subject to
-higher overrides. A first shared save also registers immutable host-owned
+Project setter uses **one approval**: **No / Apply shared Project (<name>)** for
+Git main, linked and nested cwd, matching config Project. Only the shared baseline
+is prepared and reviewed. Old checkout-only labels are not shared authorization.
+Project affects current/future registered worktrees on reload/start, subject to
+Session overrides. A first shared save also registers immutable host-owned
 `_repository` in the exact shared `config.toml`, explicitly reviewed in the same
 approval. User intent/unknown keys are preserved; adding metadata can rewrite TOML
 formatting/comments. Existing valid metadata/config is never rewritten. There is
-no automatic source copy/migration between destinations. Global and nested/nonGit
-fallbacks remain unchanged. Worktree overrides shared Project, which overrides
-Global; explicit scope `image` and Session `image` can shadow sources. Inspect
+no automatic source copy/migration. Legacy cwd-keyed Git policy/source/context is
+ignored and preserved; diagnostics do not read its contents. Manually review selected
+inputs and approve shared migration separately. Global and non-Git/unsupported
+fallbacks remain unchanged. Project overrides Global; explicit scope `image` and Session `image` can shadow sources. Inspect
 `msb_config_get`; image inheritance requires separate config approval.
 
 These are owned source tools, **not** host Bash/write tools: no host execution
@@ -116,8 +112,8 @@ spacer separates the dim keyboard footer. No is the default; Escape/abort denies
 **d** reveals all warnings/consequences, exact paths/permissions/registration
 metadata, and the full unified review with two context lines. Network, restart,
 transcript, persistence and shared-registration explanations stay in details,
-not repeated in the main review. RPC/select-only adapters show both independent
-changed-code variants before one plain approval, without ANSI or a warning wall.
+not repeated in the main review. RPC/select-only adapters show the same scoped
+changed-code diff before one plain approval, without ANSI or a warning wall.
 Secrets must never enter source or transcript. Approval covers saving AND
 settings reload, building/importing the new content image and recreating a running
 sandbox if selected. Off/environment disable and autoStart are respected. Denial,
@@ -259,14 +255,14 @@ The selected inventory contains:
   desired settings are not presented as a valid resolved policy.
 - `desired`: all resolved settings, including defaults and automatic
   `sandbox_name: null`. This is **not proof of adopted VM state**.
-- `layers.global`, `.project`, optional `.worktree`, `.session`: complete supported sparse raw
+- `layers.global`, `.project`, `.session`: complete supported sparse raw
   assignments and removal controls; absent means inherit. Unknown raw values
   are omitted, malformed shadowed shapes are marked `<invalid>`, and unknown
   key names can appear in warnings/provenance. This is scope intent, not an
   effective configuration to copy back into storage.
 - `origins` and `provenance`: resolver origins, including `defaults`, `env`,
   legacy `global`/`cli`, `host-default` (Global), `host-project` (shared Project, or cwd-local Project without a shared target),
-  `host-worktree` (cwd-local override), and `temporary` (Session). Secret/mount identities have
+  and `temporary` (Session). Secret/mount identities have
   entry origins; scalar-list provenance is field-level, not item history.
 - `warnings` and `runtime`: status and known adopted settings/provenance,
   verification and timestamp. Reconnected VMs have only partially verified
@@ -385,11 +381,10 @@ protections. Persistent automatic sandbox naming uses `inherit`, not null.
 
 Global/Project scopes save sparse host-owned defaults at the selected
 [configuration locations](configuration.md#host-owned-project-overrides).
-At a supported Git checkout root, Project confirmation chooses the shared
-repository target or only this checkout; existing cwd-keyed overrides remain
-higher priority. New registered worktrees automatically share the shared target.
-Nested cwd/non-Git retain cwd-local semantics, with no parent-policy inheritance.
-Session is memory-only, above Worktree/Project/Global, never restored from transcripts, cleared on session/workspace identity
+Project confirmation saves the same main/root record from Git main, linked and
+nested cwd. Existing cwd-keyed Git overrides are ignored and preserved, never
+promoted. New registered worktrees share Project. Non-Git/unsupported layouts
+retain cwd-local semantics. Session is memory-only, above Project/Global, never restored from transcripts, cleared on session/workspace identity
 change, **Pi `/reload`**, or shutdown. Inherited defaults then return and may
 allow broader access. Ordinary **settings reload preserves Session overrides**;
 it is not Pi's extension `/reload`. Getter summaries, changed Session tool results,
@@ -411,14 +406,11 @@ Approval looks like the HOST-command question: **Allow configuration change?**,
 a standalone `Scope: Session`, `Scope: Project`, or `Scope: Global` line
 and the affected item, a focused color-coded diff, and vertical **No / Yes**
 choices for Session/Global and cwd-local non-Git Project.
-At a Git checkout root, Project instead shows exactly **No** (default),
-**Yes (For <repository> and all its worktrees)**, then
-**Yes (Only for <checkout> worktree)**. Names are safely rendered dynamically.
-Each candidate has its own bound full diff, path and command appendix; selection
-commits only that candidate, never redirects an approved draft. Shared shadowing
-is explicit nonwarning context: it can affect other/future worktrees even when
-not effective here. An independently unreviewable destination is marked
-UNAVAILABLE and cannot save; the valid repair alternative is still offered.
+For Git main, linked and nested cwd, Project instead shows **No** (default) /
+**Apply shared Project (<name>)**. Names are safely rendered dynamically. Its bound
+full diff, path and command appendix authorize only the shared target. Shared
+shadowing is explicit: it can affect other/future worktrees even when not effective
+here. Broken Project policy requires Project repair; no Worktree fallback exists.
 There is no dashboard header or routine source dump.
 Scope names use the theme’s warning color; the `Scope:` label stays muted.
 Native entry edits omit siblings and unchanged fields. Literal credentials stay

@@ -16,14 +16,16 @@
 - There are no workspace modes or Git-root-selected binds. Guest root and command
   cwd are the lexically resolved cwd; Git ancestors/siblings outside cwd are
   never automatically exposed. Canonical cwd remains the session boundary. At
-  supported checkout roots, Project save chooses shared repository policy or a
-  higher-priority cwd-local Worktree override. Shared config atomically embeds
-  immutable host-owned repository metadata; bounded read-only catalog discovery
-  survives checkout gitfile deletion and covers future registered worktrees.
-  Nested cwd and unsupported Git layouts stay cwd-local, Global unchanged,
-  with no parent-policy inheritance. Dockerfile/context Project saves use the same
-  named Repository/Worktree choice and host-owned immutable association mechanism;
-  neither config nor source destination selection copies Dockerfiles/build contexts.
+  supported Git main, linked and nested cwd, Project always uses the same
+  main/root host-owned record. Shared config atomically embeds immutable repository
+  metadata; bounded read-only catalog discovery survives checkout gitfile deletion
+  and covers future registered worktrees without crossing nearer Git boundaries.
+  Non-Git and unsupported Git layouts stay cwd-local; Global is unchanged. There
+  are no Repository/Worktree destinations or persistent checkout overrides.
+  Legacy cwd-keyed Git config/Dockerfile/context stays untouched and ignored, with
+  bounded metadata-only diagnostics and deliberate manual migration guidance; never
+  promote old grants or approvals. Dockerfile/context Project saves share config's
+  main-root record and immutable association; no automatic source copying.
   Owned source tools support bounded relative UTF-8 context patches, not arbitrary
   host paths; multi-artifact saves are individually atomic, never jointly/crash
   atomic, and partial/unknown persistence never authorizes activation.

@@ -1,7 +1,11 @@
-import { realpath } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type { Workspace } from "./types.ts";
+
+// Private discovery-time proof: a freshly sampled replacement is never a new authorization root.
+const rootProofs = new WeakMap<Workspace, { lexicalCwd: string; canonicalCwd: string; dev: bigint; ino: bigint }>();
 
 const PROTECTED_GUEST_PATHS = [
   "/bin",
@@ -34,12 +38,31 @@ function assertSafeGuestRoot(root: string): void {
 export async function discoverWorkspace(cwd: string): Promise<Workspace> {
   const lexicalCwd = resolve(cwd);
   let canonicalCwd: string;
+  let directory: BigIntStats;
   try {
+    directory = await stat(lexicalCwd, { bigint: true });
+    if (!directory.isDirectory() || directory.ino <= 0n) throw new Error("workspace directory identity cannot be proven");
     canonicalCwd = await realpath(lexicalCwd);
   } catch (error) {
     throw new Error(`workspace cwd cannot be canonicalized: ${lexicalCwd}`, { cause: error });
   }
 
   assertSafeGuestRoot(lexicalCwd);
-  return { hostRoot: canonicalCwd, guestRoot: lexicalCwd, cwd: lexicalCwd };
+  const workspace = { hostRoot: canonicalCwd, guestRoot: lexicalCwd, cwd: lexicalCwd };
+  rootProofs.set(workspace, { lexicalCwd, canonicalCwd, dev: directory.dev, ino: directory.ino });
+  await assertWorkspaceRootCurrent(workspace);
+  return workspace;
+}
+
+/** Recheck the discovery-time root; public path primitives cannot make check-and-spawn atomic. */
+export async function assertWorkspaceRootCurrent(workspace: Workspace): Promise<void> {
+  const proof = rootProofs.get(workspace);
+  if (!proof || workspace.cwd !== proof.lexicalCwd || workspace.hostRoot !== proof.canonicalCwd) throw new Error("Workspace root proof is unavailable");
+  const sameDirectory = (entry: BigIntStats) => entry.isDirectory() && entry.dev === proof.dev && entry.ino === proof.ino;
+  if (await realpath(workspace.cwd) !== proof.canonicalCwd
+    || !sameDirectory(await stat(workspace.cwd, { bigint: true }))
+    || !sameDirectory(await stat(proof.canonicalCwd, { bigint: true }))
+    || await realpath(workspace.cwd) !== proof.canonicalCwd) {
+    throw new Error("Workspace canonical root or physical directory changed");
+  }
 }

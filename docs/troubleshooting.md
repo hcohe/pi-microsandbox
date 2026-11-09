@@ -15,6 +15,20 @@ Ask your agent:
 secret-redacted state—no commands, SDK loading, file/environment reads, logs,
 credential resolution, or VM startup. It isn't a live health check.
 
+If passive inspection is insufficient, ask the agent to explain the narrow live
+diagnostic need and request one `bash` call with `execution_target: "host"` and
+an explicit finite positive `timeout` ≤120 seconds. With ready current workspace
+identity/configuration and existing host permission, unavailable/disabled recovery
+shows the exact command, timeout and fixed session cwd for fresh No-first approval.
+No interactive UI means no execution. Other routed tools and booting/stopping
+remain blocked; unresolved identity/configuration requires manual host repair.
+Recovery also rejects changed canonical cwd or physical directory identity, even
+when the lexical path is unchanged. Restart the session to rediscover a replaced
+workspace; restoring its path does not revive a failed approval.
+This is real host-user execution outside VM/network isolation, not guaranteed
+read-only; timeout does not guarantee descendant confinement. Never enable host
+fallback or broaden permissions just to diagnose a failure.
+
 Configuration tools also work without a healthy VM. A supported semantic repair
 validates the entire final configuration before saving and requires fresh human
 approval. Recovering an invalid baseline additionally reviews the safety policy
@@ -65,10 +79,12 @@ that is expected, not an installation failure.
 
 ### “Where did my Project settings go?”
 
-Project identity is **canonical cwd**, not Git root. Starting in a nested
-subdirectory selects a separate exact override with no parent inheritance.
-Symlink aliases of the same canonical cwd share it; Global is unchanged.
-Inspect Sources or `msb_config_get` for the right location.
+Supported Git main, linked and nested cwd use the same **main/root Project**.
+Non-Git/unsupported layouts remain canonical-cwd-local; Global is unchanged.
+Inspect Sources or `msb_config_get` for the exact location and ignored-legacy
+warnings. Cwd-keyed Git config/Dockerfile/context is preserved but no longer active.
+Review selected migration manually with fresh shared approval; do not copy old
+permissions or approvals. Execution mounts and Session safety remain current-cwd-only.
 
 In-repo `.pi-msb.toml` is ignored. Older host Project `.pi-msb.toml` files aren't
 auto-migrated to `config.toml`. [Migration guide →](configuration.md#coming-from-an-older-setup)

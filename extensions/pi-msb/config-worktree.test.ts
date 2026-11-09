@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, parseTomlConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
+import { hostConfigPaths, hostConfigTargets, resolveConfig, type ResolveConfigInput } from "./config.ts";
 
 async function fixture(t: TestContext, parent = tmpdir()) {
   const root = await realpath(await mkdtemp(join(parent, "pi-msb-config-worktree-")));
@@ -26,116 +27,61 @@ async function fixture(t: TestContext, parent = tmpdir()) {
   return { root, main, linked, registration, input, paths, save };
 }
 
-test("host config targets share the repository key and retain existing cwd overrides as the worktree layer", async (t) => {
+test("host Project uses one main-root record from main, linked and nested cwd; legacy overlays never contribute", async (t) => {
   const f = await fixture(t);
-  const mainPaths = await hostConfigPaths({ ...f.input, cwd: f.main });
-  assert.deepEqual(Object.keys(mainPaths), ["global", "project", "worktree"]);
-  assert.equal(f.paths.project, mainPaths.project);
-  assert.equal(f.paths.worktree, join(f.input.agentDir!, "pi-microsandbox", "projects", "external", "checkout", "config.toml"));
-  const targets = await hostConfigTargets(f.input);
-  assert.equal(targets.repositoryName, "repository");
-  assert.equal(targets.worktreeName, "checkout");
-  assert.equal(targets.isWorktree, true);
-  assert.equal(targets.identity.association.kind, "linked");
+  const nested = join(f.linked, "nested"); const mainNested = join(f.main, "nested");
+  await mkdir(nested); await mkdir(mainNested);
+  await f.save(f.paths.global, "cpus = 1");
   await f.save(f.paths.project, "cpus = 2\nmemory_mib = 2048");
-  await f.save(f.paths.worktree!, "cpus = 3");
-  let result = await resolveConfig(f.input);
-  assert.equal(result.config.cpus, 3);
-  assert.equal(result.config.memoryMiB, 2048);
-  assert.equal(result.provenance.cpus, "host-worktree");
-  assert.equal(result.provenance.memoryMiB, "host-project");
-  result = await resolveConfig({ ...f.input, temporaryOverrides: { cpus: 5 } });
-  assert.equal(result.config.cpus, 5);
-  assert.equal(result.provenance.cpus, "temporary");
-  assert.equal(parseTomlConfig("cpus = 3", "host-worktree").name, "host-worktree");
-});
-
-test("host-worktree lists are authoritative including empty arrays and identity provenance", async (t) => {
-  const f = await fixture(t);
-  await f.save(f.paths.global, 'cpus = 1\nhost_env = ["GLOBAL"]');
-  await f.save(f.paths.project, `
-route_tools = ["read", "bash"]
-pass_through_tools = ["fetch_content"]
-host_env = ["PROJECT"]
-mounts = [{ host_path = ${JSON.stringify(f.main)}, guest_path = "/mnt/shared", readonly = true }]
-secrets = [{ env = "TOKEN", text_value = "shared", allow_hosts = ["api.example"] }]
-[network]
-allow_hosts = ["api.example"]
-publish_ports = ["127.0.0.1:8080:80"]
-`);
-  await f.save(f.paths.worktree!, `
-route_tools = []
-pass_through_tools = []
-host_env = []
-mounts = []
-secrets = []
-[network]
-allow_hosts = []
-publish_ports = []
-`);
-  const result = await resolveConfig(f.input);
-  assert.equal(result.config.cpus, 1);
-  for (const field of ["routeTools", "passThroughTools", "hostEnv", "mounts", "secrets"] as const) {
-    assert.deepEqual(result.config[field], []);
-    assert.equal(result.provenance[field], "host-worktree");
+  const legacy = (await hostConfigTargets(f.input)).ignoredLegacyPaths;
+  for (const path of legacy) await f.save(path, 'cpus = 0\nsecrets = "DO_NOT_PARSE_PRIVATE"');
+  for (const cwd of [f.main, f.linked, nested, mainNested]) {
+    assert.deepEqual(await hostConfigPaths({ ...f.input, cwd }), f.paths);
+    const resolved = await resolveConfig({ ...f.input, cwd });
+    assert.equal(resolved.config.cpus, 2);
+    assert.equal(resolved.config.memoryMiB, 2048);
+    assert.equal(resolved.provenance.cpus, "host-project");
+    assert.ok(resolved.warnings.some((warning) => warning.includes("Ignored legacy Worktree")));
+    assert.doesNotMatch(resolved.warnings.join(" "), /DO_NOT_PARSE_PRIVATE/);
   }
-  assert.deepEqual(result.config.network.allowHosts, []);
-  assert.deepEqual(result.config.network.publishPorts, []);
-  assert.equal(result.provenance["network.allowHosts"], "host-worktree");
-  assert.equal(result.provenance["network.publishPorts"], "host-worktree");
-  assert.equal(result.provenance["secrets[TOKEN]"], undefined);
-  assert.equal(result.provenance["mounts[/mnt/shared]"], undefined);
+  assert.equal((await resolveConfig({ ...f.input, temporaryOverrides: { cpus: 5 } })).config.cpus, 5);
 });
 
-test("host config nested worktrees remain cwd-local without inheriting root policies or changing workspace checks", async (t) => {
-  // Linux /tmp is reserved in the guest; use the checkout to reach the
-  // distinct project-mount shadowing check rather than that earlier guard.
-  const f = await fixture(t, fileURLToPath(new URL("../../", import.meta.url)));
-  const cwd = join(f.linked, "nested");
-  await mkdir(cwd);
-  await f.save(f.paths.project, "cpus = 2");
-  await f.save(f.paths.worktree!, "cpus = 3");
-  const nestedInput = { ...f.input, cwd };
-  assert.equal((await resolveConfig(nestedInput)).config.cpus, DEFAULT_CONFIG.cpus);
-  const paths = await hostConfigPaths(nestedInput);
-  assert.equal(paths.project, join(dirname(f.paths.worktree!), "nested", "config.toml"));
-  assert.equal(paths.worktree, undefined);
-  await f.save(paths.project, "cpus = 6");
-  assert.equal((await resolveConfig(nestedInput)).config.cpus, 6);
-  // The main checkout is NOT the mounted project: mounting it read-only at a
-  // non-overlapping guest path remains valid; shadowing actual cwd does not.
-  await resolveConfig({ ...nestedInput, temporaryOverrides: { mounts: [{ type: "dir", hostPath: f.main, guestPath: "/mnt/main", readonly: true, options: [] }] } });
-  await assert.rejects(resolveConfig({ ...nestedInput, temporaryOverrides: { mounts: [{ type: "dir", hostPath: f.main, guestPath: cwd, readonly: true, options: [] }] } }), /must not shadow the project mount/);
-});
-
-test("host-worktree Dockerfiles take precedence, explicit images suppress lower sources, and context stays protected", async (t) => {
+test("host Project source ignores legacy Dockerfile/context and retains explicit image and Session precedence", async (t) => {
   const f = await fixture(t);
-  await f.save(join(dirname(f.paths.project), "Dockerfile"), "FROM scratch\nLABEL scope=shared\n");
-  const dockerfile = join(dirname(f.paths.worktree!), "Dockerfile");
-  await f.save(dockerfile, "FROM scratch\nLABEL scope=worktree\n");
-  const context = join(dirname(dockerfile), "build-context");
-  await mkdir(context);
-  await f.save(join(context, "source"), "bytes");
-  let result = await resolveConfig(f.input);
-  assert.equal(result.imageBuild?.scope, "host-worktree");
+  await f.save(f.paths.project, "cpus = 2");
+  const dockerfile = join(dirname(f.paths.project), "Dockerfile");
+  await f.save(dockerfile, "FROM scratch\nLABEL scope=shared\n");
+  const legacy = (await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!;
+  await f.save(join(dirname(legacy), "Dockerfile"), "INVALID PRIVATE LEGACY");
+  await f.save(join(dirname(legacy), "build-context", "secret"), "PRIVATE");
+  const result = await resolveConfig(f.input);
+  assert.equal(result.imageBuild?.scope, "host-project");
   assert.equal(result.imageBuild?.dockerfile, dockerfile);
-  assert.equal(result.provenance.image, "host-worktree");
-  assert.equal(result.provenance.pullPolicy, "host-worktree");
-  for (const hostPath of [dockerfile, context]) {
+  assert.equal(result.provenance.image, "host-project");
+  await mkdir(join(dirname(dockerfile), "build-context"));
+  for (const hostPath of [dockerfile, join(dirname(dockerfile), "build-context")]) {
     await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/build", readonly: true, options: [] }] } }), /must not expose Dockerfile or build-context/);
   }
-  await f.save(f.paths.worktree!, 'image = "example.test/worktree:tag"');
-  result = await resolveConfig(f.input);
-  assert.equal(result.imageBuild, undefined);
-  assert.equal(result.config.image, "example.test/worktree:tag");
-  result = await resolveConfig({ ...f.input, temporaryOverrides: { image: "example.test/temporary:tag" } });
-  assert.equal(result.config.image, "example.test/temporary:tag");
+  await f.save(f.paths.project, 'image = "example.test/project:tag"');
+  assert.equal((await resolveConfig(f.input)).config.image, "example.test/project:tag");
+  assert.equal((await resolveConfig({ ...f.input, temporaryOverrides: { image: "example.test/session:tag" } })).config.image, "example.test/session:tag");
+});
+
+test("nested Project inheritance never changes actual cwd mount shadow checks", async (t) => {
+  const f = await fixture(t, fileURLToPath(new URL("../../", import.meta.url)));
+  const cwd = join(f.linked, "nested"); await mkdir(cwd);
+  await f.save(f.paths.project, "cpus = 2");
+  const input = { ...f.input, cwd };
+  assert.equal((await resolveConfig(input)).config.cpus, 2);
+  await resolveConfig({ ...input, temporaryOverrides: { mounts: [{ type: "dir", hostPath: f.main, guestPath: "/mnt/main", readonly: true, options: [] }] } });
+  await assert.rejects(resolveConfig({ ...input, temporaryOverrides: { mounts: [{ type: "dir", hostPath: f.main, guestPath: cwd, readonly: true, options: [] }] } }), /must not shadow the project mount/);
 });
 
 test("host worktree policy and reciprocal Git proof cannot be exposed by writable mounts", async (t) => {
   const f = await fixture(t);
-  for (const hostPath of [f.main, join(f.main, ".git"), f.registration, join(f.registration, "gitdir"), join(f.registration, "commondir"), dirname(f.paths.worktree!)]) {
-    await mkdir(dirname(f.paths.worktree!), { recursive: true });
+  for (const hostPath of [f.main, join(f.main, ".git"), f.registration, join(f.registration, "gitdir"), join(f.registration, "commondir"), dirname((await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!)]) {
+    await mkdir(dirname((await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!), { recursive: true });
     await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/proof", readonly: false, options: [] }] } }), /writable host mounts must not expose host configuration/);
   }
   await resolveConfig({ ...f.input, temporaryOverrides: { mounts: [{ type: "dir", hostPath: f.registration, guestPath: "/mnt/proof", readonly: true, options: [] }] } });
@@ -155,4 +101,44 @@ test("host config rejects guest-fabricated reciprocal proof inside the actual cw
   await writeFile(join(f.linked, ".git"), `gitdir: ${registration}\n`);
   await assert.rejects(hostConfigTargets(f.input), /could not be safely verified/);
   await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
+});
+
+
+test("ignored legacy diagnostics are metadata-only, nofollow, redacted and preserve all bytes/inodes", async (t) => {
+  const f = await fixture(t);
+  const nested = join(f.linked, "nested"); await mkdir(nested);
+  const input = { ...f.input, cwd: nested };
+  const targets = await hostConfigTargets(input);
+  await f.save(f.paths.project, "cpus = 2");
+  const [exact, checkout, main] = targets.ignoredLegacyPaths;
+  assert.equal(targets.ignoredLegacyPaths.length, 3);
+  const legacyText = 'invalid TOML PRIVATE_LEGACY_CREDENTIAL';
+  await f.save(exact!, legacyText);
+  const context = join(dirname(exact!), "build-context"); await mkdir(context);
+  await fs.writeFile(join(context, "secret"), "PRIVATE_CONTEXT");
+  const outside = join(f.root, "outside-legacy"); await mkdir(outside);
+  await fs.writeFile(join(outside, "config.toml"), "PRIVATE_OUTSIDE");
+  await mkdir(dirname(dirname(main!)), { recursive: true });
+  await symlink(outside, dirname(main!));
+  await f.save(checkout!, "cpus = 64");
+  await symlink(join(outside, "config.toml"), join(dirname(checkout!), "Dockerfile"));
+  const before = await fs.lstat(exact!); const file = await fs.lstat(join(context, "secret"));
+  const read = fs.readFile; const open = fs.open;
+  const ignoredRoots = [dirname(exact!), dirname(checkout!), dirname(main!), outside];
+  const assertNotLegacy = (path: unknown) => {
+    assert.ok(!ignoredRoots.some((root) => String(path) === root || String(path).startsWith(root + "/")), `legacy content read: ${String(path)}`);
+  };
+  t.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => { assertNotLegacy(args[0]); return read(...args); });
+  t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => { assertNotLegacy(args[0]); return open(...args); });
+  const resolved = await resolveConfig(input);
+  assert.equal(resolved.config.cpus, 2);
+  const warnings = resolved.warnings.join(" ");
+  for (const path of [exact!, checkout!, dirname(main!)]) assert.ok(warnings.includes(path));
+  assert.match(warnings, /Preserved, not loaded or copied/); assert.match(warnings, /fresh approval/);
+  assert.doesNotMatch(warnings, /PRIVATE_LEGACY|PRIVATE_CONTEXT|PRIVATE_OUTSIDE/);
+  t.mock.restoreAll();
+  assert.equal(await fs.readFile(exact!, "utf8"), legacyText); assert.equal((await fs.lstat(exact!)).ino, before.ino);
+  assert.equal((await fs.lstat(join(context, "secret"))).ino, file.ino);
+  assert.equal(await fs.readFile(join(context, "secret"), "utf8"), "PRIVATE_CONTEXT");
+  assert.ok((await fs.lstat(dirname(main!))).isSymbolicLink());
 });

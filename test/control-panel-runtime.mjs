@@ -1,5 +1,6 @@
 // Process-isolated integration fixture: real Pi loader, command context, custom UI,
 // theme and renderers; terminal and SDK are doubled (no live VM).
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
@@ -27,6 +28,7 @@ try {
   await symlink(canonicalAgent, lexicalAgent);
   Object.assign(process.env, { HOME: join(root, "home"), PI_CODING_AGENT_DIR: lexicalAgent, PI_PACKAGE_DIR: pkg, PI_MSB_UI_FIXTURE_CWD: cwd, RUNTIME_HOST_ENV_SOURCE: "RUNTIME_PRIVATE_SENTINEL", RUNTIME_COMMAND_TOKEN: "COMMAND_RUNTIME_PRIVATE_SENTINEL" });
   execFileSync("git", ["init", "-q", cwd]);
+  const projectFile = join(canonicalAgent, "pi-microsandbox/repositories", createHash("sha256").update(join(cwd, ".git")).digest("hex"), "config.toml");
   // Secret values are synthetic, never read from the real host's Pi config.
   await mkdir(join(canonicalAgent, "pi-microsandbox"));
   const originalPolicy = 'auto_start = false\n[[secrets]]\nenv = "TOKEN"\nhost_env = "RUNTIME_HOST_ENV_SOURCE"\nallow_hosts = ["api.example"]\n[[secrets]]\nenv = "COMMAND_TOKEN"\nhost_cmd = \'printf %s "$RUNTIME_COMMAND_TOKEN"\'\nallow_hosts = ["command.example"]\n';
@@ -198,7 +200,7 @@ try {
             await key("\r");
             if (scope === 1) {
               assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /> \[ No \]/);
-              await select("Yes (Only for workspace worktree)");
+              await select("Apply shared Project (workspace)");
             }
             if (tui.stripTerminalSequences(panel.render(80).join("\n")).includes("Review change")) await select("Confirm");
             assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /Result: Applied/);
@@ -230,7 +232,7 @@ try {
         assert.equal(panel.focused, false);
         if (!savedScopes) {
           assert.equal(await readFile(join(canonicalAgent, "pi-microsandbox/default.toml"), "utf8"), originalPolicy);
-          await assert.rejects(readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml")), { code: "ENOENT" });
+          await assert.rejects(readFile(projectFile), { code: "ENOENT" });
         }
         output = ""; ui.renderNow(true); assert.match(output, /UNDERLYING/);
         input("x"); assert.equal(baseKeys, launch + 1);
@@ -244,7 +246,7 @@ try {
       const inspection = await inspect.execute("inspect", {}, undefined, undefined, runner.createContext());
       phase("inspect-done");
       assert.equal(inspection.details.outcome, "inspected");
-      assert.deepEqual(Object.keys(inspection.details.layers).sort(), ["global", "project", "session", "worktree"]);
+      assert.deepEqual(Object.keys(inspection.details.layers).sort(), ["global", "project", "session"]);
       assert.deepEqual(setter.parameters.properties.scope.anyOf.map((item) => item.const), ["session", "project", "global"]);
       assert.equal(inspection.details.capabilities.mutation.batch.maxReloads, 1);
       assert.deepEqual(inspection.details.settingsSchema["network.mode"].valueSchema.enum, ["default", "open", "allowlist", "deny"]);
@@ -442,7 +444,7 @@ try {
   assert.ok(policy.includes(`host_cmd = ${JSON.stringify('printf %s "$RUNTIME_COMMAND_TOKEN"')}`));
   assert.doesNotMatch(policy, /^value\s*=/m);
   assert.match(policy, /^show_footer = false$/m);
-  assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /^show_footer = true$/m);
+  assert.match(await readFile(projectFile, "utf8"), /^show_footer = true$/m);
   console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, ${renderer} render, themed per-change scope buttons, masked input, native No/Yes config approval, complete masked warning-free titles/agent-text-warnings/quiet-human-results/saved-not-activated/default-No/Escape/abort/immediate-long-review-consent/provenance-collision-gate and focus teardown (fake SDK)`);
 } finally {
   phase("cleanup-start");

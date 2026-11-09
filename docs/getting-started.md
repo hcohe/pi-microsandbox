@@ -80,7 +80,8 @@ Choose the scope to match your intent:
 
 - **Session:** memory-only; resets on Pi `/reload`, session/workspace switch, or
   shutdown. A transcript resume doesn't restore it.
-- **Project:** remembered for this exact canonical cwd, in a host-owned file.
+- **Project:** shared main/root Git policy from main, linked and nested cwd;
+  non-Git/unsupported layouts remain canonical-cwd-local. Always host-owned.
 - **Global:** your saved baseline for all projects.
 
 Setup and inspection create no config files. Approved persistent saves do.

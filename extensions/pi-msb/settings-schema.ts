@@ -92,6 +92,7 @@ export const networkSemantics = {
 
 export const settingsCapabilities = {
   version: SETTINGS_SCHEMA_VERSION, scopes, sessionLifetime: SESSION_LIFETIME,
+  project: "One shared main/root host-owned config and Dockerfile/context from Git main, linked and nested cwd; non-Git/unsupported layouts stay canonical-cwd-local. No persistent Worktree destination. Legacy cwd-keyed Git files are ignored and preserved, never copied or promoted; migrate selected intent manually with fresh shared approval. Execution and Session safety remain per current cwd.",
   inspection: { sections: ["summary", "desired", "layers", "origins", "runtime", "schema", "capabilities", "policy", "warnings"],
     paths: "Supported leaves or network/docker groups; filters apply to setting-shaped sections. Policy/summary retain complete safety context.",
     format: "Human-readable text by default; json is indented. Structured details contain the selected JSON. Use knownSchemaVersion to omit unchanged schemas/capabilities.",

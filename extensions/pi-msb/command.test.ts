@@ -122,7 +122,7 @@ test("launch I/O diagnostics allow only known safe codes; programmer errors prop
 test("panel-construction failures propagate with a safe UI stage, not a hidden blanket catch", async () => {
   const f = fixture(); f.ctx.mode = "tui";
   const draft = { discard() {}, snapshot() { throw new TypeError("PRIVATE_CONSTRUCTION_SENTINEL"); } };
-  Object.defineProperty(f.control, "settings", { value: { acquireInteraction, open: async () => draft, projectDestinations: async () => undefined } });
+  Object.defineProperty(f.control, "settings", { value: { acquireInteraction, open: async () => draft, sharedProject: async () => undefined } });
   f.ctx.ui.custom = async (factory: any) => factory({}, {}, {}, () => {});
   await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
     assert.ok(error instanceof Error);
@@ -131,4 +131,17 @@ test("panel-construction failures propagate with a safe UI stage, not a hidden b
     return true;
   });
   assert.deepEqual(f.notices, []);
+});
+
+test("blocked recovery guidance starts passive and describes exact bounded host approval without broad grants", () => {
+  for (const status of ["unavailable", "disabled"] as const) {
+    const note = systemPromptNote(state(status));
+    assert.match(note, /msb_diagnostics.*msb_config_get/);
+    assert.match(note, /execution_target="host"/);
+    assert.match(note, /finite positive timeout <=120/);
+    assert.match(note, /fixed session cwd/);
+    assert.match(note, /real host-user privileges/);
+    assert.match(note, /timeout does not guarantee descendant confinement/);
+    assert.match(note, /Never automatically retry on host/);
+  }
 });

@@ -73,15 +73,15 @@ a directly usable bundled digest-pinned `FROM` starter. Propose a complete
 replacement with `msb_dockerfile_set` using the same scope and `content`, and/or
 a relative `context` patch. Getter `contextPaths` requests bounded context text. Its
 No-first per-proposal review combines scope and a compact unified diff in one
-approval: No / This worktree / All worktrees at supported checkout roots, or
+approval: No / Apply shared Project for Git main, linked and nested cwd, or
 No / Apply for Global/cwd-local. The TUI review stays inline in the normal
-editor/approval area, not floating over chat. Previews switch with the named
-destination, with themed Dockerfile syntax, wrapping, **Ctrl+N / Ctrl+P** scrolling
+editor/approval area, not floating over chat. The one scoped preview has themed
+Dockerfile syntax, wrapping, **Ctrl+N / Ctrl+P** scrolling
 and colored choices below the changed code, separated from a dim shortcut footer
 by whitespace. Only added/removed rows and meaningful file/mode/newline badges
 appear by default; **d** shows full unified context, paths/metadata and all warnings
 (public-network builds, VM restart, persistence and registration effects). RPC
-displays both independent changed-code variants in one plain question.
+displays the same scoped changed-code diff in one plain question.
 Escape/abort denies. Approved changes publish each file atomically (not jointly/crash atomic)
 and reload settings only after the whole approved bundle is confirmed, building/importing and restarting with the new image when
 selected. This requires no blanket host execution permission or host-shell recipe.
@@ -112,22 +112,24 @@ Place a Dockerfile beside your host-owned policy, outside the mounted cwd:
 ```text
 <Pi agent dir>/pi-microsandbox/Dockerfile                         # Global
 <Pi agent dir>/pi-microsandbox/build-context/                     # optional Global context
-<Pi agent dir>/pi-microsandbox/projects/Code/app/Dockerfile       # Project for ~/Code/app
-<Pi agent dir>/pi-microsandbox/projects/Code/app/build-context/    # optional Project context
+<Pi agent dir>/pi-microsandbox/repositories/<hash>/Dockerfile             # Git Project
+<Pi agent dir>/pi-microsandbox/repositories/<hash>/build-context/          # optional Git Project context
 ```
 
 The default Pi agent directory is `~/.pi/agent`; Pi's `getAgentDir()` (including
 `PI_CODING_AGENT_DIR`) is authoritative. Use the getter's exact Project path, derived from the same current authoritative
 identity as [Project configuration](configuration.md#host-owned-project-overrides),
-not a guessed cwd-to-directory mapping. Project setter uses the same named human
-Repository/Worktree choice as config at supported checkout roots, before opening
-the proposal baseline. Shared saves explicitly review registration of immutable
+not a guessed cwd-to-directory mapping. Project setter uses the same shared
+main/root record as config from main, linked and nested Git cwd, with no separate
+Repository/Worktree destinations. Shared saves explicitly review registration of immutable
 `_repository` in shared `repositories/<hash>/config.toml` when needed, preserving
 user configuration/image intent. This enables source discovery for current/future
-registered worktrees, including after checkout gitfile deletion. Getter Project
-defaults to repository; `destination:"worktree"` explicitly inspects the override.
-Nested/nonGit/unsupported cwd stays local; Global is unchanged. No source files
-are copied or migrated by config or source destination selection. A standalone
+registered worktrees, including nested cwd after checkout gitfile deletion. Getter
+and setter use only Project or Global; retired destination arguments are rejected.
+Non-Git/unsupported layouts stay cwd-local; Global is unchanged. Legacy cwd-keyed
+Git Dockerfiles/contexts are ignored and preserved with metadata-only diagnostics.
+Review and migrate intended inputs manually with fresh shared approval; nothing
+is copied, merged, deleted or automatically migrated. A standalone
 shared Dockerfile without catalog metadata is not discovery authority. No policy
 identity changes the mounted cwd boundary. A
 host-selected agent-directory symlink is supported, but descendants must not be
@@ -138,8 +140,7 @@ even read-only ones.
 
 **Source precedence is atomic.** At each host scope, an explicit TOML `image`
 wins over its colocated Dockerfile. Otherwise the Dockerfile supplies that scope's
-image. Project overrides Global; a higher Worktree source can override Project where
-applicable, and a Session `image` disables inherited
+image. Project overrides Global, and a Session `image` disables inherited
 Dockerfile discovery. With neither image nor Dockerfile, the bundled digest pin
 is used. Remove a scope's explicit `image` to enable its Dockerfile; changing
 `pull_policy` alone does not disable discovery. Discovered images always use
@@ -175,7 +176,10 @@ inputs are rejected. Limits: 32 MiB total source bytes, 2,048 entries (including
 Dockerfile/directories), 16 context nesting levels. A context is optional.
 
 A separate disposable **rootful** Microsandbox VM runs the existing digest-pinned
-bundled image with guest Docker/Buildx (2 CPUs, 4,096 MiB, 20-minute build cap).
+bundled image with guest Docker/Buildx (2 CPUs, 4,096 MiB RAM, 8,192 MiB writable
+root disk, 20-minute build cap). The VFS storage driver copies base files for RUN
+snapshots; the SDK's default 4 GiB disk cannot build even a single RUN on the
+bundled base. Larger builds can still exhaust the fixed disk and fail closed.
 Its independent explicit SDK Public network profile allows public downloads plus
 gateway DNS, denies unmatched egress, and denies ingress. It does **not** inherit
 runtime network restrictions: even a runtime configured `deny` needs public
@@ -216,9 +220,13 @@ file; links, special entries and unsupported tar extensions fail closed. Reserve
 space for guest Docker storage **plus both original and sanitized host archives**
 (up to 32 GiB of host archive bytes). The cap is an accepted-archive limit, not a
 proactive disk quota. Disk exhaustion fails closed. Normal completion/failure and
-cancellation clean temporary `/tmp/pi-msb-build-*` directories and owned builders;
-if SDK destruction cannot be verified, output is retained rather than deleting
-files a possibly running builder can access. A process crash can also leave
+cancellation clean temporary `/tmp/pi-msb-build-*` directories and owned builders.
+Staging binds use canonical paths (including `/private/tmp` on macOS), without
+enabling symlink-following mounts. If creation fails after registering a builder,
+cleanup checks only that attempt's exact name, local backend and unique ownership
+label, then destroys the identity-bound database handle without starting it.
+If ownership, absence or destruction cannot be verified, staging is retained
+rather than deleting files a possibly running builder can access. A process crash can also leave
 artifacts; builder lifetime is bounded, but host cleanup may be necessary. Guest
 streams are aborted on timeout/session supersession/Off. The pinned SDK has no
 cancellation API for create/import: late results are awaited before cleanup and

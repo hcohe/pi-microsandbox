@@ -42,14 +42,13 @@ export function systemPromptNote(state: RuntimeState): string {
       return "MSB is explicitly off: tools run on the host. No sandbox is active.";
     case "host-fallback":
       return "MSB could not start and is using the configured host fallback. This is different from explicitly turning MSB off.";
+    case "disabled":
     case "unavailable":
-      return "MSB is unavailable and routed tools are blocked. Use msb_diagnostics for read-only diagnostics, msb_config_get for settings, and msb_config_set for an explicitly approved repair; these host management tools do not require a running sandbox. Do not bypass the failure by disabling sandbox protection. Malformed host configuration or workspace discovery errors may require human repair; /msb → Actions → Reload settings retries after repair.";
+      return "MSB is unavailable/disabled and ordinary routed tools are blocked. Use msb_diagnostics for read-only diagnostics, msb_config_get for settings, and msb_config_set for an explicitly approved repair; these host management tools do not require a running sandbox. Start with those passive tools. If live host diagnosis is still needed, explain the narrow need and request one bash call with execution_target=\"host\" and an explicit finite positive timeout <=120 seconds. Recovery requires ready current workspace/configuration, host-execution permission and fresh No-first human approval of the exact command, timeout and fixed session cwd. Commands run with real host-user privileges outside VM/process/network isolation, not guaranteed read-only; timeout does not guarantee descendant confinement. Never automatically retry on host, disable protection, enable fallback or broaden grants as a workaround. Malformed host configuration or workspace discovery errors may require human repair; /msb → Actions → Reload settings retries after repair.";
     case "booting":
       return "MSB is booting; wait for it to become active before using routed tools.";
     case "stopping":
       return "MSB is stopping; routed tools are temporarily unavailable.";
-    case "disabled":
-      return "MSB is disabled.";
     default:
       return "MSB runtime state is unknown; routed tools remain fail-closed.";
   }

@@ -8,7 +8,6 @@ import { readRepositoryCatalog, type CatalogOptions } from "./repository-catalog
 export interface ProjectIdentity {
   cwd: string;
   projectPolicyRoot: string;
-  worktreePolicyRoot: string;
   repositoryName: string;
   worktreeName: string;
   isWorktree: boolean;
@@ -96,15 +95,13 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
   try {
     await inspect(canonicalCwd);
     const inside = (path: string, root: string) => { const suffix = relative(root, path); return !suffix || suffix !== ".." && !suffix.startsWith(`..${sep}`) && !suffix.startsWith(sep); };
+    const candidates: Array<{ checkoutRoot: string; gitDir: string; commonDir: string; mainRoot: string }> = [];
     let authoritative: { checkoutRoot: string; gitDir: string; commonDir: string; mainRoot: string } | undefined;
     if (catalog) {
       const entries = await readRepositoryCatalog(catalog);
       evidence.push(["repository-catalog", entries]);
       const match = (candidate: NonNullable<typeof authoritative>) => {
-        // Shared policy is checkout-root only; nested cwd has no parent inheritance.
-        if (canonicalCwd !== candidate.checkoutRoot) return;
-        if (authoritative) throw new ProjectIdentityError();
-        authoritative = candidate;
+        if (inside(canonicalCwd, candidate.checkoutRoot)) candidates.push(candidate);
       };
       for (const { metadata: entry } of entries) {
         // Every catalog proof is authoritative on future loads, even for an
@@ -140,6 +137,22 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
         }
       }
     }
+    // A catalog association survives a deleted checkout gitfile, but never
+    // inherits across a nearer repository/submodule/bare discovery boundary.
+    let boundary = canonicalCwd;
+    for (let depth = 0; ; depth++) {
+      if (depth > 256) throw new ProjectIdentityError();
+      const matches = candidates.filter((candidate) => candidate.checkoutRoot === boundary);
+      if (matches.length > 1) throw new ProjectIdentityError();
+      if (matches.length) { authoritative = matches[0]; break; }
+      if (await inspect(join(boundary, ".git"))
+        || (await inspect(join(boundary, "HEAD")))?.isFile()
+          && (await inspect(join(boundary, "objects")))?.isDirectory()
+          && (await inspect(join(boundary, "refs")))?.isDirectory()) break;
+      const parent = dirname(boundary);
+      if (parent === boundary) break;
+      boundary = parent;
+    }
     if (authoritative) {
       checkoutRoot = authoritative.checkoutRoot;
       gitDir = authoritative.gitDir;
@@ -147,8 +160,8 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
       mainCheckoutRoot = authoritative.mainRoot;
       isWorktree = gitDir !== commonDir;
       kind = isWorktree ? "linked" : "main";
-      projectPolicyRoot = resolve(mainCheckoutRoot, relative(checkoutRoot, canonicalCwd));
-      // Root-only policy cannot be downgraded by deleting the checkout gitfile
+      projectPolicyRoot = mainCheckoutRoot;
+      // Shared policy cannot be downgraded by deleting the checkout gitfile
       // or replacing it with a guest-created .git directory/conflicting pointer.
       const dotgit = join(checkoutRoot, ".git");
       const stat = await inspect(dotgit);
@@ -160,7 +173,7 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
         } else if (!stat.isDirectory() || await fs.realpath(dotgit) !== commonDir) throw new ProjectIdentityError();
       }
       if (isWorktree) {
-        if (inside(commonDir, canonicalCwd)) throw new ProjectIdentityError();
+        if (inside(commonDir, checkoutRoot)) throw new ProjectIdentityError();
         protectedPaths.push(commonDir, gitDir, join(gitDir, "commondir"), join(gitDir, "gitdir"));
       }
     }
@@ -176,7 +189,9 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
           gitDir = dotgit;
           commonDir = dotgit;
           mainCheckoutRoot = current;
+          projectPolicyRoot = current;
           await directory(dotgit);
+          protectedPaths.push(dotgit, join(dotgit, "worktrees"));
           // Main association only; host targets select the shared namespace separately.
           if (await inspect(join(dotgit, "commondir"))) throw new ProjectIdentityError();
         } else if (entry.isFile()) {
@@ -194,7 +209,7 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
             const commonPath = resolve(gitdir, commonPointer);
             const common = await fs.realpath(commonPath);
             await directory(common);
-            const commonRelative = relative(canonicalCwd, common);
+            const commonRelative = relative(current, common);
             if (!commonRelative || commonRelative !== ".." && !commonRelative.startsWith(`..${sep}`) && !commonRelative.startsWith(sep)) throw new ProjectIdentityError();
             // Only the standard, main-checkout .git layout is shared. Separate
             // git dirs and submodules stay cwd-local; core.worktree is never read.
@@ -204,24 +219,7 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
             if ((await inspect(join(mainRoot, ".git")))?.isDirectory() !== true) throw new ProjectIdentityError();
             const backpointer = await metadata(join(gitdir, "gitdir"));
             if (!backpointer || /[\r\n]/.test(backpointer) || await fs.realpath(resolve(gitdir, backpointer)) !== dotgit) throw new ProjectIdentityError();
-            const suffix = relative(current, canonicalCwd);
-            const mapped = resolve(mainRoot, suffix);
-            // Canonical aliases share a key, but a main-checkout suffix symlink
-            // cannot redirect policy outside its corresponding directory.
-            try {
-              const mappedStat = await inspect(mapped);
-              if (mappedStat && !mappedStat.isDirectory()) throw new ProjectIdentityError();
-              if (await fs.realpath(mapped) !== mapped) throw new ProjectIdentityError();
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-              let ancestor = dirname(mapped);
-              while (ancestor !== mainRoot) {
-                const stat = await inspect(ancestor);
-                if (stat && (!stat.isDirectory() || await fs.realpath(ancestor) !== ancestor)) throw new ProjectIdentityError();
-                ancestor = dirname(ancestor);
-              }
-            }
-            projectPolicyRoot = mapped;
+            projectPolicyRoot = mainRoot;
             isWorktree = true;
             kind = "linked";
             commonDir = common;
@@ -253,11 +251,10 @@ export async function discoverProjectIdentity(cwd: string, realpath: (path: stri
     }
     if (await realpath(resolve(cwd)) !== canonicalCwd) throw new ProjectIdentityError();
   } catch { throw new ProjectIdentityError(); }
-  const repositoryRoot = isWorktree ? resolve(projectPolicyRoot, relative(canonicalCwd, checkoutRoot)) : checkoutRoot;
+  const repositoryRoot = mainCheckoutRoot ?? checkoutRoot;
   const identity = {
     cwd: canonicalCwd,
     projectPolicyRoot,
-    worktreePolicyRoot: canonicalCwd,
     repositoryName: basename(repositoryRoot),
     worktreeName: basename(checkoutRoot),
     isWorktree,

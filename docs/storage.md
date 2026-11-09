@@ -32,9 +32,12 @@ It isn't secret filtering; sensitive files placed in the mount remain accessible
 
 ## Cwd, Git, and Project identity
 
-Canonical cwd determines the Project settings identity and shared session
-boundary. Symlink aliases share that identity; nested cwd does not inherit its
-parent's Project overrides. Global remains unchanged.
+Project policy uses the main/root Git record from main, linked and nested cwd.
+Non-Git/unsupported layouts remain canonical-cwd-local; Global is unchanged.
+Canonical current cwd still determines the session boundary and sole automatic
+read/write bind; policy discovery never exposes Git ancestors or other worktrees.
+Legacy cwd-keyed Git policy/source/context is ignored and preserved, never promoted;
+review intended migration manually with fresh shared Project approval.
 [Project paths →](configuration.md#host-owned-project-overrides)
 
 Git metadata inside cwd is exposed but never chooses the bind. Linked-worktree

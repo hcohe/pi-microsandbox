@@ -44,7 +44,7 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 > instructions; do not add comments or explanatory boilerplate. Preserve unrelated
 > existing content and functional parser directives. For a new file start FROM
 > the bundled digest pin and add only the requested package instructions, without
-> unrelated packages. Explain the change and recommended worktree scope in
+> unrelated packages. Explain the change and recommended Project or Global scope in
 > your normal response, not the file. Propose the complete resulting content via
 > msb_dockerfile_set; let me review only added/removed code and choose scope
 > below it in one approval. Keep technical warnings and full context in d details. Don't use host
@@ -53,17 +53,17 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 > with msb_config_set approval. After saving, distinguish whether the new image is
 > active, shadowed, deferred or failed to activate.
 
-At supported checkout roots, Project setter uses one default-No review with
-**This worktree / All worktrees**, identifying the same named Worktree/Repository
-as config. The TUI review stays inline, with Ctrl+N/P scrolling; switching
-previews the independent target changes above the colored choices. Blank spacers
-separate code, choices and dim shortcuts; d reveals full context and all warnings. Enter approves
-that destination without another question. RPC includes both distinct diffs.
-Global/cwd-local uses No / Apply. Escape/abort saves nothing. Getter
-Project defaults to repository; request `destination:"worktree"` when editing the
-checkout override. Neither config nor source destination choices copy existing
-sources. Shared first saves explicitly register immutable config metadata, never
-image intent. Nested/nonGit cwd remains local; Global is unchanged.
+Git Project setter uses one default-No review: **Apply shared Project (<name>)**.
+Main, linked and nested Git cwd use the same config/Dockerfile/context record.
+The TUI stays inline with changed code above colored choices, Ctrl+N/P scrolling,
+blank spacers and dim shortcuts; d reveals full context and warnings. Enter
+approves that shared target without another question. RPC/select-only adapters
+show the same shared diff. Global/non-Git uses No / Apply. Escape/abort saves
+nothing. There is no Repository/Worktree destination option. Legacy cwd-keyed Git
+sources are ignored and preserved, never copied or promoted; manually review
+migration into shared Project with fresh approval. First shared saves register
+immutable config metadata, never image intent. Non-Git/unsupported layouts remain
+cwd-local; Global and per-current-cwd execution/session safety are unchanged.
 
 > Read context inventory with msb_dockerfile_get, requesting contextPaths only for
 > the UTF-8 files I want to inspect. Propose a context-only PATCH with scope project
@@ -83,11 +83,10 @@ for isolated COPY contexts, cache/rebuild behavior and the build network boundar
 > the restart impact, then propose both edits in one msb_config_set batch. Don't
 > change other settings. After approval, report whether both save and reload worked.
 
-At a Git checkout root, Project asks you to choose all registered worktrees
-(including future ones) or only this checkout, with **No** selected first.
-Elsewhere it remembers this exact canonical cwd; nested cwd never inherits a
-parent policy. The agent still submits `scope: "project"`; it cannot preselect
-your persistence decision. For example:
+Project shares the main/root record from Git main, linked and nested cwd, with
+**No** selected first. All registered worktrees, including future ones, can adopt
+it on reload/start. Non-Git/unsupported layouts remember canonical cwd. Session
+is the only temporary current-cwd scope; there is no persistent Worktree choice. For example:
 
 ```json
 {"scope":"project","operations":[

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { DEFAULT_CONFIG } from "./config.ts";
+import { DEFAULT_CONFIG, hostConfigTargets } from "./config.ts";
+import { serializeRaw } from "./settings.ts";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { createMsbIntegration } from "./control.ts";
 import { resourceId, STATE_SCHEMA_VERSION, type Config, type PersistedSandboxState, type ResolvedConfig, type RuntimeState } from "./types.ts";
@@ -88,7 +89,8 @@ test("host policy survives local edits while temporary settings override it thro
   initRepo(cwd);
   const agentDir = join(root, "agent");
   const defaultFile = join(agentDir, "pi-microsandbox", "default.toml");
-  const projectFile = join(agentDir, "pi-microsandbox", "projects", "Code", "app", "config.toml");
+  const targets = await hostConfigTargets({ cwd, agentDir, homedir: root, env: {}, projectTrusted: true, configDirName: ".pi" });
+  const projectFile = targets.paths.project;
   await mkdir(dirname(projectFile), { recursive: true });
   await writeFile(defaultFile, `
 bootstrap_tools = false
@@ -100,7 +102,7 @@ cpus = 3
 [docker]
 mode = "disabled"
 `);
-  await writeFile(projectFile, "cpus = 2\nmemory_mib = 2048");
+  await writeFile(projectFile, serializeRaw({ _repository: targets.repository, cpus: 2, memory_mib: 2048 }));
   const calls: string[] = [];
   const integration = createMsbIntegration({
     sessionId: "host-policy", cwd, configDirName: ".pi", agentDir,
@@ -569,14 +571,14 @@ test("preview compares privately to adopted runtime and late resource changes ca
   await integration.manager.shutdown();
 });
 
-test("disabled Git subdirectory settings use canonical cwd identity without bootstrap/SDK/adoption", async (t) => {
+test("disabled Git subdirectory settings use shared main-root Project identity without bootstrap/SDK/adoption", async (t) => {
   const root = await realpath(await temp(t, "disabled-settings")); const repo = join(root, "repo"); const cwd = join(repo, "packages/app"); await mkdir(cwd, { recursive: true }); initRepo(repo);
   const agentDir = join(root, "agent"); let loads = 0;
   const integration = createMsbIntegration({ sessionId: "disabled", cwd, agentDir, configDirName: ".pi", env: { PI_MSB_DISABLE: "1", PI_MSB_CPUS: "3" }, sdkLoader: async () => { loads++; return fakeSdk([]); } });
   const state = await integration.configureSession({ sessionId: "disabled", cwd, projectTrusted: true }); assert.equal(state.status, "off"); assert.match(state.reason!, /PI_MSB_DISABLE/);
   await assert.rejects(stat(agentDir), { code: "ENOENT" }); assert.equal(loads, 0); assert.equal(integration.configRef.value.cpus, 4);
   const draft = await integration.control.settings!.open("project");
-  const expected = join(agentDir, "pi-microsandbox/projects-absolute", cwd.slice(1), "config.toml"); assert.equal(draft.path, expected);
+  const expected = (await hostConfigTargets({ cwd: repo, agentDir, env: {}, projectTrusted: true, configDirName: ".pi" })).paths.project; assert.equal(draft.path, expected);
   draft.set("cpus", 2); await draft.apply(); await integration.control.reload();
   assert.equal(integration.control.getState().status, "off"); assert.equal(integration.configRef.value.cpus, 4); assert.equal(loads, 0);
   assert.match(await readFile(expected, "utf8"), /cpus/); await assert.rejects(stat(join(agentDir, "pi-microsandbox/default.toml")), { code: "ENOENT" });

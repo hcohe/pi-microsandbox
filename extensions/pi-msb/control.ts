@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { openDockerfile } from "./dockerfile-storage.ts";
 import { BUILD_FAILURE, ensureDockerfileImage } from "./image-build.ts";
 import { isIP } from "node:net";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -23,7 +23,7 @@ import { createBashOps, createFindOps, createGrepOps } from "./operations-exec.t
 import { createEditOps, createLsOps, createReadOps, createWriteOps } from "./operations.ts";
 import { pruneStale, type PrunePort } from "./prune.ts";
 import { createSdkTransport } from "./transport.ts";
-import { discoverWorkspace } from "./workspace.ts";
+import { assertWorkspaceRootCurrent, discoverWorkspace } from "./workspace.ts";
 import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } from "./sandbox-manager.ts";
 import {
   LOCKFILE_VERSION,
@@ -279,6 +279,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       fallbackMode: config.fallbackMode,
     };
   };
+  let hostExecutionToken: object = {};
+  const pendingHostChanges = new Map<symbol, SessionExecutionIdentity>();
   let configReady = false;
   let settingsReady = false;
   let pendingRestart = false;
@@ -644,13 +646,24 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     return state;
   };
   const notifyState = (state: RuntimeState) => options.onState?.(displayState(state));
+  const beginHostExecutionChange = (): (() => void) => {
+    const change = Symbol();
+    hostExecutionToken = {};
+    pendingHostChanges.set(change, execution.context.current());
+    return () => {
+      pendingHostChanges.delete(change);
+      hostExecutionToken = {};
+    };
+  };
   const beginDisplayActivity = (): (() => void) => {
+    hostExecutionToken = {};
     const token = Symbol();
     const identity = execution.context.current();
     displayActivities.set(token, identity);
     notifyState(visibleState());
     return () => {
       displayActivities.delete(token);
+      hostExecutionToken = {};
       if (execution.context.current() === identity) notifyState(visibleState());
     };
   };
@@ -665,6 +678,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     return state.status === "active" && !configReady ? { ...state, observation: "unknown" } : state;
   };
   deps.onState = () => {
+    hostExecutionToken = {};
     if (managerIdentity !== execution.context.current()) return;
     const state = visibleState();
     if (execution.context.isReady() || state.status === "booting" && state.pendingName) notifyState(state);
@@ -673,6 +687,26 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     execution: execution.context,
     isActive: () => execution.context.isReady() && visibleState().status === "active" && manager.isActive(),
     getState: visibleState,
+    hostExecutionToken: () => execution.context.isReady() && settingsReady && configReady && workspace
+      && ![...displayActivities.values(), ...pendingHostChanges.values()].includes(execution.context.current()) ? hostExecutionToken : undefined,
+    validateHostRecoveryRoot: async (identity, token) => {
+      const selected = workspace;
+      const assertReady = () => {
+        execution.context.assertCurrent(identity);
+        if (!token || !selected || workspace !== selected || resolve(identity.cwd) !== selected.cwd || provider.hostExecutionToken!() !== token) {
+          throw new Error("Host recovery workspace/configuration changed");
+        }
+      };
+      try {
+        assertReady();
+        await assertWorkspaceRootCurrent(selected!);
+        assertReady();
+      } catch {
+        // Withdraw every outstanding approval on an unprovable/replaced root, even if restored later.
+        hostExecutionToken = {};
+        throw new Error("Host recovery canonical cwd or physical directory identity could not be verified; rediscover the workspace before retrying.");
+      }
+    },
     refreshState: async () => {
       const identity = execution.context.current();
       if (execution.context.isReady() && configReady && !failureState && !explicitOff) await manager.refreshState?.();
@@ -697,6 +731,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     return snapshot;
   };
   const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false): Promise<ResolvedConfig> => {
+    hostExecutionToken = {};
     configReady = false;
     const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
     if (approvedSettingsReload) settings.assertSession(input, sessionId);
@@ -809,7 +844,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return settings;
     },
     getState: visibleState,
-    async openDockerfile(scope, destination) {
+    async openDockerfile(scope, ...retiredDestinations) {
+      if (retiredDestinations.length) throw new Error("Retired Dockerfile destinations are not supported");
       const selected = workspace;
       const identity = execution.context.current();
       if (!selected || !settingsReady) return undefined;
@@ -820,7 +856,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           || JSON.stringify(settings.temporary()) !== temporary) throw new Error("Workspace/session/settings changed");
       };
       return openDockerfile(settingsInput(), selected.hostRoot, scope, check,
-        [...configSnapshot().mounts, ...(currentAdoption()?.mounts ?? [])], destination);
+        [...configSnapshot().mounts, ...(currentAdoption()?.mounts ?? [])]);
     },
     async getDiagnostics() {
       const state = visibleState();
@@ -874,6 +910,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         }
         return;
       }
+      const endHostExecutionChange = beginHostExecutionChange();
       const endDisplayActivity = enabled ? beginDisplayActivity() : () => undefined;
       try {
         explicitOff = !enabled;
@@ -909,63 +946,67 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           }
         }
         notifyState(visibleState());
-      } finally { endDisplayActivity(); }
+      } finally { endDisplayActivity(); endHostExecutionChange(); }
     },
     previewSettings: (draft) => draft.preview(configSnapshot()),
     async reload(reloadOptions) {
       const identity = execution.context.current();
       const assertCurrent = () => { execution.context.assertCurrent(identity); reloadOptions?.signal?.throwIfAborted(); };
       assertCurrent();
-      await reloadOptions?.guard?.();
-      assertCurrent();
-      if (isDisabledByEnv(options.env ?? process.env)) {
-        explicitOff = true;
-        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
-        notifyState(failureState);
-        if (reloadOptions?.guard) throw new Error("Runtime reload disabled by environment");
-        return;
-      }
-      const endDisplayActivity = beginDisplayActivity();
+      // The approval guard itself can yield before display/runtime activity begins.
+      const endHostExecutionChange = beginHostExecutionChange();
       try {
-        let next: ResolvedConfig;
-        try {
-          workspace = null;
-          settingsReady = false;
-          const selected = await discoverWorkspace(cwd);
-          assertCurrent();
-          workspace = selected;
-          settingsReady = true;
-          cwd = workspace.cwd;
-          activeProjectRoot = workspace.guestRoot;
-          next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
-          assertCurrent();
-        } catch (error) {
-          assertCurrent();
-          configReady = false;
-          if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
-          notifyState(visibleState());
-          throw error;
-        }
         await reloadOptions?.guard?.();
         assertCurrent();
-        pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
-        if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
-          throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
+        if (isDisabledByEnv(options.env ?? process.env)) {
+          explicitOff = true;
+          failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
+          notifyState(failureState);
+          if (reloadOptions?.guard) throw new Error("Runtime reload disabled by environment");
+          return;
         }
-        const forceRecreate = pendingRestart;
-        resolved = next;
-        cacheDiagnosticConfig(next.config);
-        configReady = true;
-        Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-        if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
-          const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) }, reloadOptions);
+        const endDisplayActivity = beginDisplayActivity();
+        try {
+          let next: ResolvedConfig;
+          try {
+            workspace = null;
+            settingsReady = false;
+            const selected = await discoverWorkspace(cwd);
+            assertCurrent();
+            workspace = selected;
+            settingsReady = true;
+            cwd = workspace.cwd;
+            activeProjectRoot = workspace.guestRoot;
+            next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
+            assertCurrent();
+          } catch (error) {
+            assertCurrent();
+            configReady = false;
+            if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+            notifyState(visibleState());
+            throw error;
+          }
+          await reloadOptions?.guard?.();
           assertCurrent();
-          if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
-          else if (result.status === "active") pendingRestart = false;
-        } else failureState = null;
-        notifyState(visibleState());
-        if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
-      } finally { endDisplayActivity(); }
+          pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
+          if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+            throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
+          }
+          const forceRecreate = pendingRestart;
+          resolved = next;
+          cacheDiagnosticConfig(next.config);
+          configReady = true;
+          Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+          if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
+            const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) }, reloadOptions);
+            assertCurrent();
+            if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
+            else if (result.status === "active") pendingRestart = false;
+          } else failureState = null;
+          notifyState(visibleState());
+          if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
+        } finally { endDisplayActivity(); }
+      } finally { endHostExecutionChange(); }
     },
     async pruneNow() {
       const report = await pruneStale({ port: prunePort, locks: lockPort(), currentSessionId: sessionId, stopTimeoutMs: configRef.value.stopTimeoutMs });

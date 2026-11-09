@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -114,6 +114,11 @@ function operations(): RuntimeExecution["operations"] {
 
 function createHarness(options: {
   runtimeState?: RuntimeState;
+  configReady?: boolean;
+  omitHostExecutionToken?: boolean;
+  omitExecution?: boolean;
+  omitRootProof?: boolean;
+  validateRoot?: () => Promise<void>;
   config?: Partial<Config>;
   hasUI?: boolean;
   confirm?: boolean;
@@ -141,16 +146,22 @@ function createHarness(options: {
     resolve: async () => undefined,
     clear: () => {},
   };
+  let ready = options.configReady ?? true;
+  let token: object = {};
+  const currentConfig = config(options.config);
   const provider: ToolOpsProvider = {
-    execution: options.execution,
+    execution: options.omitExecution ? undefined : options.execution ?? readyExecution(cwd).context,
     isActive: () => current.status === "active",
     getState: () => current,
+    ...(options.omitHostExecutionToken ? {} : { hostExecutionToken: () => ready ? token : undefined }),
+    ...(options.omitRootProof ? {} : { validateHostRecoveryRoot: async () => options.validateRoot?.() }),
     withRuntime: async (callback) => callback({ transport: {} as any, operations: options.operations ?? operations() }),
   };
   const ctx = {
     cwd,
     mode: options.mode ?? "rpc",
     hasUI: options.hasUI ?? true,
+    sessionManager: { getSessionId: () => "host-recovery-test", getSessionFile: () => undefined },
     ui: {
       theme: approvalTheme,
       select: async (title: string, choices: string[]) => {
@@ -175,7 +186,7 @@ function createHarness(options: {
   } as unknown as ExtensionAPI;
   registerSandboxTools(pi, {
     provider,
-    config: config(options.config),
+    config: currentConfig,
     cwd,
     hostReads,
     createHostReads: options.createHostReads,
@@ -205,7 +216,9 @@ function createHarness(options: {
       for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
       return results;
     },
-    setState(next: RuntimeState) { current = next; },
+    config: currentConfig,
+    setConfigReady(next: boolean) { ready = next; token = {}; },
+    setState(next: RuntimeState) { current = next; token = {}; },
   };
 }
 
@@ -231,11 +244,12 @@ test("approval messages omit routing and use a generic host-isolation warning", 
   assert.ok(message.indexOf('"path"') < message.indexOf('"z"'));
 });
 
-test("Bash approval shows the literal command instead of JSON or execution options", () => {
+test("Bash approval shows the literal command and timeout instead of JSON", () => {
   const command = 'ls -la "$HOME/Desktop"\nprintf "hello\\n"';
   const message = hostApprovalMessage("bash", { command, timeout: 10, execution_target: "host" }, "/work/repo");
   assert.equal(message.split("Command:\n\n")[1], command);
-  assert.doesNotMatch(message, /Exact arguments|"command"|timeout|execution_target/);
+  assert.match(message, /Timeout \(seconds\): 10/);
+  assert.doesNotMatch(message, /Exact arguments|"command"|execution_target/);
 });
 
 test("Bash approval colors every command line with the theme's orange string color", () => {
@@ -565,5 +579,225 @@ test("management tools with missing or mismatched registration provenance receiv
       const outcomes = await f.emit("tool_call", { toolName, toolCallId: "spoof", input: {} });
       assert.ok(outcomes.some((outcome) => outcome?.block));
     }
+  }
+});
+
+const recoveryInput = () => ({ command: "printf 'host-recovery-fixture\\n'; pwd", timeout: 5, execution_target: "host" });
+const hostCall = (input: Record<string, unknown>, id = "recovery") => ({ toolName: "bash", toolCallId: id, input });
+const runHost = (h: ReturnType<typeof createHarness>, input: Record<string, unknown>, id = "recovery") =>
+  h.tools.get("bash").execute(id, input, undefined, undefined, h.ctx);
+
+for (const status of ["unavailable", "disabled"] as const) test(`${status} permits only explicitly approved bounded host Bash in the fixed cwd`, async (t) => {
+  const cwd = await mkdtemp("/tmp/pi-msb-host-recovery-");
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const execution = readyExecution(cwd);
+  const h = createHarness({ runtimeState: state(status), execution: execution.context });
+  const input = recoveryInput();
+  const [gate] = await h.emit("tool_call", hostCall(input));
+  assert.equal(gate, undefined);
+  assert.deepEqual(h.confirmations[0]!.choices, ["No", "Yes"]);
+  const title = h.confirmations[0]!.title;
+  assert.ok(title.includes(input.command));
+  assert.ok(title.includes(`Working directory: ${cwd}`));
+  assert.match(title, /Timeout \(seconds\): 5/);
+  assert.match(title, /bypasses VM, process, and network isolation/);
+  const result = await runHost(h, input);
+  assert.ok(result.content[0].text.includes("host-recovery-fixture"));
+  assert.ok(result.content[0].text.includes(cwd));
+  await assert.rejects(runHost(h, input), /not approved/);
+});
+
+test("unavailable non-host calls, other host tools and lifecycle transitions remain blocked", async () => {
+  for (const status of ["unavailable", "disabled", "booting", "stopping"] as const) {
+    const h = createHarness({ runtimeState: state(status) });
+    for (const tool of ROUTED) {
+      const input = { ...recoveryInput(), path: "/tmp/not-read", content: "not-written", pattern: "x" };
+      const [gate] = await h.emit("tool_call", { toolName: tool, toolCallId: tool, input });
+      if ((status === "unavailable" || status === "disabled") && tool === "bash") continue;
+      assert.equal(gate.block, true, `${status}/${tool}`);
+      await assert.rejects(h.tools.get(tool).execute(tool, input, undefined, undefined, h.ctx), /not approved|unavailable/);
+    }
+    const input = { command: "false" };
+    assert.equal((await h.emit("tool_call", hostCall(input)))[0].block, true);
+    await assert.rejects(runHost(h, input), /unavailable/);
+  }
+});
+
+test("recovery rejects missing, non-finite, non-positive and oversized timeouts before approval and execution", async () => {
+  for (const timeout of [undefined, null, "5", NaN, Infinity, -Infinity, 0, -1, 120.001]) {
+    const h = createHarness({ runtimeState: state("unavailable") });
+    const input = { ...recoveryInput(), timeout };
+    const [gate] = await h.emit("tool_call", hostCall(input));
+    assert.match(gate.reason, /finite positive timeout <=120/);
+    assert.equal(h.confirmations.length, 0);
+    await assert.rejects(runHost(h, input), /not approved|timeout/);
+  }
+  const h = createHarness({ runtimeState: state("unavailable") });
+  assert.equal((await h.emit("tool_call", hostCall({ ...recoveryInput(), timeout: 120 })))[0], undefined);
+});
+
+test("recovery fails closed for disabled permission, absent UI, No/cancel, unresolved or absent configuration signal", async () => {
+  for (const options of [
+    { config: { allowHostExecution: false } }, { hasUI: false }, { confirm: false }, { cancel: true },
+    { configReady: false }, { omitHostExecutionToken: true }, { omitExecution: true }, { omitRootProof: true },
+  ]) {
+    const h = createHarness({ runtimeState: state("unavailable"), ...options });
+    const input = recoveryInput();
+    assert.equal((await h.emit("tool_call", hostCall(input)))[0].block, true);
+    await assert.rejects(runHost(h, input), /not approved|disabled|trustworthy|unavailable/);
+  }
+  const execution = createSessionExecution("unready", "/tmp");
+  const h = createHarness({ runtimeState: state("unavailable"), execution: execution.context });
+  assert.equal((await h.emit("tool_call", hostCall(recoveryInput())))[0].block, true);
+  await assert.rejects(runHost(h, recoveryInput()), /not ready/);
+  assert.equal(h.confirmations.length, 0);
+});
+
+for (const status of ["active", "unavailable"] as const) test(`${status} approval rejects in-place input mutation while awaiting UI`, async () => {
+  for (const mutate of [
+    (input: Record<string, unknown>) => { input.command = "false"; },
+    (input: Record<string, unknown>) => { input.timeout = 10; },
+    (input: Record<string, unknown>) => { input.execution_target = "sandbox"; },
+  ]) {
+    const answer = deferred<string>();
+    const h = createHarness({ runtimeState: state(status), select: () => answer.promise });
+    const input = recoveryInput();
+    const pending = h.emit("tool_call", hostCall(input));
+    mutate(input);
+    answer.resolve("Yes");
+    assert.match((await pending)[0].reason, /changed while awaiting/);
+    await assert.rejects(runHost(h, { ...input, execution_target: "host" }), /not approved/);
+  }
+});
+
+for (const status of ["unavailable", "disabled"] as const) test(`${status} rejects replaced input before rendering host approval`, async (t) => {
+  const cwd = await mkdtemp("/tmp/pi-msb-recovery-display-");
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const entered = deferred<void>(), release = deferred<void>();
+  const command = "printf 'unapproved' > marker";
+  const input = { ...recoveryInput(), command };
+  let validations = 0;
+  const h = createHarness({
+    runtimeState: state(status), execution: readyExecution(cwd).context,
+    validateRoot: async () => {
+      if (++validations === 1) { entered.resolve(); await release.promise; }
+    },
+    select: async () => {
+      // A vulnerable prompt renders the mutated old object, then accepts the
+      // restored original command because event.input still matches its hash.
+      input.command = command;
+      return "Yes";
+    },
+  });
+  const event = hostCall(input);
+  const pending = h.emit("tool_call", event);
+  await entered.promise;
+  event.input = { ...input };
+  input.command = "printf 'harmless'";
+  release.resolve();
+  assert.equal((await pending)[0]?.block, true);
+  assert.equal(h.confirmations.length, 0);
+  input.command = command;
+  await assert.rejects(runHost(h, event.input), /not approved/);
+  await assert.rejects(access(path.join(cwd, "marker")), { code: "ENOENT" });
+});
+
+test("recovery approval cannot authorize changed id/command/timeout/cwd or replay", async () => {
+  for (const change of ["id", "command", "timeout", "cwd"] as const) {
+    const execution = readyExecution("/tmp");
+    const h = createHarness({ runtimeState: state("unavailable"), execution: execution.context });
+    const input = recoveryInput();
+    await h.emit("tool_call", hostCall(input));
+    if (change === "command") input.command = "false";
+    if (change === "timeout") input.timeout = 10;
+    if (change === "cwd") execution.finish(execution.begin("one", "/tmp/replacement-not-used"));
+    await assert.rejects(runHost(h, input, change === "id" ? "different" : "recovery"), /not approved/);
+  }
+});
+
+for (const when of ["during approval", "before execution"] as const) test(`host recovery rechecks identity/readiness/configuration/state ${when}`, async () => {
+  for (const change of ["identity", "unready", "config", "permission", "routing", "state", "state-roundtrip", "config-roundtrip", "noUI"] as const) {
+    const execution = readyExecution("/tmp");
+    const answer = deferred<string>();
+    const h = createHarness({ runtimeState: state("unavailable"), execution: execution.context, select: () => answer.promise });
+    const input = recoveryInput();
+    const pending = h.emit("tool_call", hostCall(input));
+    if (when === "before execution") { answer.resolve("Yes"); assert.equal((await pending)[0], undefined); }
+    if (change === "identity") execution.finish(execution.begin("one", "/tmp"));
+    if (change === "unready") execution.begin("one", "/tmp");
+    if (change === "config" || change === "config-roundtrip") h.setConfigReady(false);
+    if (change === "config-roundtrip") h.setConfigReady(true);
+    if (change === "permission") h.config.allowHostExecution = false;
+    if (change === "routing") h.config.routeTools = [];
+    if (change === "state" || change === "state-roundtrip") h.setState(state("booting"));
+    if (change === "state-roundtrip") h.setState(state("unavailable"));
+    if (change === "noUI") h.ctx.hasUI = false;
+    if (when === "during approval") {
+      answer.resolve("Yes");
+      assert.equal((await pending)[0].block, true, change);
+    }
+    await assert.rejects(runHost(h, input), /not approved|not ready|disabled|excluded|no interactive UI|trustworthy|unavailable/, change);
+    // A failed invocation never restores its consumed approval.
+    h.config.allowHostExecution = true;
+    h.config.routeTools = [...ROUTED];
+    h.ctx.hasUI = true;
+    if (change === "config" || change === "config-roundtrip") h.setConfigReady(true);
+    if (change === "state" || change === "state-roundtrip") h.setState(state("unavailable"));
+    execution.finish(execution.context.current());
+    await assert.rejects(runHost(h, input), /not approved/, change);
+  }
+});
+
+test("active adapters and explicit off/fallback retain their existing host behavior", async () => {
+  const active = createHarness({ omitHostExecutionToken: true });
+  assert.equal((await active.emit("tool_call", hostCall({ command: "not-executed", execution_target: "host" })))[0], undefined);
+  for (const status of ["off", "host-fallback"] as const) {
+    const h = createHarness({ runtimeState: state(status), configReady: false, hasUI: false, config: { allowHostExecution: false } });
+    assert.equal((await h.emit("tool_call", hostCall({ command: "not-executed", execution_target: "host" })))[0], undefined);
+    assert.equal(h.confirmations.length, 0);
+  }
+});
+
+for (const phase of [1, 2, 3]) test(`recovery rechecks exact authorization across root validation await ${phase}`, async (t) => {
+  const cwd = await mkdtemp("/tmp/pi-msb-root-await-");
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const change of ["command", "timeout", "target", "permission", "routing", "token", "readiness", "session", "state", "UI"] as const) {
+    const entered = deferred<void>(), release = deferred<void>();
+    let validations = 0;
+    const execution = readyExecution(cwd);
+    const h = createHarness({ runtimeState: state("unavailable"), execution: execution.context,
+      validateRoot: async () => {
+        if (++validations === phase) { entered.resolve(); await release.promise; }
+      },
+    });
+    const input = { ...recoveryInput(), command: "printf 'no-handoff' > marker" };
+    let gate: Promise<any>;
+    let run: Promise<any> | undefined;
+    if (phase === 3) {
+      assert.equal((await h.emit("tool_call", hostCall(input)))[0], undefined);
+      run = runHost(h, input);
+      gate = Promise.resolve(undefined);
+    } else gate = h.emit("tool_call", hostCall(input));
+    await entered.promise;
+    if (change === "command") input.command = "printf 'changed-command' > marker";
+    if (change === "timeout") input.timeout = 10;
+    if (change === "target") input.execution_target = "sandbox";
+    if (change === "permission") h.config.allowHostExecution = false;
+    if (change === "routing") h.config.routeTools = [];
+    if (change === "token" || change === "readiness") h.setConfigReady(false);
+    if (change === "token") h.setConfigReady(true);
+    if (change === "session") execution.finish(execution.begin("one", cwd));
+    if (change === "state") h.setState(state("booting"));
+    if (change === "UI") h.ctx.hasUI = false;
+    release.resolve();
+    if (run) await assert.rejects(run, /not approved|not ready|disabled|trustworthy/);
+    else assert.equal((await gate)[0].block, true, change);
+    // Restore mutable inputs/policy without adding a new approval: a failed validation cannot revive one.
+    input.command = "printf 'no-handoff' > marker"; input.timeout = 5; input.execution_target = "host";
+    h.config.allowHostExecution = true; h.config.routeTools = [...ROUTED]; h.ctx.hasUI = true;
+    if (change === "readiness") h.setConfigReady(true);
+    if (change === "state") h.setState(state("unavailable"));
+    await assert.rejects(runHost(h, input), /not approved/);
+    await assert.rejects(access(path.join(cwd, "marker")), { code: "ENOENT" });
   }
 });

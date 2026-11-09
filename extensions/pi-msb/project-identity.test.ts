@@ -26,11 +26,9 @@ test("project identity shares main checkout keys for registered external and fut
   const f = await fixture(t);
   const main = await discoverProjectIdentity(f.main);
   assert.equal(main.projectPolicyRoot, f.main);
-  assert.equal(main.worktreePolicyRoot, f.main);
   assert.equal(main.isWorktree, false);
   const identity = await discoverProjectIdentity(f.linked);
   assert.equal(identity.projectPolicyRoot, f.main);
-  assert.equal(identity.worktreePolicyRoot, f.linked);
   assert.equal(identity.repositoryName, "repository");
   assert.equal(identity.worktreeName, "checkout");
   assert.equal(identity.isWorktree, true);
@@ -43,13 +41,12 @@ test("project identity shares main checkout keys for registered external and fut
   assert.equal((await discoverProjectIdentity(f.linked)).projectPolicyRoot, f.main);
 });
 
-test("project identity preserves cwd suffix isolation, missing main suffixes, and canonical aliases", async (t) => {
+test("project identity shares main root independently of suffix contents and canonical aliases", async (t) => {
   const f = await fixture(t);
   const nested = join(f.linked, "packages", "app");
   await mkdir(nested, { recursive: true });
   const identity = await discoverProjectIdentity(nested);
-  assert.equal(identity.projectPolicyRoot, join(f.main, "packages", "app"));
-  assert.equal(identity.worktreePolicyRoot, nested);
+  assert.equal(identity.projectPolicyRoot, f.main);
   assert.equal(identity.repositoryName, "repository");
   const alias = join(f.root, "alias");
   await symlink(f.linked, alias);
@@ -59,7 +56,7 @@ test("project identity preserves cwd suffix isolation, missing main suffixes, an
   assert.equal((await discoverProjectIdentity(mainAlias)).projectPolicyRoot, f.main);
   await mkdir(join(f.main, "packages"));
   await symlink(join(f.root, "external"), join(f.main, "packages", "app"));
-  await assert.rejects(discoverProjectIdentity(nested), /could not be safely verified/);
+  assert.equal((await discoverProjectIdentity(nested)).projectPolicyRoot, f.main);
 });
 
 test("project identity verifies reciprocal registration rather than trusting a forged gitfile", async (t) => {
@@ -136,7 +133,7 @@ test("project identity keeps submodules, separate-git-dir, bare, and non-Git cwd
       await mkdir(join(cwd, "refs"));
     }
     const identity = await discoverProjectIdentity(cwd);
-    assert.equal(identity.projectPolicyRoot, name === "ordinary" ? join(f.main, name) : cwd);
+    assert.equal(identity.projectPolicyRoot, name === "ordinary" ? f.main : cwd);
     assert.equal(identity.isWorktree, name === "ordinary");
   }
   const nonGit = join(f.root, "non-git");

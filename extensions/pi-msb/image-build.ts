@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { MicrosandboxModule } from "./control.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
-import { assertBuildPath, buildImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
+import { assertBuildPath, BUILD_ROOT_DISK_MIB, buildImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { lockPathFor, tryAcquireOrphanLock } from "./locks.ts";
 import { createSdkTransport } from "./transport.ts";
 import type { LockHandle, SandboxTransport } from "./types.ts";
@@ -37,8 +37,17 @@ async function buildDockerfileImage(options: ImageBuildOptions): Promise<void> {
   const check = () => { if (abort.signal.aborted) throw new Error("Build cancelled"); };
   let lock: LockHandle | null = null;
   let temporary: string | undefined;
+  let temporaryAlias: string | undefined;
+  let temporaryIdentity: { dev: number; ino: number } | undefined;
   let raw: any;
   const owner = randomUUID();
+  const builderName = `pi-msb-builder-${owner}`;
+  let createAttempted = false;
+  let builderRemoved = false;
+  const validateTemporary = async (path: string) => {
+    const stat = await fs.lstat(path);
+    if (!temporaryIdentity || !stat.isDirectory() || stat.dev !== temporaryIdentity.dev || stat.ino !== temporaryIdentity.ino) throw new Error("Build staging identity changed");
+  };
   let transport: SandboxTransport | undefined;
   const cleanupBuilder = async () => {
     // Use the owned object, never a fresh name lookup that might select a replacement.
@@ -49,6 +58,23 @@ async function buildDockerfileImage(options: ImageBuildOptions): Promise<void> {
       if (raw.ownsLifecycle !== true || labels?.["pi-msb.builder"] !== owner) throw new Error("Builder ownership changed");
       await raw.destroy({ timeoutMs: 10_000 });
       raw = undefined;
+      builderRemoved = true;
+    } else if (createAttempted && !builderRemoved) {
+      // create() can register a VM and then fail to boot. get() reads only the
+      // database; destroy() on this same handle rejects same-name replacements.
+      if (sdk.defaultBackendKind?.() !== "local") throw new Error("Builder backend changed");
+      let handle: any;
+      try { handle = await sdk.Sandbox.get(builderName); }
+      catch (error) {
+        if ((error as { code?: string })?.code !== "sandboxNotFound" || sdk.defaultBackendKind?.() !== "local") throw error;
+        builderRemoved = true;
+        return;
+      }
+      const config = await handle.config();
+      const labels = Array.isArray(config.labels) ? Object.fromEntries(config.labels) : config.labels;
+      if (handle.name !== builderName || handle.backendKind !== "local" || typeof handle.id !== "string" || !handle.id || config.name !== builderName || labels?.["pi-msb.builder"] !== owner) throw new Error("Builder ownership could not be verified");
+      await handle.destroy({ timeoutMs: 10_000 });
+      builderRemoved = true;
     }
   };
   try {
@@ -92,7 +118,12 @@ async function buildDockerfileImage(options: ImageBuildOptions): Promise<void> {
       if (record.identity === source.identity && record.reference === reference && record.platform === source.platform && record.digest === await inspectImage()) { check(); return; }
     } catch { /* A missing/invalid cache record is never proof that an image is reusable. */ }
     check();
-    temporary = await fs.mkdtemp("/tmp/pi-msb-build-");
+    // Keep staging in /tmp, but never pass its platform-specific aliases to
+    // no-follow SDK binds (macOS /tmp is a symlink to /private/tmp).
+    temporaryAlias = await fs.mkdtemp("/tmp/pi-msb-build-");
+    temporaryIdentity = await fs.lstat(temporaryAlias);
+    temporary = await fs.realpath(temporaryAlias);
+    await validateTemporary(temporary);
     const input = join(temporary, "input");
     const output = join(temporary, "output");
     await fs.mkdir(input, { mode: 0o700 });
@@ -106,8 +137,8 @@ async function buildDockerfileImage(options: ImageBuildOptions): Promise<void> {
     if (sdk.defaultBackendKind() !== "local") throw new Error("Builder backend changed");
     const publicPolicy = sdk.NetworkPolicy?.fromProfiles?.(["public"]);
     if (!publicPolicy) throw new Error("Public-only builder network policy unavailable");
-    const builder = sdk.Sandbox.builder(`pi-msb-builder-${owner}`)
-      .image(DEFAULT_CONFIG.image).pullPolicy("if-missing").cpus(2).memory(4096)
+    const builder = sdk.Sandbox.builder(builderName)
+      .image(DEFAULT_CONFIG.image).rootDisk(BUILD_ROOT_DISK_MIB).pullPolicy("if-missing").cpus(2).memory(4096)
       .security("default").user("root").detached(false).maxDuration(BUILD_TIMEOUT_MS / 1000)
       .idleTimeout(0).workdir("/pi-msb-input").labels({ "pi-msb.builder": owner });
     builder.network((network: any) => network.policy({ ...publicPolicy, defaultIngress: "deny" }));
@@ -117,9 +148,11 @@ async function buildDockerfileImage(options: ImageBuildOptions): Promise<void> {
     await validateLocation();
     check();
     if (sdk.defaultBackendKind() !== "local") throw new Error("Builder backend changed");
-    const created = await builder.create();
-    if (created.ownsLifecycle !== true) throw new Error("Builder ownership could not be verified");
-    raw = created;
+    await validateTemporary(temporary);
+    if (await fs.realpath(temporary) !== temporary || await fs.realpath(input) !== input || await fs.realpath(output) !== output) throw new Error("Build staging path changed");
+    createAttempted = true;
+    raw = await builder.create();
+    if (raw.ownsLifecycle !== true) throw new Error("Builder ownership could not be verified");
     check();
     if (raw.backendKind !== "local") throw new Error("Builder backend could not be verified");
     transport = createSdkTransport(raw);
@@ -172,8 +205,13 @@ async function buildDockerfileImage(options: ImageBuildOptions): Promise<void> {
       // Never remove host output while a failed-to-stop builder might still access it.
       throw new Error(BUILD_FAILURE);
     } finally {
-      if (!raw && temporary) await fs.rm(temporary, { recursive: true, force: true });
-      await lock?.release();
+      try {
+        if ((!createAttempted || builderRemoved) && temporaryAlias) {
+          const path = temporary ?? temporaryAlias;
+          await validateTemporary(path);
+          await fs.rm(path, { recursive: true, force: true });
+        }
+      } finally { await lock?.release(); }
     }
   }
 }

@@ -54,6 +54,7 @@ test("before startup diagnostics are passive, blocked, and do not advertise defa
   const result: any = await f.integration.control.getDiagnostics!();
   assert.equal(result.runtime.status, "unavailable");
   assert.equal(result.readiness.configReady, false);
+  assert.equal(f.integration.provider.hostExecutionToken!(), undefined);
   assert.equal(result.desired.settings, undefined);
   assert.equal(result.failure.code, "workspace_unavailable");
   assert.deepEqual(f.counters(), before);
@@ -105,6 +106,7 @@ for (const active of [false, true]) test(`invalid/rejected configuration with ${
   const before = f.counters();
   const result: any = await f.integration.control.getDiagnostics!();
   assert.equal(result.readiness.configReady, false);
+  assert.equal(f.integration.provider.hostExecutionToken!(), undefined);
   assert.equal(result.desired.settings, undefined);
   assert.equal(result.failure.phase, "configuration_not_ready");
   // Failed reload keeps an active runtime usable; an inactive runtime becomes unavailable.
@@ -188,6 +190,7 @@ test("an obsolete reload cannot replace the current session's cached desired dia
     const obsolete = integration.control.reload();
     const rejected = assert.rejects(obsolete, /context changed/);
     await entered;
+    assert.equal(integration.provider.hostExecutionToken!(), undefined);
     await integration.configureSession({ sessionId: "replacement", cwd, projectTrusted: true,
       config: { config: { ...config, allowHostExecution: false }, provenance: {}, warnings: [] } });
     const current: any = await integration.control.getDiagnostics!();
@@ -303,4 +306,39 @@ for (const source of ["command-fails", "command-empty", "environment"] as const)
   const ended: any = await f.integration.control.getDiagnostics!();
   assert.notEqual(ended.failure.code, "host_secret_command_failed");
   assert.notEqual(ended.failure.code, "host_secret_environment_unavailable");
+});
+
+test("native cached host execution token distinguishes VM failure from unresolved configuration and lifecycle", async (t) => {
+  const fault = { stage: "sdk" as const, enabled: true };
+  const f = await fixture(t, true, fault);
+  const token = () => f.integration.provider.hostExecutionToken!();
+  assert.equal(token(), undefined);
+  await f.start();
+  assert.equal(f.integration.provider.execution!.isReady(), true);
+  assert.equal(f.integration.provider.getState().status, "unavailable");
+  const failedVm = token();
+  assert.ok(failedVm, "a failed VM with resolved policy can request recovery approval");
+  f.forbid();
+  const before = f.counters();
+  assert.equal(token(), failedVm);
+  assert.equal(token(), failedVm);
+  assert.deepEqual(f.counters(), before, "token inspection is passive/cached");
+  f.allow();
+  const pending = f.start();
+  assert.equal(token(), undefined, "session setup immediately withdraws readiness");
+  await pending;
+  assert.ok(token());
+  assert.notEqual(token(), failedVm, "same-cwd setup never revives authorization");
+  const disable = f.integration.control.setEnabled(false);
+  assert.equal(token(), undefined, "explicit disable is also a lifecycle transition");
+  await disable;
+  await f.start();
+  assert.ok(token());
+  const reload = f.integration.control.reload();
+  assert.equal(token(), undefined, "management transition blocks recovery before asynchronous work");
+  await reload.catch(() => undefined);
+  // Reload may fail in VM setup, but any resulting token must be fresh.
+  assert.notEqual(token(), failedVm);
+  f.integration.endSession();
+  assert.equal(token(), undefined);
 });

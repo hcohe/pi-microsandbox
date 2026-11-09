@@ -1,7 +1,7 @@
 import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, parse, relative, sep } from "node:path";
-import { assertPolicyOutsideWorkspace, canonicalPolicyLocation, hostConfigTargets, legacyConfigSources, readRawConfig, type ResolveConfigInput } from "./config.ts";
+import { assertPolicyOutsideWorkspace, canonicalPolicyLocation, hostConfigTargets, ignoredLegacyProjectWarnings, legacyConfigSources, readRawConfig, type ResolveConfigInput } from "./config.ts";
 import { assertBuildPath, BUILD_LIMITS } from "./image-source.ts";
 import { assertAnchor, captureAnchor } from "./settings-storage.ts";
 import { SettingsConflictError } from "./settings-conflict.ts";
@@ -10,7 +10,6 @@ import { CONTEXT_LIMITS, assertContextTargets, directoryIdentity, fileIdentity, 
 import type { Config } from "./types.ts";
 
 export type DockerfileScope = "project" | "global";
-export type DockerfileDestination = "repository" | "worktree";
 export const DOCKERFILE_MAX_BYTES = 32 * 1024;
 type ScopePaths = { config: string; dockerfile: string; buildContext: string };
 export interface DockerfilePaths {
@@ -18,7 +17,6 @@ export interface DockerfilePaths {
   canonicalAgentDir: string;
   global: ScopePaths;
   project: ScopePaths;
-  worktree?: ScopePaths;
 }
 export interface DockerfileSnapshot {
   exists: boolean;
@@ -39,6 +37,7 @@ export interface DockerfileDraft {
   target: ScopePaths;
   source: DockerfileSnapshot;
   context: ContextEntry[];
+  ignoredLegacyWarnings: string[];
   readContext(paths: string[]): Promise<unknown[]>;
   prepare(content?: string, context?: ContextEdit[]): Promise<BundleReview>;
   save(content: string | undefined, guard: () => Promise<void>): Promise<{ assertUnchanged(): Promise<void> }>;
@@ -67,7 +66,7 @@ export async function dockerfilePaths(input: ResolveConfigInput, canonicalCwd: s
   if (await fs.realpath(input.cwd) !== canonicalCwd) throw new SettingsConflictError();
   const targets = await hostConfigTargets(input, replacement);
   const scope = (config: string): ScopePaths => ({ config, dockerfile: join(dirname(config), "Dockerfile"), buildContext: join(dirname(config), "build-context") });
-  const paths = { agentDir: targets.agentDir, canonicalAgentDir: targets.canonicalAgentDir, global: scope(targets.paths.global), project: scope(targets.paths.project), ...(targets.paths.worktree ? { worktree: scope(targets.paths.worktree) } : {}) };
+  const paths = { agentDir: targets.agentDir, canonicalAgentDir: targets.canonicalAgentDir, global: scope(targets.paths.global), project: scope(targets.paths.project) };
   const roots = [input.cwd, canonicalCwd, ...mounts.filter((m) => !m.readonly && ["dir", "file"].includes(m.type)).map((m) => m.hostPath!)];
   for (const config of [...Object.values(targets.lexicalPaths), ...Object.values(targets.paths)]) {
     for (const path of Object.values(scope(config))) for (const root of roots) await assertPolicyOutsideWorkspace(path, [root]);
@@ -84,7 +83,7 @@ export async function dockerfilePaths(input: ResolveConfigInput, canonicalCwd: s
       if ([host, canonicalHost].some((path) => inside(path, dependency))) throw new Error("Writable mount exposes repository proof");
     }
   }
-  for (const selected of [paths.global, paths.project, ...(paths.worktree ? [paths.worktree] : [])]) for (const path of Object.values(selected)) await assertBuildPath(targets.canonicalAgentDir, path);
+  for (const selected of [paths.global, paths.project]) for (const path of Object.values(selected)) await assertBuildPath(targets.canonicalAgentDir, path);
   if (await fs.realpath(input.cwd) !== canonicalCwd || JSON.stringify(await hostConfigTargets(input, replacement)) !== JSON.stringify(targets)) throw new SettingsConflictError();
   check();
   return paths;
@@ -140,12 +139,13 @@ const sameContext = (a: ContextEntry[], b: ContextEntry[]) => JSON.stringify(sor
 
 /** Each changed file is staged privately outside COPY root. Partial commits never authorize activation. */
 export async function openDockerfile(input: ResolveConfigInput, canonicalCwd: string, scope: DockerfileScope, check: () => void,
-  mounts: Config["mounts"] = [], destination?: DockerfileDestination): Promise<DockerfileDraft> {
-  if (!["project", "global"].includes(scope) || destination && (scope !== "project" || !["repository", "worktree"].includes(destination))) throw new Error("Invalid destination");
+  mounts: Config["mounts"] = [], ...retiredDestinations: never[]): Promise<DockerfileDraft> {
+  // Old positional Worktree requests must fail, never become shared Project writes.
+  if (retiredDestinations.length) throw new Error("Retired Dockerfile destinations are not supported");
+  if (!["project", "global"].includes(scope)) throw new Error("Invalid destination");
   let targets = await hostConfigTargets(input);
   const paths = await dockerfilePaths(input, canonicalCwd, check, mounts);
-  const target = destination === "worktree" ? paths.worktree : paths[scope];
-  if (!target) throw new Error("Worktree target unavailable");
+  const target = paths[scope];
   const path = target.dockerfile;
   const anchors = await Promise.all([captureAnchor(paths.agentDir, paths.canonicalAgentDir), captureAnchor(input.cwd, canonicalCwd), captureAnchor(dirname(path), dirname(path))]);
   const missingParents = anchors[2]!.ancestors.filter((entry) => !entry.identity).map((entry) => entry.path);
@@ -157,7 +157,7 @@ export async function openDockerfile(input: ResolveConfigInput, canonicalCwd: st
   let expectedSource = source;
   const policies = await policyVersions(input, path);
   let registration: { text: string; previous: string | null; predicted: typeof targets } | undefined;
-  if (scope === "project" && destination !== "worktree" && targets.repository) {
+  if (scope === "project" && targets.repository) {
     let text: string | null = null;
     try { text = (await readText(target.config, 256 * 1024)).content; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -213,7 +213,8 @@ export async function openDockerfile(input: ResolveConfigInput, canonicalCwd: st
     await validate();
     return result;
   };
-  return { paths, scope, target, source, context, readContext, async prepare(content, edits = []) {
+  const ignoredLegacyWarnings = await ignoredLegacyProjectWarnings(targets);
+  return { paths, scope, target, source, context, ignoredLegacyWarnings, readContext, async prepare(content, edits = []) {
     await validate(); validateContextEdits(edits);
     reviewedContextPaths = edits.map((edit) => edit.path);
     await validate();

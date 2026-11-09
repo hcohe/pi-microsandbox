@@ -37,7 +37,7 @@ type RoutedToolName = "bash" | "edit" | "find" | "grep" | "ls" | "read" | "write
 const ROUTED_TOOLS: readonly RoutedToolName[] = ["bash", "edit", "find", "grep", "ls", "read", "write"];
 const ROUTED_TOOL_SET = new Set<string>(ROUTED_TOOLS);
 const EXECUTION_TARGET_DESCRIPTION =
-  'Where to execute this tool call. Omit this or use "sandbox" normally. Use "host" only when sandbox execution cannot perform the operation; host execution requires user approval while sandboxing is active.';
+  'Where to execute this tool call. Omit this or use "sandbox" normally. Use "host" only when sandbox execution cannot perform the operation; host execution requires individual user approval. For recovery while unavailable/disabled, only bash is allowed, with an explicit finite positive timeout <=120 seconds, ready workspace/configuration and host execution permission. Start with msb_diagnostics and msb_config_get, then explain the narrow diagnostic need. Host commands run with real host-user privileges outside VM/network isolation; timeout does not guarantee descendant confinement.';
 
 /** Add the routing control without changing any of the built-in required fields. */
 export function withExecutionTarget<T extends Type.TProperties>(
@@ -99,6 +99,7 @@ export function hostApprovalMessage(
   return [
     `${label("Tool:")} ${theme ? theme.bold(theme.fg("accent", tool)) : tool}`,
     `${label("Working directory:")} ${value(cwd)}`,
+    ...(command === undefined ? [] : [`${label("Timeout (seconds):")} ${value(input.timeout === undefined ? "not specified" : String(input.timeout))}`]),
     "",
     theme ? theme.bold(theme.fg("warning", warning)) : warning,
     "",
@@ -129,6 +130,17 @@ export interface RegisterToolsDeps {
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;
 type ToolParams = Record<string, any> & { execution_target?: ExecutionTarget };
+interface HostCallApproval {
+  identity: SessionExecutionIdentity;
+  fingerprint: string;
+  status: RuntimeState["status"];
+  token: object | undefined;
+}
+const HOST_RECOVERY_ROOT_ERROR = "Host recovery requires the originally discovered canonical cwd and physical directory identity; the root is changed, unreadable or unproven. Rediscover the workspace before retrying.";
+
+function isHostRecoveryState(state: RuntimeState): boolean {
+  return state.status === "unavailable" || state.status === "disabled";
+}
 
 function stateOf(deps: RegisterToolsDeps): RuntimeState {
   if (deps.provider.execution && !deps.provider.execution.isReady()) return { status: "unavailable", info: null };
@@ -145,7 +157,7 @@ function isSandboxActive(state: RuntimeState, provider: ToolOpsProvider): boolea
 
 function unavailableError(_state: RuntimeState): Error {
   // Startup/adapter reasons can contain data for which no redaction context exists.
-  return new Error("Sandbox is unavailable; routed tool execution is blocked. Use msb_diagnostics and msb_config_get to diagnose it; msb_config_set can request an approved repair without a running sandbox.");
+  return new Error("Sandbox is unavailable; routed tool execution is blocked. Use msb_diagnostics and msb_config_get to diagnose it; msb_config_set can request an approved repair without a running sandbox. After passive inspection, explain the narrow diagnostic need and explicitly request bash with execution_target=\"host\" and a finite positive timeout <=120 seconds for individual human approval, only with ready identity/configuration and host permission. Other routed calls remain blocked; do not disable protection or enable fallback.");
 }
 
 function routeError(tool: string): Error {
@@ -239,7 +251,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       });
     },
   });
-  const approvedHostCalls = new Map<string, { identity: SessionExecutionIdentity; fingerprint: string }>();
+  const approvedHostCalls = new Map<string, HostCallApproval>();
   const clearGrants = (): void => {
     approvedHostCalls.clear();
     hostReads.clear();
@@ -261,19 +273,43 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     if (typeof id === "string") approvedHostCalls.delete(id);
   };
 
+  const hostRequestError = (tool: string, input: ToolParams, state: RuntimeState): string | undefined => {
+    if (execution && !execution.isReady()) return unavailableError(state).message;
+    const recovery = isHostRecoveryState(state);
+    if (recovery && !execution?.isReady()) return unavailableError(state).message;
+    if (!isSandboxActive(state, deps.provider) && !(recovery && tool === "bash")) return unavailableError(state).message;
+    // Missing cached readiness must never turn permissive fallback defaults into recovery permission.
+    if ((recovery || deps.provider.hostExecutionToken) && !deps.provider.hostExecutionToken?.()) {
+      return "Host execution requires ready workspace identity and trustworthy current configuration; use msb_diagnostics and msb_config_get or ask for manual host repair.";
+    }
+    if (!deps.config.allowHostExecution) return "Host execution is disabled by pi-microsandbox configuration.";
+    if (recovery && (typeof input.timeout !== "number" || !Number.isFinite(input.timeout) || input.timeout <= 0 || input.timeout > 120)) {
+      return "Host recovery bash requires an explicit finite positive timeout <=120 seconds.";
+    }
+    return;
+  };
+
+  const validateRecoveryRoot = async (identity: SessionExecutionIdentity, token: object | undefined): Promise<void> => {
+    if (!token || !deps.provider.validateHostRecoveryRoot) throw new Error(HOST_RECOVERY_ROOT_ERROR);
+    try { await deps.provider.validateHostRecoveryRoot(identity, token); }
+    catch { throw new Error(HOST_RECOVERY_ROOT_ERROR); }
+  };
+
   const requireApprovedHostExecution = (
     tool: string,
     id: string,
     input: Record<string, unknown>,
     identity: SessionExecutionIdentity,
-  ): void => {
+    state: RuntimeState,
+  ): HostCallApproval => {
     const approved = approvedHostCalls.get(id);
     approvedHostCalls.delete(id);
-    if (approved?.identity !== identity || approved.fingerprint !== hostRequestFingerprint(tool, input, identity.cwd)) {
+    if (!approved || approved.identity !== identity || approved.fingerprint !== hostRequestFingerprint(tool, input, identity.cwd)
+      || approved.status !== state.status || approved.token !== deps.provider.hostExecutionToken?.()) {
       throw new Error("Host execution was not approved for this exact tool call.");
     }
-    // Approval is deliberately consumed here rather than cached; a runtime
-    // state change must never extend a one-call host escape.
+    // Consume before any filesystem validation await, including on validation failure.
+    return approved;
   };
 
   const executeHost = async (
@@ -283,15 +319,32 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     signal: AbortSignal | undefined,
     onUpdate: any,
     ctx: ExtensionContext,
-    active: boolean,
+    approvalRequired: boolean,
     identity: SessionExecutionIdentity,
   ): Promise<any> => {
     assertCurrent(identity);
-    if (active) {
-      if (!deps.config.allowHostExecution) {
-        throw new Error("Host execution is disabled by pi-microsandbox configuration.");
+    if (approvalRequired) {
+      // Consume even on failure; a rejected call must not revive after policy/state changes.
+      const state = stateOf(deps);
+      const error = hostRequestError(definition.name, input, state);
+      if (error) {
+        clearApproval(id);
+        throw new Error(error);
       }
-      requireApprovedHostExecution(definition.name, id, input, identity);
+      const approved = requireApprovedHostExecution(definition.name, id, input, identity, state);
+      if (!ctx.hasUI) throw new Error("Host execution requires user approval, but no interactive UI is available.");
+      if (isHostRecoveryState(state)) {
+        await validateRecoveryRoot(identity, approved.token);
+        assertCurrent(identity);
+        const currentState = stateOf(deps);
+        if (!isHostTarget(input) || approved.fingerprint !== hostRequestFingerprint(definition.name, input, identity.cwd)
+          || currentState.status !== approved.status || deps.provider.hostExecutionToken?.() !== approved.token
+          || !deps.config.routeTools.includes(definition.name as RoutedToolName) || !ctx.hasUI) {
+          throw new Error("Host execution was not approved for this exact tool call.");
+        }
+        const currentError = hostRequestError(definition.name, input, currentState);
+        if (currentError) throw new Error(currentError);
+      }
     } else clearApproval(id);
     return definition.execute(id, withoutExecutionTarget(input), signal, onUpdate, ctx);
   };
@@ -314,14 +367,17 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         const active = isSandboxActive(state, deps.provider);
         const targetHost = isHostTarget(params);
 
-        if (!deps.config.routeTools.includes(name)) throw routeError(name);
+        if (!deps.config.routeTools.includes(name)) {
+          clearApproval(id);
+          throw routeError(name);
+        }
         if (hostMode) {
           return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, false, identity);
         }
-        if (!active) throw unavailableError(state);
         if (targetHost) {
           return executeHost(hostDefinition, id, params, signal, onUpdate, ctx, true, identity);
         }
+        if (!active) throw unavailableError(state);
 
         if (name === "read" && deps.config.allowSkillReads) {
           const hostSkillPath = await access.resolve(
@@ -382,34 +438,48 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         return { block: true, reason: `Tool ${tool} is excluded from pi-microsandbox routing by configuration.` };
       }
       if (hostMode) return;
-      if (!active) {
-        return { block: true, reason: unavailableError(state).message };
+      if (input.execution_target !== "host") {
+        if (!active) return { block: true, reason: unavailableError(state).message };
+        return;
       }
-      if (input.execution_target !== "host") return;
-      if (!deps.config.allowHostExecution) {
-        return { block: true, reason: "Host execution is disabled by pi-microsandbox configuration." };
-      }
+      const error = hostRequestError(tool, input, state);
+      if (error) return { block: true, reason: error };
       if (!ctx.hasUI) {
         return {
           block: true,
           reason: "Host execution requires user approval, but no interactive UI is available.",
         };
       }
+      // Capture authorization before any filesystem/UI await, never from later mutable input.
+      const id = event.toolCallId;
+      const fingerprint = hostRequestFingerprint(tool, input, identity.cwd);
+      const token = deps.provider.hostExecutionToken?.();
+      const status = state.status;
+      const changed = () => currentIdentity() !== identity || execution && !execution.isReady()
+        || event.toolCallId !== id || event.toolName !== tool || event.input !== input
+        || asRecord(event.input).execution_target !== "host"
+        || hostRequestFingerprint(tool, asRecord(event.input), identity.cwd) !== fingerprint
+        || stateOf(deps).status !== status || deps.provider.hostExecutionToken?.() !== token
+        || !ctx.hasUI || !deps.config.routeTools.includes(tool as RoutedToolName)
+        || hostRequestError(tool, asRecord(event.input), stateOf(deps));
+      const changedResult = () => ({ block: true, reason: "Session execution context or host request/readiness/configuration/runtime changed while awaiting approval; request again." });
+      const recovery = isHostRecoveryState(state);
+      if (recovery) {
+        try { await validateRecoveryRoot(identity, token); }
+        catch { return { block: true, reason: HOST_RECOVERY_ROOT_ERROR }; }
+        if (changed()) return changedResult();
+      }
       // Keep RPC prompts plain, and make denial the default in the TUI selector.
       const message = hostApprovalMessage(tool, input, identity.cwd, ctx.mode === "tui" ? ctx.ui.theme : undefined);
       const choice = await ctx.ui.select(`Allow host execution?\n\n${message}`, ["No", "Yes"]);
-      if (currentIdentity() !== identity || execution && !execution.isReady()) {
-        clearApproval(event.toolCallId);
-        return { block: true, reason: "Session execution context changed while awaiting host approval." };
+      if (changed()) return changedResult();
+      if (choice !== "Yes") return { block: true, reason: "Host execution was denied by the user." };
+      if (recovery) {
+        try { await validateRecoveryRoot(identity, token); }
+        catch { return { block: true, reason: HOST_RECOVERY_ROOT_ERROR }; }
+        if (changed()) return changedResult();
       }
-      if (choice !== "Yes") {
-        clearApproval(event.toolCallId);
-        return { block: true, reason: "Host execution was denied by the user." };
-      }
-      approvedHostCalls.set(
-        event.toolCallId,
-        { identity, fingerprint: hostRequestFingerprint(tool, input, identity.cwd) },
-      );
+      approvedHostCalls.set(id, { identity, fingerprint, status, token });
       return;
     }
 

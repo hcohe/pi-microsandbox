@@ -1,4 +1,4 @@
-import { prepareProjectSettings, projectSettingsQuestion, projectCandidateAvailable, discardProjectCandidates, type ProjectSettingsCandidate, type PreparedProjectSettingsCandidate } from "./settings-project.ts";
+import { prepareProjectSettings, projectSettingsQuestion, discardProjectCandidates, type ProjectSettingsCandidate, type PreparedProjectSettingsCandidate } from "./settings-project.ts";
 import { SettingsConflictError } from "./settings-conflict.ts";
 import { visibleWidth, matchesKey, decodeKittyPrintable, isKeyRelease, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -196,7 +196,7 @@ export class ControlPanel implements Component, Focusable {
       status,
       { id: "configuration/sources", label: "Sources", children: [
         ...Object.entries(this.#paths).map(([scope, path]) => ({ id: `source/${scope}`, label: `${settingsSourceLabel(scope)} target`, value: path })),
-        { id: "precedence", label: "Inheritance", value: this.#paths.worktree ? "default → environment → Global → Project → Worktree → Session" : "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host cwd is read/write." },
+        { id: "precedence", label: "Inheritance", value: "default → environment → Global → Project → Session", detail: "Each change is applied or canceled before another edit. Arrays replace lower lists; entry edits preserve scope isolation. Host cwd is read/write." },
         ...this.#warnings.map((warning, index) => ({ id: `warning/${index}`, label: "Warning", value: warning })),
       ] },
       { id: "configuration/actions", label: "Actions", children: [ ...(this.#feedback ? [this.#feedbackRow()] : []), ...this.#actions()] },
@@ -371,13 +371,13 @@ export class ControlPanel implements Component, Focusable {
         }
       }
     };
-    // Exactly one destination menu, No selected; selecting Yes commits THIS already-bound draft.
+    // One shared Project review, No selected; Apply commits only this bound draft.
     const question = projectSettingsQuestion(candidates, undefined, true);
     if (question.length > 48_000) throw new Error("Project review too large");
     this.#page([
-      { id: "cancel-project", label: "No", button: true, instructions: "Allow configuration change? Choose one destination below; only that candidate is authorized. No leaves settings unchanged.", action: () => this.#cancelProposal() },
+      { id: "cancel-project", label: "No", button: true, instructions: "Allow configuration change? Review this shared Project target. No leaves settings unchanged.", action: () => this.#cancelProposal() },
       ...candidates.map((candidate, index) => ({ id: `project-destination:${index}`, label: candidate.label, button: true,
-        instructions: projectSettingsQuestion([candidate], undefined, true), disabled: !projectCandidateAvailable(candidate), action: projectCandidateAvailable(candidate) ? () => apply(candidate) : undefined })),
+        instructions: projectSettingsQuestion([candidate], undefined, true), action: () => apply(candidate) })),
     ], () => this.#cancelProposal());
     return true;
   }
@@ -715,7 +715,6 @@ export async function openControlPanel(ctx: Context, control: MsbControl): Promi
     draft = await settings.open("temporary");
     const paths: Record<string, string> = { temporary: "Memory only (no disk writes)" };
     for (const scope of ["project", "global"] as const) { stage = scope === "project" ? "Project settings" : "Global settings"; const source = await settings.open(scope); paths[scope] = source.path!; source.discard(); }
-    if (await settings.projectDestinations()) { const source = await settings.open("worktree"); paths.worktree = source.path!; source.discard(); }
     const selected = draft;
     if (generation !== currentGeneration) return;
     stage = "interactive overlay";

@@ -7,13 +7,15 @@ export interface DockerfileSource {
   agentRoot: string;
   agentAlias: string;
   cacheDir: string;
-  scope: "host-default" | "host-project" | "host-worktree";
+  scope: "host-default" | "host-project";
   identity: string;
   platform: string;
 }
 export interface BuildEntry { path: string; data?: Buffer; mode: number }
 export const BUILD_LIMITS = { bytes: 32 * 1024 * 1024, entries: 2048, depth: 16 } as const;
 export const BUILD_VERSION = "pi-msb-dockerfile-v1-sdk-0.6.16-public-egress-deny-ingress";
+// VFS needs a second copy of the bundled base for even a single RUN step.
+export const BUILD_ROOT_DISK_MIB = 8192;
 
 export function nativeBuildPlatform(): string {
   if (!["arm64", "x64"].includes(process.arch)) throw new Error("Dockerfile builds require a native ARM64 or AMD64 host");
@@ -101,7 +103,7 @@ export async function snapshotDockerfile(source: Pick<DockerfileSource, "dockerf
   await assertBuildPath(source.agentRoot, context);
   await assertRoot();
   const platform = nativeBuildPlatform();
-  const hash = createHash("sha256").update(JSON.stringify([BUILD_VERSION, builderImage, platform, 2, 4096]));
+  const hash = createHash("sha256").update(JSON.stringify([BUILD_VERSION, builderImage, platform, 2, 4096, BUILD_ROOT_DISK_MIB]));
   for (const entry of entries) {
     hash.update(JSON.stringify([entry.path, entry.mode, entry.data?.length ?? null]));
     if (entry.data) hash.update(entry.data);
