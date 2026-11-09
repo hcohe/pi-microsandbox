@@ -72,8 +72,17 @@ It reads the actual scoped Dockerfile, returns authoritative host paths, and giv
 a directly usable bundled digest-pinned `FROM` starter. Propose a complete
 replacement with `msb_dockerfile_set` using the same scope and `content`, and/or
 a relative `context` patch. Getter `contextPaths` requests bounded context text. Its
-No-first per-proposal review includes the exact path, full escaped replacement
-diff and build/public-egress/restart consequences. Approved changes publish each file atomically (not jointly/crash atomic)
+No-first per-proposal review combines scope and a compact unified diff in one
+approval: No / This worktree / All worktrees at supported checkout roots, or
+No / Apply for Global/cwd-local. The TUI review stays inline in the normal
+editor/approval area, not floating over chat. Previews switch with the named
+destination, with themed Dockerfile syntax, wrapping, **Ctrl+N / Ctrl+P** scrolling
+and colored choices below the changed code, separated from a dim shortcut footer
+by whitespace. Only added/removed rows and meaningful file/mode/newline badges
+appear by default; **d** shows full unified context, paths/metadata and all warnings
+(public-network builds, VM restart, persistence and registration effects). RPC
+displays both independent changed-code variants in one plain question.
+Escape/abort denies. Approved changes publish each file atomically (not jointly/crash atomic)
 and reload settings only after the whole approved bundle is confirmed, building/importing and restarting with the new image when
 selected. This requires no blanket host execution permission or host-shell recipe.
 No UI/denial/stale approval means no write/reload; unchanged is a no-op.
@@ -82,6 +91,12 @@ Off/autoStart can defer activation, and build failures leave saved content witho
 confirmed activation. Use a separately approved `msb_config_set` image inheritance
 change if needed; never edit other scopes silently or weaken protection.
 [Tool contract](tools.md#msb_dockerfile_get--msb_dockerfile_set).
+
+Make the smallest edit needed, with minimal Dockerfile instructions. Do not add
+comments or explanatory boilerplate; explain changes and scope in the normal
+response, not the file. Preserve unrelated existing content and functional parser
+directives. For new files start FROM the bundled digest pin, adding only needed
+instructions.
 
 Tool Dockerfiles are bounded to 32 KiB valid UTF-8 (no unsupported controls),
 never silently truncated. Content and full diffs are intentionally exposed to the
@@ -138,9 +153,8 @@ be a generated local reference or custom image):
 
 ```dockerfile
 FROM ghcr.io/hcohe/pi-microsandbox:1.1.0
-RUN apt-get update && apt-get install -y --no-install-recommends jq \
+RUN apt-get update && apt-get install -y --no-install-recommends cowsay \
     && rm -rf /var/lib/apt/lists/*
-# COPY helper.sh /usr/local/bin/helper  # only from this scope's build-context/
 ```
 
 Use a verified `@sha256:...` suffix for reproducibility; the tag above is only a
@@ -192,8 +206,8 @@ built-image runtime validation/start failures **block routed execution even with
 Errors intentionally omit build output to avoid leaking context data.
 
 Mutable `FROM` tags and external package downloads are **not** refreshed while the
-finished-image cache is reused. Prefer pinned dependencies. To explicitly refresh,
-change a Dockerfile comment (not just its mtime) and reload settings. There is no
+finished-image cache is reused. Prefer pinned dependencies; update the relevant
+pin or build input when needed. Mtime alone does not rebuild. There is no
 manual rebuild button or persistent guest layer cache in this MVP. Old generated
 images are subject to ordinary Microsandbox image-cache management.
 

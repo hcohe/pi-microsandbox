@@ -39,17 +39,27 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 
 ## Add a package to my image
 
-> Call msb_dockerfile_get with scope project first. Show this Project's current
-> Dockerfile, exact host-owned Dockerfile/context locations and bundled pinned
-> FROM starter with jq. Propose the full replacement via msb_dockerfile_set in
-> project scope; let me review the exact file diff and build/public-egress/restart
-> impact. Don't use host commands, grant blanket host access or embed secrets.
+> Make cowsay available for this project. Call msb_dockerfile_get with scope
+> project first. Make the smallest Dockerfile edit needed, using minimal
+> instructions; do not add comments or explanatory boilerplate. Preserve unrelated
+> existing content and functional parser directives. For a new file start FROM
+> the bundled digest pin and add only the requested package instructions, without
+> unrelated packages. Explain the change and recommended worktree scope in
+> your normal response, not the file. Propose the complete resulting content via
+> msb_dockerfile_set; let me review only added/removed code and choose scope
+> below it in one approval. Keep technical warnings and full context in d details. Don't use host
+> commands, grant blanket host access or embed secrets.
 > Explain any image/higher-scope blocker and propose image inheritance separately
 > with msb_config_set approval. After saving, distinguish whether the new image is
 > active, shadowed, deferred or failed to activate.
 
-At supported checkout roots, Project setter asks the human to choose shared
-Repository or only this Worktree, then reviews the exact selected bundle. Getter
+At supported checkout roots, Project setter uses one default-No review with
+**This worktree / All worktrees**, identifying the same named Worktree/Repository
+as config. The TUI review stays inline, with Ctrl+N/P scrolling; switching
+previews the independent target changes above the colored choices. Blank spacers
+separate code, choices and dim shortcuts; d reveals full context and all warnings. Enter approves
+that destination without another question. RPC includes both distinct diffs.
+Global/cwd-local uses No / Apply. Escape/abort saves nothing. Getter
 Project defaults to repository; request `destination:"worktree"` when editing the
 checkout override. Neither config nor source destination choices copy existing
 sources. Shared first saves explicitly register immutable config metadata, never

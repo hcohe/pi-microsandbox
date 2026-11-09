@@ -40,8 +40,11 @@ async function fixture(t: TestContext) {
   registerDockerfileTools({ registerTool(value: any) { definitions.set(value.name, value); } } as any, control, execution.context);
   const ctx: any = { cwd, hasUI: true, mode: "rpc", sessionManager: { getSessionId: () => "dockerfile" }, ui: {
     async select(text: string, choices: string[]) {
-      if (choices.length === 3) { await duringDestination?.(); return destination === "cancel" ? "No" : choices[destination === "repository" ? 1 : 2]; }
-      approvals++; question = text; assert.deepEqual(choices, ["No", "Yes"]); await duringApproval?.(); return answer; },
+      approvals++; question = text; assert.equal(choices[0], "No");
+      await duringDestination?.(); await duringApproval?.();
+      if (answer !== "Yes") return answer;
+      if (choices.length === 3) return destination === "cancel" ? "No" : choices.find((choice) => choice.startsWith(destination === "repository" ? "All worktrees" : "This worktree"));
+      assert.match(choices[1]!, /^Apply/); return choices[1]; },
   } };
   const run = async (set: boolean, args: unknown, signal?: AbortSignal) => (await definitions.get(set ? "msb_dockerfile_set" : "msb_dockerfile_get").execute("test", args, signal, undefined, ctx)).details;
   return { root, cwd, agentDir, input, execution, control, definitions, ctx, run,
@@ -79,7 +82,7 @@ for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${s
   const missing = await f.run(false, { scope });
   assert.equal(missing.outcome, "inspected"); assert.equal(missing.exists, false); assert.equal(missing.content, null);
   assert.equal(missing.baseImage, DEFAULT_CONFIG.image); assert.ok(missing.minimalDockerfile.startsWith(from));
-  assert.match(missing.minimalDockerfile, /apt-get install.*jq/);
+  assert.equal(missing.minimalDockerfile, from);
   assert.deepEqual(await tree(f.root), before); assert.deepEqual(f.counts(), { approvals: 0, reloads: 0 });
   const result = await f.run(true, { scope, content: from });
   assert.equal(result.saved, true); assert.equal(result.reloaded, true); assert.equal(result.outcome, "saved_shadowed");
@@ -88,15 +91,17 @@ for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${s
   assert.equal((await fs.stat(path)).mode & 0o777, 0o600);
   assert.equal((await fs.stat(dirname(path))).mode & 0o777, 0o700);
   await assert.rejects(fs.stat(missing.paths[scope].config), { code: "ENOENT" });
-  assert.match(f.question(), /Scope: /); assert.ok(f.question().includes(JSON.stringify(path)));
-  for (const pattern of [/original|missing/, /proposed/, /PUBLIC/, /restart/, /transcript/, /NEVER embed/, /explicit image/, /msb_config_set/]) assert.match(f.question(), pattern);
+  assert.match(f.question(), /Scope: Global|Scope: Project · cwd-local/);
+  assert.ok(!f.question().includes(path), "long canonical paths belong in optional TUI details/getter, not main review");
+  for (const pattern of [/Dockerfile \[create\]/, /\+FROM /]) assert.match(f.question(), pattern);
+  assert.doesNotMatch(f.question(), /--- \/dev\/null|\+\+\+ b\/Dockerfile|@@|public network|restart|guest-local state/);
   const read = await f.run(false, { scope }); assert.equal(read.content, from); assert.equal(read.exists, true);
   await fs.chmod(path, 0o640); const stat = await fs.stat(path);
   assert.equal((await f.run(true, { scope, content: from })).outcome, "no_op");
   assert.equal((await fs.stat(path)).mtimeMs, stat.mtimeMs); assert.equal((await fs.stat(path)).mode, stat.mode);
   assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
   assert.equal((await f.run(true, { scope, content: from + "# updated\n" })).saved, true);
-  assert.ok(f.question().includes(`- ${JSON.stringify(from.split("\n")[0])}`)); assert.ok(f.question().includes('+ "# updated"'));
+  assert.ok(!f.question().includes(` ${from.split("\n")[0]}`), "unchanged FROM stays in details, not main review"); assert.ok(f.question().includes("+# updated"));
   assert.equal(await fs.readFile(path, "utf8"), from + "# updated\n");
   assert.deepEqual(f.counts(), { approvals: 2, reloads: 2 });
 });
@@ -473,8 +478,8 @@ for (const destination of ["repository", "worktree"] as const) test(`Dockerfile 
   await assert.rejects(fs.lstat(join(dirname(other), "build-context")), { code: "ENOENT" });
   if (destination === "repository") {
     assert.deepEqual(JSON.parse(JSON.stringify(readRawConfig(await fs.readFile(target, "utf8"))._repository)), targets.repository);
-    assert.match(f.question(), /immutable host-owned repository association/);
-    assert.match(f.question(), /formatting\/comments/);
+    assert.doesNotMatch(f.question(), /immutable host-owned repository association|formatting\/comments/);
+    assert.match(saved.review.registration.consequence, /immutable host-owned repository association/);
     assert.equal((await resolveConfig({ ...f.input, cwd: main })).imageBuild?.dockerfile, join(dirname(target), "Dockerfile"));
     const future = join(f.root, "future-worktree");
     execFileSync("git", ["-C", main, "worktree", "add", "-q", "-b", "future", future]);
@@ -526,7 +531,7 @@ test("Dockerfile context PATCH create/read/update/delete preserves binary and un
   const baseline = await fs.stat(join(root, "binary.dat"));
   const edits = [{ path: ".dockerignore", content: "*.dat\n" }, { path: "scripts/start.sh", content: "#!/bin/sh\necho hello\n", executable: true }, { path: "delete-me", content: "temporary\n" }];
   const saved = await f.run(true, { scope: "global", content: from, context: edits });
-  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.match(f.question(), /executableBefore/); assert.match(f.question(), /scripts\/start.sh/);
+  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.match(f.question(), /executable/); assert.match(f.question(), /scripts\/start.sh/);
   assert.equal((await fs.stat(join(root, "scripts"))).mode & 0o777, 0o700);
   assert.equal((await fs.stat(join(root, ".dockerignore"))).mode & 0o777, 0o600);
   assert.equal((await fs.stat(join(root, "scripts", "start.sh"))).mode & 0o777, 0o700);
@@ -539,7 +544,7 @@ test("Dockerfile context PATCH create/read/update/delete preserves binary and un
   assert.ok(!opened.some((path) => path.endsWith("binary.dat") || path.endsWith("unrequested.txt")));
   t.mock.restoreAll();
   const result = await f.run(true, { scope: "global", context: [{ path: "delete-me", content: null }, { path: "scripts/start.sh", content: edits[1]!.content, executable: false }] });
-  assert.equal(result.saved, true, JSON.stringify(result)); assert.match(f.question(), /DELETE entire file/);
+  assert.equal(result.saved, true, JSON.stringify(result)); assert.match(f.question(), /\[delete\]/);
   await assert.rejects(fs.lstat(join(root, "delete-me")), { code: "ENOENT" });
   assert.equal((await fs.stat(join(root, "scripts", "start.sh"))).mode & 0o777, 0o600);
   assert.deepEqual(await fs.readFile(join(root, "binary.dat")), Buffer.from([0, 255, 128]));
@@ -747,4 +752,110 @@ for (const externalName of ["created.bin", "CREATED.BIN"]) test(`Dockerfile cont
   assert.equal(publications, 0); assert.equal(f.counts().reloads, 0);
   assert.deepEqual(await fs.readFile(externalPath), bytes); assert.equal((await lstat(externalPath)).ino, externalInode);
   assert.ok(!(await fs.readdir(dirname(root))).some((name) => name.startsWith(".dockerfile-")));
+});
+
+for (const destination of ["repository", "worktree"] as const) test(`Dockerfile combined Project approval prepares both own baselines once and saves only chosen ${destination}`, async (t) => {
+  const f = await fixture(t); await realLinkedCheckout(f);
+  const paths = await hostConfigPaths(f.input);
+  for (const [config, original] of [[paths.project, "repository-original"], [paths.worktree!, "worktree-original"]]) {
+    await fs.mkdir(join(dirname(config!), "build-context"), { recursive: true });
+    await fs.writeFile(join(dirname(config!), "Dockerfile"), from + `RUN ${original}\n`);
+    await fs.writeFile(join(dirname(config!), "build-context", "setup.sh"), `echo ${original}\n`);
+    await fs.writeFile(join(dirname(config!), "build-context", `${original}.txt`), original!);
+  }
+  const opened: Array<string | undefined> = [];
+  const open = f.control.openDockerfile!;
+  f.control.openDockerfile = async (scope, target) => { opened.push(target); return open(scope, target); };
+  f.configure({ answer: "Yes", destination, duringApproval: async () => {
+    assert.deepEqual(opened, ["worktree", "repository"], "both candidates must be pinned/prepared before the one question");
+    const review = f.question();
+    const local = review.slice(review.indexOf("This worktree"), review.indexOf("All worktrees"));
+    const shared = review.slice(review.indexOf("All worktrees"));
+    assert.match(local, /-RUN worktree-original/); assert.match(local, /-echo worktree-original/);
+    assert.ok(!local.includes("repository-original")); assert.ok(!local.includes("Register immutable"));
+    assert.match(shared, /-RUN repository-original/); assert.match(shared, /-echo repository-original/);
+    assert.ok(!shared.includes("worktree-original")); assert.doesNotMatch(shared, /Register immutable|Shared on next reload/);
+    assert.ok(!review.includes('"metadata"') && !review.includes("modeBefore") && !review.includes(f.agentDir));
+  } });
+  const content = from + "RUN apt-get update && apt-get install -y --no-install-recommends cowsay\r\n";
+  const saved = await f.run(true, { scope: "project", content, context: [{ path: "setup.sh", content: "echo cowsay", executable: true }] });
+  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
+  const chosen = destination === "repository" ? paths.project : paths.worktree!;
+  const other = destination === "repository" ? paths.worktree! : paths.project;
+  assert.equal(saved.review.target.config, chosen);
+  assert.equal(await fs.readFile(join(dirname(chosen), "Dockerfile"), "utf8"), content, "persist original proposal CRLF bytes, not escaped review text");
+  assert.equal(await fs.readFile(join(dirname(chosen), "build-context", "setup.sh"), "utf8"), "echo cowsay");
+  assert.equal((await fs.stat(join(dirname(chosen), "build-context", "setup.sh"))).mode & 0o777, 0o700);
+  const otherOriginal = destination === "repository" ? "worktree-original" : "repository-original";
+  assert.equal(await fs.readFile(join(dirname(other), "Dockerfile"), "utf8"), from + `RUN ${otherOriginal}\n`);
+  await assert.rejects(fs.lstat(join(dirname(chosen), "build-context", `${otherOriginal}.txt`)), { code: "ENOENT" });
+});
+
+test("Dockerfile combined Project approval shows an unavailable candidate but cannot approve it or copy its source", async (t) => {
+  const f = await fixture(t); await realLinkedCheckout(f);
+  const paths = await hostConfigPaths(f.input);
+  await fs.mkdir(dirname(paths.worktree!), { recursive: true });
+  const unsafe = Buffer.from([0xff, 0xfe]); await fs.writeFile(join(dirname(paths.worktree!), "Dockerfile"), unsafe);
+  let prompts = 0;
+  f.ctx.ui.select = async (question: string, choices: string[]) => {
+    prompts++; assert.match(question, /This worktree[\s\S]*UNAVAILABLE/);
+    assert.equal(choices.length, 2); assert.equal(choices[0], "No"); assert.match(choices[1]!, /^All worktrees/);
+    return choices[1];
+  };
+  const saved = await f.run(true, { scope: "project", content: from });
+  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(prompts, 1);
+  assert.deepEqual(await fs.readFile(join(dirname(paths.worktree!), "Dockerfile")), unsafe);
+  assert.equal(await fs.readFile(join(dirname(paths.project), "Dockerfile"), "utf8"), from);
+});
+
+test("Dockerfile combined Project headless and competing lease remain write-free", async (t) => {
+  const f = await fixture(t); await realLinkedCheckout(f);
+  const before = await tree(f.agentDir).catch(() => null);
+  f.ctx.hasUI = false;
+  const headless = await f.run(true, { scope: "project", content: from });
+  assert.equal(headless.saved, false); assert.equal(f.counts().approvals, 0);
+  f.ctx.hasUI = true;
+  const lease = f.control.settings!.acquireInteraction()!;
+  try {
+    const competing = await f.run(true, { scope: "project", content: from });
+    assert.equal(competing.outcome, "rejected"); assert.equal(competing.saved, false);
+    assert.equal(f.counts().approvals, 0); assert.equal(f.counts().reloads, 0);
+    assert.deepEqual(await tree(f.agentDir).catch(() => null), before);
+  } finally { lease.release(); }
+});
+
+test("Dockerfile setter result text is compact while getter retains source and minimal comment-free guidance", async (t) => {
+  const f = await fixture(t);
+  const output = await f.definitions.get("msb_dockerfile_set").execute("test", { scope: "global", content: from }, undefined, undefined, f.ctx);
+  assert.equal(output.details.saved, true);
+  assert.ok(output.content[0].text.length < 300);
+  for (const field of ["review", "warnings", "metadata", "dockerfileMode"]) assert.ok(!output.content[0].text.includes(`"${field}"`));
+  assert.ok(output.details.review.diff.includes("+FROM "));
+  const read = await f.definitions.get("msb_dockerfile_get").execute("test", { scope: "global" }, undefined, undefined, f.ctx);
+  assert.equal(read.details.content, from); assert.equal(read.details.minimalDockerfile, from);
+  assert.match(read.details.editing, /smallest Dockerfile edit/); assert.match(read.details.editing, /Do not add comments/);
+  assert.match(read.details.editing, /normal response/); assert.match(read.details.editing, /parser directives/);
+  assert.ok(!read.details.lifecycle.includes("change a Dockerfile comment"));
+  assert.match(f.definitions.get("msb_dockerfile_set").description, /smallest Dockerfile edit/);
+  assert.match(f.definitions.get("msb_dockerfile_set").parameters.properties.content.description, /Do not add comments/);
+});
+
+test("Dockerfile combined Project approval retains shared lease through reload and accepts only the reviewed generation", async (t) => {
+  const f = await fixture(t); await realLinkedCheckout(f);
+  const paths = await hostConfigPaths(f.input);
+  f.configure({ answer: "Yes", destination: "repository" });
+  const reload = f.control.reload;
+  let blocked = false;
+  f.control.reload = async (options) => {
+    assert.equal(f.control.settings!.acquireInteraction(), undefined, "lease must remain held after saving and through reload");
+    const competing = await f.run(true, { scope: "global", content: from });
+    assert.equal(competing.saved, false); assert.equal(competing.outcome, "rejected"); blocked = true;
+    return reload(options);
+  };
+  const content = "#syntax=docker/dockerfile:1\n" + from + "# existing functional/local comments are not backend-banned\nRUN echo ready\n";
+  const saved = await f.run(true, { scope: "project", content });
+  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(blocked, true);
+  assert.equal(await fs.readFile(join(dirname(paths.project), "Dockerfile"), "utf8"), content);
+  assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
+  const released = f.control.settings!.acquireInteraction(); assert.ok(released); released.release();
 });

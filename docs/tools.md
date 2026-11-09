@@ -53,6 +53,12 @@ identity is known: no directories, writes, commands/credential resolution, SDK,
 VM, build or reload. Host-owned repository catalog metadata may be read; unsafe
 sources return a bounded generic error, not raw host errors or guessed paths.
 
+Make the **smallest Dockerfile edit needed**, using minimal instructions. Do not
+add comments or explanatory boilerplate: put explanations and scope recommendations
+in the normal response, not the file. Preserve unrelated existing content and
+functional parser directives (`#syntax`/`#escape`). New Dockerfiles start with only
+`FROM` the bundled digest pin, plus the instructions actually needed.
+
 Setter accepts optional full Dockerfile `content` and/or a `context` **PATCH**:
 
 ```json
@@ -76,9 +82,12 @@ At least one proposal is required. Context payload/read limits: 16 files,
 context review text. Dockerfile remains 32 KiB. All final sources together obey
 32 MiB / 2048 entries (including Dockerfile/directories) / depth 16.
 
-Project setter first offers the **same named human Repository vs Worktree choice
-as config Project** at supported checkout roots, before opening a target baseline;
-a separate exact-target review follows. The agent cannot choose setter destination.
+Project setter combines destination and diff in **one approval** at supported
+checkout roots: **No / This worktree (named Worktree) / All worktrees (named
+Repository)**, matching config destination semantics. Independent baselines are
+prepared before review; switching destination previews that target’s own changes.
+Enter approves only the previewed destination, with no second prompt. RPC/select-only
+adapters show both distinct diffs in one question; unavailable targets cannot be approved. The agent cannot choose setter destination.
 Repository affects current/future registered worktrees on reload/start, subject to
 higher overrides. A first shared save also registers immutable host-owned
 `_repository` in the exact shared `config.toml`, explicitly reviewed in the same
@@ -92,10 +101,24 @@ Global; explicit scope `image` and Session `image` can shadow sources. Inspect
 These are owned source tools, **not** host Bash/write tools: no host execution
 permission or blanket host access is required.
 
-Each changed proposal requires an interactive TUI/RPC **No-first** approval showing
-the exact scope/destination/paths, every original/proposed line (JSON-quoted),
-context creates/deletes/mode changes, repository registration consequences, and build,
-public-egress, transcript and VM restart warnings. Approval covers saving AND
+Each changed proposal requires an interactive TUI/RPC **No-first** approval.
+Global/cwd-local proposals offer **No / Apply**. Main review shows only all added
+and removed code rows, concise file/create/delete/executable badges, actual
+permission changes and meaningful CR/no-final-newline data. Patch headers, hunk
+ranges and unchanged context are omitted there, never changed code—even when code
+looks like a patch header. Literal backslashes remain unchanged; actual control
+characters are escaped.
+The TUI review stays inline in the normal editor/approval area, never floating over chat.
+Themed syntax and added/removed colors remain visible, with hard wrapping and
+**Ctrl+N / Ctrl+P** scrolling (PgDown/PgUp also work where delivered).
+Below the code, a blank spacer separates colored **Apply?** choices; another
+spacer separates the dim keyboard footer. No is the default; Escape/abort denies.
+**d** reveals all warnings/consequences, exact paths/permissions/registration
+metadata, and the full unified review with two context lines. Network, restart,
+transcript, persistence and shared-registration explanations stay in details,
+not repeated in the main review. RPC/select-only adapters show both independent
+changed-code variants before one plain approval, without ANSI or a warning wall.
+Secrets must never enter source or transcript. Approval covers saving AND
 settings reload, building/importing the new content image and recreating a running
 sandbox if selected. Off/environment disable and autoStart are respected. Denial,
 no approving UI, dismissal, cancellation or stale identity before commit means no
@@ -104,7 +127,7 @@ adoption. The approval guard is checked again after build/import, inside the run
 queue, before SDK creation and before publishing/persisting activation. Already-started
 SDK create/import operations may finish, but cancelled results cannot be adopted.
 An unchanged bundle is `no_op`: no save approval, filesystem mutation or reload
-(Project may still need destination selection), and file
+(a mixed Project proposal may offer one unchanged destination), and file
 mode/mtime are preserved. Reads/previews/denials never create policy directories.
 
 The target, cwd/agent alias/ancestor identities, authoritative project identity,
