@@ -7,6 +7,15 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+const renderer = process.argv[3];
+assert.ok(["main", "alt"].includes(renderer), "expected main or alt renderer");
+let phaseCount = 0;
+const phase = (label) => {
+  if (process.env.PI_MSB_RUNTIME_PHASES === "1" && phaseCount++ < 64) {
+    process.stderr.write(`PI_MSB_RUNTIME_PHASE ${renderer} ${label}\n`);
+  }
+};
+phase("setup");
 const root = await realpath(await mkdtemp("/tmp/msb-panel-runtime-"));
 try {
   const pkg = process.argv[2];
@@ -31,13 +40,16 @@ try {
   initTheme("dark");
   const require = createRequire(join(pkg, "package.json"));
   const tui = await import(pathToFileURL(require.resolve("@earendil-works/pi-tui")));
+  phase("imports-ready");
   const loaded = await loadExtensions([join(import.meta.dirname, "control-panel-runtime-extension.ts")], cwd);
+  phase("extension-loaded");
   assert.deepEqual(loaded.errors, []);
   const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, { getSessionId: () => "ui-runtime", getEntries: () => [] }, {});
   const command = loaded.extensions[0].commands.get("msb");
   assert.ok(command);
   let savedScopes = false;
-  for (const Renderer of [tui.TuiMainScreen, tui.TuiAltScreen]) {
+  for (const Renderer of [renderer === "main" ? tui.TuiMainScreen : tui.TuiAltScreen]) {
+    phase("renderer-start");
     let input;
     let output = "";
     let panel;
@@ -74,6 +86,7 @@ try {
     ui.start();
     try {
       for (let launch = 0; launch < 2; launch++) {
+        phase(`overlay-open-${launch}`);
         panel = undefined;
         const opening = command.handler("", runner.createCommandContext());
         // Attach a rejection handler immediately so failures remain assertion errors.
@@ -83,6 +96,7 @@ try {
         assert.equal(failure, undefined);
         assert.deepEqual(notices, []);
         assert.ok(panel, "/msb must reach the real ui.custom overlay");
+        phase(`overlay-ready-${launch}`);
         await loaded.extensions[0].commands.get("msb-fixture-verify-origin").handler("", runner.createCommandContext());
         assert.equal(ui.hasOverlay(), true);
         assert.equal(panel.focused, true);
@@ -191,6 +205,7 @@ try {
             await key("\x1b");
           }
           savedScopes = true;
+          phase("scopes-saved");
           await loaded.extensions[0].commands.get("msb-fixture-verify-origin").handler("", runner.createCommandContext());
           await loaded.extensions[0].commands.get("msb-fixture-stop").handler("", runner.createCommandContext());
         }
@@ -209,6 +224,7 @@ try {
         // Escape the masked input, then q closes directly from the clean entry form.
         await key("\x1b"); await key("q");
         await opening;
+        phase(`overlay-closed-${launch}`);
         assert.equal(ui.hasOverlay(), false);
         assert.equal(editor.focused, true);
         assert.equal(panel.focused, false);
@@ -224,7 +240,9 @@ try {
       const inspect = runner.getToolDefinition("msb_config_get");
       const setter = runner.getToolDefinition("msb_config_set");
       assert.ok(inspect); assert.ok(setter);
+      phase("inspect-start");
       const inspection = await inspect.execute("inspect", {}, undefined, undefined, runner.createContext());
+      phase("inspect-done");
       assert.equal(inspection.details.outcome, "inspected");
       assert.deepEqual(Object.keys(inspection.details.layers).sort(), ["global", "project", "session", "worktree"]);
       assert.deepEqual(setter.parameters.properties.scope.anyOf.map((item) => item.const), ["session", "project", "global"]);
@@ -258,6 +276,7 @@ try {
       const invalid = await setter.execute("invalid", { scope: "session", operations: [{ path: "show_footer", operation: "set", value: true }, { path: "cpus", operation: "set", value: 0 }] }, undefined, undefined, runner.createContext());
       assert.equal(invalid.details.validation[0].operationIndex, 1); assert.equal(invalid.details.validation[0].path, "cpus");
       for (const action of ["default-cancel", "escape", "ctrl-c", "approve", "apply", "restart", "batch", "abort", "narrow-approve", "secret-hosts", "secret-rotation", "long-warnings", "host-no-op", "network-reload-failed", "network-restore"]) {
+        phase(`proposal-start-${action}`);
         selection = undefined;
         const previousCustomCalls = customCalls;
         const abort = new AbortController();
@@ -349,6 +368,7 @@ try {
           key("\x1b[B"); assert.match(tui.stripTerminalSequences(panel.render(80).join("\n")), /→ Yes/); key("\r");
         }
         const result = await pending;
+        phase(`proposal-done-${action}`);
         const modelText = result.content[0].text;
         assert.doesNotMatch(modelText, /\x1b|PRIVATE_SENTINEL/);
         assert.doesNotMatch(JSON.stringify(result.details), /PRIVATE_SENTINEL/);
@@ -392,6 +412,7 @@ try {
       await loaded.extensions[0].commands.get("msb-fixture-stop").handler("", runner.createCommandContext());
     } finally { ui.stop(); }
   }
+  phase("provenance-start");
   // Actual entry registration provenance, including symlink loading and a duplicate-winning extension.
   const packageAlias = join(root, "package-link");
   await symlink(join(import.meta.dirname, ".."), packageAlias);
@@ -415,11 +436,16 @@ try {
       }
     }
   }
+  phase("provenance-done");
   const policy = await readFile(join(canonicalAgent, "pi-microsandbox/default.toml"), "utf8");
   assert.match(policy, /^host_env = "RUNTIME_HOST_ENV_SOURCE"$/m);
   assert.ok(policy.includes(`host_cmd = ${JSON.stringify('printf %s "$RUNTIME_COMMAND_TOKEN"')}`));
   assert.doesNotMatch(policy, /^value\s*=/m);
   assert.match(policy, /^show_footer = false$/m);
   assert.match(await readFile(join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml"), "utf8"), /^show_footer = true$/m);
-  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, regular/fullscreen render, themed per-change scope buttons, masked input, native No/Yes config approval, complete masked warning-free titles/agent-text-warnings/quiet-human-results/saved-not-activated/default-No/Escape/abort/immediate-long-review-consent/provenance-collision-gate and focus teardown (fake SDK)`);
-} finally { await rm(root, { recursive: true, force: true }); }
+  console.log(`PASS ${JSON.parse(await readFile(join(pkg, "package.json"), "utf8")).version}: real /msb loader/context/custom/theme, ${renderer} render, themed per-change scope buttons, masked input, native No/Yes config approval, complete masked warning-free titles/agent-text-warnings/quiet-human-results/saved-not-activated/default-No/Escape/abort/immediate-long-review-consent/provenance-collision-gate and focus teardown (fake SDK)`);
+} finally {
+  phase("cleanup-start");
+  await rm(root, { recursive: true, force: true });
+  phase("cleanup-done");
+}

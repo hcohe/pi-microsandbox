@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, parseTomlConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
 
-async function fixture(t: TestContext) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-msb-config-worktree-")));
+async function fixture(t: TestContext, parent = tmpdir()) {
+  const root = await realpath(await mkdtemp(join(parent, "pi-msb-config-worktree-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const main = join(root, "repository");
   const linked = join(root, "external", "checkout");
@@ -87,7 +88,9 @@ publish_ports = []
 });
 
 test("host config nested worktrees remain cwd-local without inheriting root policies or changing workspace checks", async (t) => {
-  const f = await fixture(t);
+  // Linux /tmp is reserved in the guest; use the checkout to reach the
+  // distinct project-mount shadowing check rather than that earlier guard.
+  const f = await fixture(t, fileURLToPath(new URL("../../", import.meta.url)));
   const cwd = join(f.linked, "nested");
   await mkdir(cwd);
   await f.save(f.paths.project, "cpus = 2");
