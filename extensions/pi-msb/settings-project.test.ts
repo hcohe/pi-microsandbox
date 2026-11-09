@@ -41,7 +41,7 @@ async function fixture(t: TestContext) {
 }
 const labels = ["No", "Apply shared Project (pi-microsandbox)"];
 
-test("settings Project shared save atomically catalogs metadata, covers future external worktrees, and ignores legacy local precedence", async (t) => {
+test("settings Project shared save atomically catalogs metadata, covers future external worktrees", async (t) => {
   const f = await fixture(t);
   await assert.rejects(readdir(f.input.agentDir!), { code: "ENOENT" });
   const initialTargets = await hostConfigTargets(f.input);
@@ -53,8 +53,6 @@ test("settings Project shared save atomically catalogs metadata, covers future e
   assert.equal((await resolveConfig({ ...f.input, cwd: f.main })).config.cpus, 3);
   const future = join(f.root, "new", "ephemeral"); await f.register(future, "new-registration");
   assert.equal((await resolveConfig({ ...f.input, cwd: future })).config.cpus, 3);
-  const legacy = (await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!;
-  await mkdir(dirname(legacy), { recursive: true }); await writeFile(legacy, "cpus = 5\n");
   const shadowed = await f.save("project", "cpus", 6);
   assert.deepEqual(shadowed.result.shadowed, []);
   assert.equal((await resolveConfig(f.input)).config.cpus, 6);
@@ -73,12 +71,10 @@ test("settings Project shared save atomically catalogs metadata, covers future e
   assert.equal((await resolveConfig({ ...f.input, cwd: nested })).config.cpus, 6);
 });
 
-test("settings Project shared save from main uses the same catalog artifact; main cwd override is never silently migrated", async (t) => {
+test("settings Project shared save from main uses the same catalog artifact", async (t) => {
   const f = await fixture(t);
   const input = { ...f.input, cwd: f.main };
   const paths = await hostConfigPaths(input);
-  const legacy = (await hostConfigTargets(input)).ignoredLegacyPaths[0]!;
-  await mkdir(dirname(legacy), { recursive: true }); await writeFile(legacy, "cpus = 7\n");
   const editor = new SettingsEditor(input, "main"); const draft = await editor.open("project"); draft.set("cpus", 2);
   const options = await prepareProjectSettings(draft, (candidate) => candidate.preview());
   const candidates = options;
@@ -88,7 +84,6 @@ test("settings Project shared save from main uses the same catalog artifact; mai
   assert.equal(paths.project, f.paths.project);
   assert.equal((await resolveConfig(input)).config.cpus, 2);
   assert.equal((await resolveConfig(f.input)).config.cpus, 2);
-  assert.equal(await readFile(legacy, "utf8"), "cpus = 7\n");
   discardProjectCandidates(candidates);
 });
 
@@ -111,7 +106,7 @@ test("repository catalog survives deleted checkout .git, rejects root conflicts,
   await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
 });
 
-test("repository catalog refuses invalid metadata/hash, symlinked catalog records, oversized config and nonreciprocal registered checkouts", async (t) => {
+test("repository catalog refuses invalid metadata/path, symlinked catalog records, oversized config and nonreciprocal registered checkouts", async (t) => {
   const f = await fixture(t); await f.save("project", "cpus", 4);
   const original = await readFile(f.paths.project, "utf8");
   await writeFile(f.paths.project, original.replace("version = 1", "version = 2"));
@@ -119,7 +114,7 @@ test("repository catalog refuses invalid metadata/hash, symlinked catalog record
   await writeFile(f.paths.project, "x".repeat(1024 * 1024 + 1));
   await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
   await writeFile(f.paths.project, original);
-  const fake = join(dirname(dirname(f.paths.project)), "0".repeat(64)); await mkdir(fake); await writeFile(join(fake, "config.toml"), original);
+  const fake = join(dirname(dirname(f.paths.project)), "wrong-record"); await mkdir(fake); await writeFile(join(fake, "config.toml"), original);
   await assert.rejects(resolveConfig(f.input), /could not be safely verified/); await rm(fake, { recursive: true });
   const saved = join(f.root, "saved"); await rename(dirname(f.paths.project), saved); await symlink(saved, dirname(f.paths.project));
   await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
@@ -166,7 +161,7 @@ for (const mode of ["tui", "rpc"]) test(`settings Project ${mode} exact No-first
   const ctx = { hasUI: true, mode, cwd: f.linked, sessionManager: { getSessionId: () => "one" }, ui: {
     theme: { fg: (_role: string, text: string) => text, bold: (text: string) => text },
     select: async (question: string, choices: string[], options: any) => {
-      calls++; assert.deepEqual(choices, labels); assert.ok(options.signal); assert.match(question, /Settings file:.*repositories/); assert.doesNotMatch(question, /Only for .*worktree/); return answer;
+      calls++; assert.deepEqual(choices, labels); assert.ok(options.signal); assert.match(question, /Settings file:.*projects/); assert.doesNotMatch(question, /Only for .*worktree/); return answer;
     } } } as unknown as ExtensionContext;
   const call = () => tools.get("msb_config_set")!.execute("id", { scope: "project", path: "cpus", operation: "set", value: 4 }, undefined, undefined, ctx) as Promise<any>;
   for (answer of [undefined, "No", "Yes", "unexpected", "Yes (Only for remove-in-repo-config worktree)", "Yes (For pi-microsandbox and all its worktrees)"]) {
@@ -226,15 +221,12 @@ test("real Git in-repository .worktrees shared save, sibling discovery and fresh
 });
 
 
-test("Project repair ignores malformed legacy overlays and only repairs shared Project", async (t) => {
+test("Project repair only changes shared Project", async (t) => {
   const f = await fixture(t); await f.save("project", "cpus", 2);
-  const legacy = (await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!;
-  await mkdir(dirname(legacy), { recursive: true }); await writeFile(legacy, "not valid TOML PRIVATE");
   await writeFile(f.paths.project, (await readFile(f.paths.project, "utf8")).replace("cpus = 2", "cpus = 0"));
   const draft = await f.editor.open("project"); draft.set("cpus", 3);
   await draft.reviewForApproval((await draft.preview()).effect); await draft.apply();
   assert.equal((await resolveConfig(f.input)).config.cpus, 3);
-  assert.equal(await readFile(legacy, "utf8"), "not valid TOML PRIVATE");
 });
 
 test("repository catalog reserves ALL proof trees against unrelated writable mounts, but main default cwd remains valid", async (t) => {
@@ -261,7 +253,7 @@ for (const replacement of ["cwd", "catalog-proof", "none"] as const) test(`real 
     instance.create = async () => { const raw = await create(); entered(); await paused; return raw; };
     return instance;
   };
-  const integration = createMsbIntegration({ sessionId: "activation", cwd: f.linked, agentDir: f.input.agentDir, env: {}, configDirName: ".pi", sdkLoader: async () => sdk,
+  const integration = createMsbIntegration({ sessionId: "activation", cwd: f.linked, agentDir: f.input.agentDir, env: { HOME: f.root }, configDirName: ".pi", sdkLoader: async () => sdk,
     entries: () => entries, appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),
     acquireOwnerLock: async () => ({ path: join(f.root, "owner.lock"), release: async () => {} }) });
   t.after(() => integration.manager.shutdown());
@@ -344,4 +336,17 @@ test("forged catalog registrations cannot make a checkout consume proof inside i
   await writeFile(join(registration, "commondir"), "../..");
   await writeFile(join(registration, "gitdir"), join(f.root, ".git"));
   await assert.rejects(resolveConfig({ ...f.input, cwd: nested }), /could not be safely verified/);
+});
+
+test("shared Project cannot activate an unassociated readable config; approved save embeds the association atomically", async (t) => {
+  const f = await fixture(t);
+  await mkdir(dirname(f.paths.project), { recursive: true });
+  await writeFile(f.paths.project, "cpus = 2\n");
+  await assert.rejects(resolveConfig(f.input), /requires immutable repository association metadata/);
+  const draft = await f.editor.open("project"); draft.set("cpus", 3);
+  await draft.reviewForApproval((await draft.preview()).effect);
+  const result = await draft.apply(); await result.assertUnchanged?.();
+  assert.deepEqual(JSON.parse(JSON.stringify(readRawConfig(await readFile(f.paths.project, "utf8"))._repository)), (await hostConfigTargets(f.input)).repository);
+  await rm(join(f.linked, ".git"));
+  assert.equal((await resolveConfig(f.input)).config.cpus, 3);
 });

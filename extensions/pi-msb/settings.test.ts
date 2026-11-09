@@ -188,13 +188,13 @@ test("conflicts and symlink targets/ancestors fail closed", async (t) => {
   await assert.rejects(draft.apply(), /externally/);
   assert.equal(await readFile(paths.project, "utf8"), "cpus = 3\n");
   await rm(paths.project); await symlink(join(root, "missing"), paths.project);
-  await assert.rejects(editor.open("project"), /non-symlink/);
+  await assert.rejects(editor.open("project"), /could not be safely verified/);
   await rm(paths.project); await writeFile(paths.project, "cpus = 2\n");
   const late = await editor.open("project"); late.set("cpus", 5);
   const moved = `${dirname(paths.project)}-moved`;
   const { rename } = await import("node:fs/promises");
   await rename(dirname(paths.project), moved); await symlink(moved, dirname(paths.project));
-  await assert.rejects(late.apply(), /non-symlink/);
+  await assert.rejects(late.apply(), /could not be safely verified/);
   assert.equal(await readFile(paths.project, "utf8"), "cpus = 2\n");
 });
 
@@ -672,7 +672,7 @@ test("canonical agent anchor does not allow descendant/file symlinks or dangling
   const editor = new SettingsEditor(selected, "descendants");
   const outside = join(root, "policy-data"); await mkdir(outside);
   await symlink(outside, join(target, "pi-microsandbox"));
-  await assert.rejects(editor.open("global"), /non-symlink/);
+  await assert.rejects(editor.open("global"), /could not be safely verified/);
   await rm(join(target, "pi-microsandbox")); await mkdir(join(target, "pi-microsandbox"));
   await writeFile(join(outside, "default.toml"), "cpus = 3\n");
   await symlink(join(outside, "default.toml"), join(target, "pi-microsandbox/default.toml"));

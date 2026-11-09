@@ -1,6 +1,5 @@
 // Process-isolated integration fixture: real Pi loader, command context, custom UI,
 // theme and renderers; terminal and SDK are doubled (no live VM).
-import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
@@ -28,7 +27,7 @@ try {
   await symlink(canonicalAgent, lexicalAgent);
   Object.assign(process.env, { HOME: join(root, "home"), PI_CODING_AGENT_DIR: lexicalAgent, PI_PACKAGE_DIR: pkg, PI_MSB_UI_FIXTURE_CWD: cwd, RUNTIME_HOST_ENV_SOURCE: "RUNTIME_PRIVATE_SENTINEL", RUNTIME_COMMAND_TOKEN: "COMMAND_RUNTIME_PRIVATE_SENTINEL" });
   execFileSync("git", ["init", "-q", cwd]);
-  const projectFile = join(canonicalAgent, "pi-microsandbox/repositories", createHash("sha256").update(join(cwd, ".git")).digest("hex"), "config.toml");
+  const projectFile = join(canonicalAgent, "pi-microsandbox/projects/workspace/config.toml");
   // Secret values are synthetic, never read from the real host's Pi config.
   await mkdir(join(canonicalAgent, "pi-microsandbox"));
   const originalPolicy = 'auto_start = false\n[[secrets]]\nenv = "TOKEN"\nhost_env = "RUNTIME_HOST_ENV_SOURCE"\nallow_hosts = ["api.example"]\n[[secrets]]\nenv = "COMMAND_TOKEN"\nhost_cmd = \'printf %s "$RUNTIME_COMMAND_TOKEN"\'\nallow_hosts = ["command.example"]\n';

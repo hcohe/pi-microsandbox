@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import { normalize, resolve } from "node:path";
 import {
-  applyOverride, assertPolicyOutsideWorkspace, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, ignoredLegacyProjectWarnings, legacyConfigSources,
+  applyOverride, assertPolicyOutsideWorkspace, ConfigError, DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, legacyConfigSources,
   normalizeConfigPath, parseEnvConfig, parseTomlConfig, readRawConfig, removeOverride,
   resolveConfig, toEffectiveToml, validateConfig, type ResolveConfigInput, type HostConfigPaths, type HostConfigTargets,
 } from "./config.ts";
@@ -984,7 +984,7 @@ export class SettingsEditor {
       supportedPaths: SETTINGS_PATHS,
       ...(!malformed ? { sources: { global: { path: targets.lexicalPaths.global, source: "host-default" }, project: { path: targets.lexicalPaths.project, source: "host-project" }, session: { path: null, source: "temporary" } } } : {}),
       ...(!malformed ? { runtime: extra, layers: { global: projectSettingsJson(sources.global ?? {}), project: projectSettingsJson(sources.project ?? {}), session: projectSettingsJson(this.#temporary) } } : {}),
-      warnings: await ignoredLegacyProjectWarnings(targets),
+      warnings: [],
       recovery: {
         available: supported.length > 0, configurationValid: false, manualRepairRequired: !supported.length,
         scopes: [...new Set([...scopes, ...supported])],

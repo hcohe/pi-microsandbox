@@ -81,10 +81,11 @@ that is expected, not an installation failure.
 
 Supported Git main, linked and nested cwd use the same **main/root Project**.
 Non-Git/unsupported layouts remain canonical-cwd-local; Global is unchanged.
-Inspect Sources or `msb_config_get` for the exact location and ignored-legacy
-warnings. Cwd-keyed Git config/Dockerfile/context is preserved but no longer active.
-Review selected migration manually with fresh shared approval; do not copy old
-permissions or approvals. Execution mounts and Session safety remain current-cwd-only.
+Inspect Sources or `msb_config_get` for the exact readable main-root location under
+`projects/` (home-relative) or `projects-absolute/` (outside home). No hashed-path
+lookup or migration occurs. Keys containing reserved artifact components
+`build-context`, `config.toml` or `Dockerfile` fail closed; choose a different checkout
+path. Execution mounts and Session safety remain current-cwd-only.
 
 In-repo `.pi-msb.toml` is ignored. Older host Project `.pi-msb.toml` files aren't
 auto-migrated to `config.toml`. [Migration guide →](configuration.md#coming-from-an-older-setup)

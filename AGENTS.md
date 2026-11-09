@@ -22,10 +22,13 @@
   and covers future registered worktrees without crossing nearer Git boundaries.
   Non-Git and unsupported Git layouts stay cwd-local; Global is unchanged. There
   are no Repository/Worktree destinations or persistent checkout overrides.
-  Legacy cwd-keyed Git config/Dockerfile/context stays untouched and ignored, with
-  bounded metadata-only diagnostics and deliberate manual migration guidance; never
-  promote old grants or approvals. Dockerfile/context Project saves share config's
-  main-root record and immutable association; no automatic source copying.
+  Shared Project storage is projects/<home-relative-canonical-main-root> (or
+  projects-absolute/<absolute-main-root-without-root> outside home), with config.toml,
+  Dockerfile and build-context/ siblings. There are no hashed config/catalog keys,
+  compatibility reads, migrations or checkout overlays. Readable Project keys reject
+  reserved artifact components (case-insensitive build-context/config.toml/Dockerfile);
+  catalog traversal never enters build-context. Dockerfile/context Project saves
+  share config's main-root record and immutable association.
   Owned source tools support bounded relative UTF-8 context patches, not arbitrary
   host paths; multi-artifact saves are individually atomic, never jointly/crash
   atomic, and partial/unknown persistence never authorizes activation.

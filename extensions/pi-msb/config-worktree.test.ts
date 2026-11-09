@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -27,34 +26,28 @@ async function fixture(t: TestContext, parent = tmpdir()) {
   return { root, main, linked, registration, input, paths, save };
 }
 
-test("host Project uses one main-root record from main, linked and nested cwd; legacy overlays never contribute", async (t) => {
+test("host Project uses one main-root record from main, linked and nested cwd", async (t) => {
   const f = await fixture(t);
+  assert.equal(f.paths.project, join(f.input.agentDir!, "pi-microsandbox", "projects", "repository", "config.toml"));
   const nested = join(f.linked, "nested"); const mainNested = join(f.main, "nested");
   await mkdir(nested); await mkdir(mainNested);
   await f.save(f.paths.global, "cpus = 1");
   await f.save(f.paths.project, "cpus = 2\nmemory_mib = 2048");
-  const legacy = (await hostConfigTargets(f.input)).ignoredLegacyPaths;
-  for (const path of legacy) await f.save(path, 'cpus = 0\nsecrets = "DO_NOT_PARSE_PRIVATE"');
   for (const cwd of [f.main, f.linked, nested, mainNested]) {
     assert.deepEqual(await hostConfigPaths({ ...f.input, cwd }), f.paths);
     const resolved = await resolveConfig({ ...f.input, cwd });
     assert.equal(resolved.config.cpus, 2);
     assert.equal(resolved.config.memoryMiB, 2048);
     assert.equal(resolved.provenance.cpus, "host-project");
-    assert.ok(resolved.warnings.some((warning) => warning.includes("Ignored legacy Worktree")));
-    assert.doesNotMatch(resolved.warnings.join(" "), /DO_NOT_PARSE_PRIVATE/);
   }
   assert.equal((await resolveConfig({ ...f.input, temporaryOverrides: { cpus: 5 } })).config.cpus, 5);
 });
 
-test("host Project source ignores legacy Dockerfile/context and retains explicit image and Session precedence", async (t) => {
+test("host Project source uses readable siblings and retains explicit image and Session precedence", async (t) => {
   const f = await fixture(t);
   await f.save(f.paths.project, "cpus = 2");
   const dockerfile = join(dirname(f.paths.project), "Dockerfile");
   await f.save(dockerfile, "FROM scratch\nLABEL scope=shared\n");
-  const legacy = (await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!;
-  await f.save(join(dirname(legacy), "Dockerfile"), "INVALID PRIVATE LEGACY");
-  await f.save(join(dirname(legacy), "build-context", "secret"), "PRIVATE");
   const result = await resolveConfig(f.input);
   assert.equal(result.imageBuild?.scope, "host-project");
   assert.equal(result.imageBuild?.dockerfile, dockerfile);
@@ -80,8 +73,8 @@ test("nested Project inheritance never changes actual cwd mount shadow checks", 
 
 test("host worktree policy and reciprocal Git proof cannot be exposed by writable mounts", async (t) => {
   const f = await fixture(t);
-  for (const hostPath of [f.main, join(f.main, ".git"), f.registration, join(f.registration, "gitdir"), join(f.registration, "commondir"), dirname((await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!)]) {
-    await mkdir(dirname((await hostConfigTargets(f.input)).ignoredLegacyPaths[0]!), { recursive: true });
+  for (const hostPath of [f.main, join(f.main, ".git"), f.registration, join(f.registration, "gitdir"), join(f.registration, "commondir"), dirname(f.paths.project)]) {
+    await mkdir(dirname(f.paths.project), { recursive: true });
     await assert.rejects(resolveConfig({ ...f.input, temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/proof", readonly: false, options: [] }] } }), /writable host mounts must not expose host configuration/);
   }
   await resolveConfig({ ...f.input, temporaryOverrides: { mounts: [{ type: "dir", hostPath: f.registration, guestPath: "/mnt/proof", readonly: true, options: [] }] } });
@@ -101,44 +94,4 @@ test("host config rejects guest-fabricated reciprocal proof inside the actual cw
   await writeFile(join(f.linked, ".git"), `gitdir: ${registration}\n`);
   await assert.rejects(hostConfigTargets(f.input), /could not be safely verified/);
   await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
-});
-
-
-test("ignored legacy diagnostics are metadata-only, nofollow, redacted and preserve all bytes/inodes", async (t) => {
-  const f = await fixture(t);
-  const nested = join(f.linked, "nested"); await mkdir(nested);
-  const input = { ...f.input, cwd: nested };
-  const targets = await hostConfigTargets(input);
-  await f.save(f.paths.project, "cpus = 2");
-  const [exact, checkout, main] = targets.ignoredLegacyPaths;
-  assert.equal(targets.ignoredLegacyPaths.length, 3);
-  const legacyText = 'invalid TOML PRIVATE_LEGACY_CREDENTIAL';
-  await f.save(exact!, legacyText);
-  const context = join(dirname(exact!), "build-context"); await mkdir(context);
-  await fs.writeFile(join(context, "secret"), "PRIVATE_CONTEXT");
-  const outside = join(f.root, "outside-legacy"); await mkdir(outside);
-  await fs.writeFile(join(outside, "config.toml"), "PRIVATE_OUTSIDE");
-  await mkdir(dirname(dirname(main!)), { recursive: true });
-  await symlink(outside, dirname(main!));
-  await f.save(checkout!, "cpus = 64");
-  await symlink(join(outside, "config.toml"), join(dirname(checkout!), "Dockerfile"));
-  const before = await fs.lstat(exact!); const file = await fs.lstat(join(context, "secret"));
-  const read = fs.readFile; const open = fs.open;
-  const ignoredRoots = [dirname(exact!), dirname(checkout!), dirname(main!), outside];
-  const assertNotLegacy = (path: unknown) => {
-    assert.ok(!ignoredRoots.some((root) => String(path) === root || String(path).startsWith(root + "/")), `legacy content read: ${String(path)}`);
-  };
-  t.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => { assertNotLegacy(args[0]); return read(...args); });
-  t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => { assertNotLegacy(args[0]); return open(...args); });
-  const resolved = await resolveConfig(input);
-  assert.equal(resolved.config.cpus, 2);
-  const warnings = resolved.warnings.join(" ");
-  for (const path of [exact!, checkout!, dirname(main!)]) assert.ok(warnings.includes(path));
-  assert.match(warnings, /Preserved, not loaded or copied/); assert.match(warnings, /fresh approval/);
-  assert.doesNotMatch(warnings, /PRIVATE_LEGACY|PRIVATE_CONTEXT|PRIVATE_OUTSIDE/);
-  t.mock.restoreAll();
-  assert.equal(await fs.readFile(exact!, "utf8"), legacyText); assert.equal((await fs.lstat(exact!)).ino, before.ino);
-  assert.equal((await fs.lstat(join(context, "secret"))).ino, file.ino);
-  assert.equal(await fs.readFile(join(context, "secret"), "utf8"), "PRIVATE_CONTEXT");
-  assert.ok((await fs.lstat(dirname(main!))).isSymbolicLink());
 });

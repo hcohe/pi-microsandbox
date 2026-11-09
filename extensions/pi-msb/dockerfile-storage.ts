@@ -1,7 +1,7 @@
 import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, parse, relative, sep } from "node:path";
-import { assertPolicyOutsideWorkspace, canonicalPolicyLocation, hostConfigTargets, ignoredLegacyProjectWarnings, legacyConfigSources, readRawConfig, type ResolveConfigInput } from "./config.ts";
+import { assertPolicyOutsideWorkspace, canonicalPolicyLocation, hostConfigTargets, legacyConfigSources, readRawConfig, type ResolveConfigInput } from "./config.ts";
 import { assertBuildPath, BUILD_LIMITS } from "./image-source.ts";
 import { assertAnchor, captureAnchor } from "./settings-storage.ts";
 import { SettingsConflictError } from "./settings-conflict.ts";
@@ -37,7 +37,6 @@ export interface DockerfileDraft {
   target: ScopePaths;
   source: DockerfileSnapshot;
   context: ContextEntry[];
-  ignoredLegacyWarnings: string[];
   readContext(paths: string[]): Promise<unknown[]>;
   prepare(content?: string, context?: ContextEdit[]): Promise<BundleReview>;
   save(content: string | undefined, guard: () => Promise<void>): Promise<{ assertUnchanged(): Promise<void> }>;
@@ -213,8 +212,7 @@ export async function openDockerfile(input: ResolveConfigInput, canonicalCwd: st
     await validate();
     return result;
   };
-  const ignoredLegacyWarnings = await ignoredLegacyProjectWarnings(targets);
-  return { paths, scope, target, source, context, ignoredLegacyWarnings, readContext, async prepare(content, edits = []) {
+  return { paths, scope, target, source, context, readContext, async prepare(content, edits = []) {
     await validate(); validateContextEdits(edits);
     reviewedContextPaths = edits.map((edit) => edit.path);
     await validate();

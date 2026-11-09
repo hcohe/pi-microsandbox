@@ -157,7 +157,7 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
                 `Dockerfile: ${dockerfileDisplay(draft.target.dockerfile)}`, `Context: ${dockerfileDisplay(draft.target.buildContext)}`, `Config: ${dockerfileDisplay(draft.target.config)}`,
                 ...(diff ? [`Dockerfile permissions: ${draft.source.mode === undefined ? "missing" : draft.source.mode.toString(8).padStart(4, "0")} → 0600`] : []),
                 ...bundle.context.map((edit) => `build-context/${dockerfileDisplay(edit.path)} permissions: ${edit.modeBefore === null ? "missing" : edit.modeBefore.toString(8).padStart(4, "0")} → ${edit.modeAfter === null ? "deleted" : edit.modeAfter.toString(8).padStart(4, "0")}`),
-                ...(bundle.registration ? [`Repository metadata: ${display(bundle.registration.metadata)}`] : []), ...warnings, ...draft.ignoredLegacyWarnings,
+                ...(bundle.registration ? [`Repository metadata: ${display(bundle.registration.metadata)}`] : []), ...warnings,
                 "New directories are private (0700). Unspecified files stay unchanged. No activation after partial/unknown save."].join("\n") });
             } catch (error) {
               draftCheck();
@@ -202,7 +202,7 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
         const contextFiles = await draft.readContext(input.contextPaths ?? []);
         check();
         return result({ outcome: "inspected", readOnly: true, scope: input.scope, destination: input.scope, paths: draft.paths, target: draft.target, ...source,
-          inventory: draft.context.map(({ version: _version, ...entry }) => entry), inventoryComplete: true, contextFiles, ...guidance(), warnings: [...warnings, ...draft.ignoredLegacyWarnings], lastKnownSelection: selection(control, draft.target.dockerfile) });
+          inventory: draft.context.map(({ version: _version, ...entry }) => entry), inventoryComplete: true, contextFiles, ...guidance(), warnings, lastKnownSelection: selection(control, draft.target.dockerfile) });
       } catch (error) {
         if (error instanceof BundlePersistenceError) return result({ outcome: "conflict", saved: "unknown", reloaded: false,
           persistedArtifacts: error.persisted, uncertainArtifact: error.uncertain, review,

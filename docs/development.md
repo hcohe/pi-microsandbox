@@ -323,7 +323,8 @@ immediately on the host. Git metadata inside cwd must not select the bind, and
 external linked-worktree/submodule metadata must not be separately mounted.
 Validate shared main-root Git Project config and Dockerfile/context read/write
 from main, linked and nested cwd; unchanged non-Git/unsupported fallback and Global;
-ignored, untouched legacy storage; nearest Git discovery boundaries; per-current-cwd
+readable canonical path keys, bounded no-follow catalog traversal and reserved-artifact
+collisions; nearest Git discovery boundaries; per-current-cwd
 session isolation and approval invalidation on cwd replacement. They also cover off/on and
 reload, stale-sandbox pruning, fail-closed boot errors, and approved host execution. Docker release validation must cover
 daemon readiness, bridge DNS and HTTPS, user-defined networking, Buildx,

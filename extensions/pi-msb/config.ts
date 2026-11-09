@@ -5,7 +5,8 @@ import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolv
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { buildImageReference, discoverDockerfile, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
-import { repositoryKey, repositoryMetadata, type RepositoryMetadata } from "./repository-catalog.ts";
+import { projectConfigPath } from "./project-storage-path.ts";
+import { repositoryMetadata, type RepositoryMetadata } from "./repository-catalog.ts";
 import { discoverProjectIdentity, ProjectIdentityError, type ProjectIdentity } from "./project-identity.ts";
 import { isSecretHost, networkDestinationKind } from "./network-domains.ts";
 import type {
@@ -797,7 +798,7 @@ export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots:
   }
 }
 
-/** Persistent destinations; legacy cwd overlays are never active policy. */
+/** Persistent host-owned destinations. */
 export interface HostConfigPaths {
   global: string;
   project: string;
@@ -809,7 +810,6 @@ export interface HostConfigTargets {
   lexicalPaths: HostConfigPaths;
   identity: ProjectIdentity;
   repository?: RepositoryMetadata;
-  ignoredLegacyPaths: string[];
   repositoryName: string;
   worktreeName: string;
   isWorktree: boolean;
@@ -823,19 +823,14 @@ export async function hostConfigTargets(input: ResolveConfigInput, replacement?:
   const agentDir = resolve(input.agentDir ?? getAgentDir());
   const canonicalAgentDir = await canonicalPolicyLocation(agentDir, realpath);
   const workspaceRoots = [resolve(input.repoRoot ?? input.cwd), await realpath(input.repoRoot ?? input.cwd)];
-  const catalogRoot = join(canonicalAgentDir, "pi-microsandbox", "repositories");
-  await assertPolicyOutsideWorkspace(join(agentDir, "pi-microsandbox", "repositories"), workspaceRoots, realpath);
-  await assertPolicyOutsideWorkspace(catalogRoot, workspaceRoots, realpath);
-  await hostPolicyAncestorLocations([join(agentDir, "pi-microsandbox", "repositories")], realpath);
-  if (await canonicalPolicyLocation(catalogRoot, realpath) !== catalogRoot) {
-    // Preserve passive legacy policy-alias reads when no catalog exists. A
-    // catalog itself may never live behind descendant symlinks; editor writes
-    // independently require non-symlink descendants even for an absent catalog.
-    try { await fs.lstat(catalogRoot); throw new ConfigError(["repository catalog requires non-symlink descendants"]); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const catalogRoot = join(canonicalAgentDir, "pi-microsandbox");
+  for (const tree of ["projects", "projects-absolute"]) {
+    await assertPolicyOutsideWorkspace(join(agentDir, "pi-microsandbox", tree), workspaceRoots, realpath);
+    await assertPolicyOutsideWorkspace(join(catalogRoot, tree), workspaceRoots, realpath);
+    await hostPolicyAncestorLocations([join(agentDir, "pi-microsandbox", tree)], realpath);
   }
   let identity: ProjectIdentity;
-  try { identity = await discoverProjectIdentity(input.repoRoot ?? input.cwd, realpath, { root: catalogRoot, parse: readRawConfig, replacement }); }
+  try { identity = await discoverProjectIdentity(input.repoRoot ?? input.cwd, realpath, { root: catalogRoot, home, parse: readRawConfig, replacement }); }
   catch (error) {
     if (error instanceof ProjectIdentityError) throw new ConfigError([error.message]);
     throw error;
@@ -847,50 +842,15 @@ export async function hostConfigTargets(input: ResolveConfigInput, replacement?:
   const repository = shared ? repositoryMetadata(association.commonDir!, association.mainCheckoutRoot!) : undefined;
   const targets = (anchor: string): HostConfigPaths => {
     const directory = join(anchor, "pi-microsandbox");
-    const projectPath = (root: string) => isInside(root, home)
-      ? join(directory, "projects", relative(home, root), "config.toml")
-      : join(directory, "projects-absolute", relative(parse(root).root, root), "config.toml");
     return {
       global: join(directory, "default.toml"),
-      project: repository ? join(directory, "repositories", repositoryKey(repository.common_dir), "config.toml") : projectPath(identity.cwd),
+      project: projectConfigPath(directory, home, repository?.main_root ?? identity.cwd),
     };
   };
   return {
     agentDir, canonicalAgentDir, paths: targets(canonicalAgentDir), lexicalPaths: targets(agentDir), identity, ...(repository ? { repository } : {}),
-    ignoredLegacyPaths: repository ? [...new Set([identity.cwd, association.checkoutRoot, repository.main_root])].map((root) => isInside(root, home)
-      ? join(canonicalAgentDir, "pi-microsandbox", "projects", relative(home, root), "config.toml")
-      : join(canonicalAgentDir, "pi-microsandbox", "projects-absolute", relative(parse(root).root, root), "config.toml")) : [],
     repositoryName: identity.repositoryName, worktreeName: identity.worktreeName, isWorktree: identity.isWorktree,
   };
-}
-
-/** Presence/type only: never parse ignored policy or read ignored source/context. */
-export async function ignoredLegacyProjectWarnings(targets: HostConfigTargets): Promise<string[]> {
-  const warnings: string[] = [];
-  for (const config of targets.ignoredLegacyPaths) {
-    // Inspect each descendant before proceeding: lstat on a leaf alone would
-    // follow an unsafe ancestor. Do not traverse links, files or special nodes.
-    let current = targets.canonicalAgentDir;
-    let unsafe = false;
-    let absent = false;
-    for (const part of relative(current, dirname(config)).split(sep)) {
-      current = join(current, part);
-      try {
-        if (!(await fs.lstat(current)).isDirectory()) { unsafe = true; break; }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") unsafe = true;
-        else absent = true;
-        break;
-      }
-    }
-    const found: string[] = [];
-    if (!unsafe && !absent) for (const path of [config, join(dirname(config), "Dockerfile"), join(dirname(config), "build-context")]) {
-      try { await fs.lstat(path); found.push(path); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") unsafe = true; }
-    }
-    if (unsafe || found.length) warnings.push(`Ignored legacy Worktree storage: ${JSON.stringify(unsafe ? dirname(config) : found).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}. Preserved, not loaded or copied. Manually review and migrate selected settings and Dockerfile/build-context into Project with fresh approval; Project affects all worktrees. Never copy old approvals or grants.`);
-  }
-  return warnings;
 }
 
 /** Shared host-owned targets for resolution and editing, including missing descendants. */
@@ -933,7 +893,6 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (captureSanitizer) privateSources.push(readRawConfig(text));
   }
   const targets = await hostConfigTargets(input);
-  warnings.push(...await ignoredLegacyProjectWarnings(targets));
   const hostFiles: Array<["host-default" | "host-project", string, string]> = [
     ["host-default", targets.paths.global, targets.lexicalPaths.global],
     ["host-project", targets.paths.project, targets.lexicalPaths.project],
@@ -954,7 +913,15 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (protectedPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
-    if (text !== null) presentHostPolicies.add(name);
+    if (text !== null) {
+      if (name === "host-project" && targets.repository) {
+        const metadata = readRawConfig(text)._repository;
+        if (JSON.stringify(metadata, Object.keys(targets.repository).sort()) !== JSON.stringify(targets.repository, Object.keys(targets.repository).sort())) {
+          throw new ConfigError(["shared Project configuration requires immutable repository association metadata; save Project settings to register it"]);
+        }
+      }
+      presentHostPolicies.add(name);
+    }
     const policy = text === null ? { name, value: {} as DeepPartial<Config>, warnings: [] } : layerFromText(name, text, lexicalFile);
     if (captureSanitizer && text !== null) privateSources.push(readRawConfig(text));
     hostLayers.push(policy);

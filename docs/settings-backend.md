@@ -153,14 +153,16 @@ before returning recent logs or prune diagnostic details; arbitrary application 
 
 Targets come only from shared `hostConfigPaths`: host `default.toml` globally,
 cwd-local `projects/.../config.toml` or `projects-absolute/.../config.toml`, and
-shared `repositories/<sha256(commonDir)>/config.toml` from Git main, linked and nested cwd. Shared raw
+shared readable main-root `projects/<home-relative-main-root>/config.toml`
+(or `projects-absolute/<absolute-main-root-without-root>/config.toml` outside home) from Git main, linked and nested cwd. Shared raw
 drafts privately inject immutable `[_repository]` metadata into the SAME atomic
 artifact. `repository-catalog.ts` performs bounded read-only association lookup;
 there are no per-worktree records or read-side writes. All catalog proof trees
 are reserved against explicit writable mounts, including unrelated cwd sessions.
 Non-Git/unsupported layouts stay local; Git nested cwd shares main-root Project.
-Legacy cwd-keyed Git overlays/sources are ignored and preserved, never read or
-promoted; bounded presence/type diagnostics explain deliberate manual migration. The default main cwd `.git` remains a documented
+No hashes, per-checkout overlays, compatibility lookup or migrations are used.
+Project keys reject reserved artifact components, and bounded no-follow catalog
+traversal skips build-context entirely. The default main cwd `.git` remains a documented
 cross-worktree trust boundary. See [configuration](configuration.md#host-owned-project-overrides)
 for bounds and fail-closed stale-catalog repair.
 Writes reject symlink targets/ancestors, dangling links, nonregular files, mounted

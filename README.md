@@ -95,13 +95,14 @@ may allow broader access. Use Project or Global for restrictions you want to kee
 
 Setup and inspection create no config files. Saving Global settings creates
 `~/.pi/agent/pi-microsandbox/default.toml`. Non-Git cwd-local policy for `~/Code/app` goes in
-`~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml`; shared Git policies
-go in `repositories/<sha256(canonical-common-git-dir)>/config.toml` under the same
-host-owned directory. New registered worktrees automatically share them.
-There is no in-repository policy file. Nested Git cwd uses the same main-root
-Project; non-Git and unsupported Git layouts stay cwd-local. Legacy cwd-keyed Git
-overlays are ignored and preserved, never automatically migrated; review intended
-settings and Dockerfile/context manually before approving shared Project changes. [Configuration →](docs/configuration.md)
+`~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml`. Supported Git
+main, linked and nested cwd use `projects/<home-relative-canonical-main-checkout>/config.toml`;
+roots outside home use `projects-absolute/<absolute-path-without-root>/config.toml`.
+Dockerfile and build-context are siblings. New registered worktrees automatically share
+this readable main-root record, without hashes or an in-repository policy file.
+Non-Git and unsupported Git layouts stay cwd-local. No migration or old hashed-path
+lookup occurs. [Configuration →](docs/configuration.md)
+
 
 ## A sandbox, not a spare checkout
 

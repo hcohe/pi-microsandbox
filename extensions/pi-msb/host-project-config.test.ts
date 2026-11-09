@@ -357,6 +357,13 @@ test("absent policies stay absent after rejected and valid resolution, including
       }
       assert.deepEqual(await readdir(base, { recursive: true }), snapshot);
     };
+    if (layout === "policy-alias") {
+      // Only the selected agent-root alias is supported. Readable catalog
+      // descendants must be no-follow even when the target policy is absent.
+      await assert.rejects(resolveConfig(input), /could not be safely verified/);
+      await assertUnchanged();
+      continue;
+    }
     const mount = (hostPath: string, readonly = false): ResolveConfigInput => ({
       ...input,
       temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/policy", readonly, options: [] }] },
@@ -397,10 +404,10 @@ test("missing project overrides cannot be created through writable symlinked pol
   await symlink(cache, policyDir);
   await writeFile(join(agent, "pi-microsandbox/default.toml"), `mounts = [{ host_path = ${JSON.stringify(cache)}, guest_path = "/mnt/cache", readonly = false }]`);
   const input: ResolveConfigInput = { cwd: project, repoRoot: project, projectTrusted: true, configDirName: ".pi", homedir: join(dir, "home"), agentDir: agent, env: {} };
-  await assert.rejects(resolveConfig(input), /writable host mounts must not expose host configuration/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
   await rm(policyDir);
   await symlink(join(cache, "missing"), policyDir);
-  await assert.rejects(resolveConfig(input), /host configuration path could not be canonicalized/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
 });
 
 test("real filesystem policy changes are re-read and unreadable policies fail closed", async (t) => {
@@ -420,7 +427,7 @@ test("real filesystem policy changes are re-read and unreadable policies fail cl
   assert.equal((await resolveConfig(input)).config.cpus, 3);
   await rm(policy);
   await mkdir(policy);
-  await assert.rejects(resolveConfig(input), /host configuration could not be read/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
   await rm(policy, { recursive: true });
   const baseline = join(agent, "pi-microsandbox/default.toml");
   await mkdir(baseline);
@@ -429,5 +436,5 @@ test("real filesystem policy changes are re-read and unreadable policies fail cl
   const localPolicy = join(project, "policy.toml");
   await writeFile(localPolicy, "cpus = 64");
   await symlink(localPolicy, policy);
-  await assert.rejects(resolveConfig(input), /outside the mounted workspace/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
 });

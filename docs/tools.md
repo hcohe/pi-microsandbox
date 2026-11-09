@@ -88,9 +88,9 @@ Session overrides. A first shared save also registers immutable host-owned
 `_repository` in the exact shared `config.toml`, explicitly reviewed in the same
 approval. User intent/unknown keys are preserved; adding metadata can rewrite TOML
 formatting/comments. Existing valid metadata/config is never rewritten. There is
-no automatic source copy/migration. Legacy cwd-keyed Git policy/source/context is
-ignored and preserved; diagnostics do not read its contents. Manually review selected
-inputs and approve shared migration separately. Global and non-Git/unsupported
+no automatic source copying, migration or hashed-path lookup. Project uses readable
+canonical-main-root storage with config/source siblings; reserved artifact names cannot
+be Project key components. Global and non-Git/unsupported
 fallbacks remain unchanged. Project overrides Global; explicit scope `image` and Session `image` can shadow sources. Inspect
 `msb_config_get`; image inheritance requires separate config approval.
 

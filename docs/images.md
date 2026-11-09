@@ -112,8 +112,8 @@ Place a Dockerfile beside your host-owned policy, outside the mounted cwd:
 ```text
 <Pi agent dir>/pi-microsandbox/Dockerfile                         # Global
 <Pi agent dir>/pi-microsandbox/build-context/                     # optional Global context
-<Pi agent dir>/pi-microsandbox/repositories/<hash>/Dockerfile             # Git Project
-<Pi agent dir>/pi-microsandbox/repositories/<hash>/build-context/          # optional Git Project context
+<Pi agent dir>/pi-microsandbox/projects/<home-relative-canonical-main-root>/Dockerfile             # Git Project
+<Pi agent dir>/pi-microsandbox/projects/<home-relative-canonical-main-root>/build-context/          # optional Git Project context
 ```
 
 The default Pi agent directory is `~/.pi/agent`; Pi's `getAgentDir()` (including
@@ -122,15 +122,15 @@ identity as [Project configuration](configuration.md#host-owned-project-override
 not a guessed cwd-to-directory mapping. Project setter uses the same shared
 main/root record as config from main, linked and nested Git cwd, with no separate
 Repository/Worktree destinations. Shared saves explicitly review registration of immutable
-`_repository` in shared `repositories/<hash>/config.toml` when needed, preserving
+`_repository` in shared `projects/<home-relative-canonical-main-root>/config.toml` when needed, preserving
 user configuration/image intent. This enables source discovery for current/future
 registered worktrees, including nested cwd after checkout gitfile deletion. Getter
 and setter use only Project or Global; retired destination arguments are rejected.
-Non-Git/unsupported layouts stay cwd-local; Global is unchanged. Legacy cwd-keyed
-Git Dockerfiles/contexts are ignored and preserved with metadata-only diagnostics.
-Review and migrate intended inputs manually with fresh shared approval; nothing
-is copied, merged, deleted or automatically migrated. A standalone
-shared Dockerfile without catalog metadata is not discovery authority. No policy
+Non-Git/unsupported layouts stay cwd-local; Global is unchanged. Outside-home roots
+use `projects-absolute/<absolute-main-root-without-root>`.
+There are no hashed-path reads, automatic copies or migrations. Project storage
+keys reject reserved artifact components; context contents never enter the catalog.
+A standalone shared Dockerfile without catalog metadata is not discovery authority. No policy
 identity changes the mounted cwd boundary. A
 host-selected agent-directory symlink is supported, but descendants must not be
 symlinks. Keep these paths outside the workspace and writable mounts;

@@ -128,11 +128,11 @@ test("agent-dir symlink is supported but descendants, hardlinks, collisions and 
   await fs.unlink(join(context, "Dockerfile"));
   await fs.rm(context, { recursive: true });
   await fs.symlink(f.cwd, context);
-  await assert.rejects(resolveConfig(f.input), /safely snapshotted/);
+  await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
   await fs.unlink(context);
   await fs.unlink(f.project);
   await fs.symlink(join(f.cwd, "secret"), f.project);
-  await assert.rejects(resolveConfig(f.input), /safely inspected/);
+  await assert.rejects(resolveConfig(f.input), /could not be safely verified/);
 });
 
 test("Dockerfile snapshot bounds and host exposure checks fail closed", async (t) => {

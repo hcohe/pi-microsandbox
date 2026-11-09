@@ -62,7 +62,10 @@ For example:
 
 The table above describes **non-Git and unsupported-layout** cwd-local storage.
 Supported Git main, linked and nested cwd all use the SAME main/root Project:
-`<Pi agent dir>/pi-microsandbox/repositories/<sha256(canonical-common-git-dir)>/config.toml`.
+`<Pi agent dir>/pi-microsandbox/projects/<home-relative-canonical-main-checkout>/config.toml`
+(or `projects-absolute/<absolute-main-path-without-root>/config.toml` outside home).
+For example, `~/Code/app`, its `server/` subdirectory and linked worktrees all use
+`projects/Code/app/config.toml`. Dockerfile and build-context/ are siblings.
 Canonical aliases share policy; Session ownership and replacement checks remain
 per current cwd, not repository-wide. There is no persistent Worktree scope.
 
@@ -75,7 +78,9 @@ that Project, not a lower-priority Worktree fallback.
 Shared saves atomically include immutable reserved `[_repository]` metadata
 (version, canonical common Git directory and main root) in the SAME config file.
 It is private association metadata, not an editable setting; retain it during host
-edits. Existing compatible shared `repositories/<hash>` data remains authoritative.
+edits. An existing Git Project config without this association cannot activate; an
+approved Project settings save can register it. Storage keys are readable canonical
+paths, never hashes or GUIDs.
 There is no separate registry transaction, per-worktree record, symlink or read-side
 setup. New **registered** external or in-repository worktrees (`.worktrees/...`
 included) automatically find the same Project. Read-only discovery checks reciprocal
@@ -84,16 +89,15 @@ Git environment. The bounded host-owned catalog survives checkout gitfile deleti
 including nested cwd in a fresh process. Conflicting pointers fail closed. A nearer
 nested repository/submodule/bare boundary cannot inherit an outer catalog entry.
 
-**Migration: old cwd-keyed Git files are ignored and preserved**, even at the main
-checkout. They are not parsed, merged, moved, copied, deleted or promoted. Diagnostics
-check only bounded presence/type metadata at the current cwd, checkout root and main
-root's legacy host-storage locations; they do not scan other storage or read ignored
-policy/source/context contents. Review the reported files with a human host editor.
-Deliberately propose only intended settings into Project with a **fresh shared
-approval**. Separately review Dockerfile and each build-context input; do not copy
-credentials, old approvals, broad permissions or a complete resolved policy. All
-worktrees may adopt these changes on their next start/reload. Keep legacy files for
-manual recovery until you decide what to do with them; tools never clean them up.
+This is a clean-start layout: there are no old hashed-path reads, aliases, copies,
+checkout overlays or automatic migrations. No external host data is changed.
+
+Readable Project keys cannot contain components named `build-context`, `config.toml`
+or `Dockerfile` (ASCII-case-insensitive). These names are reserved for owned artifacts;
+choose a different checkout path if a key conflicts. The restriction applies before
+use or save, regardless of creation order. Ordinary nested Project directories work.
+Catalog discovery never enters build-context, even for context-only saves, and never
+interprets a source `config.toml` as association metadata.
 
 Non-Git cwd, submodules, bare and unsupported separate-Git-directory layouts remain
 cwd-local, without parent-policy inheritance. `core.worktree` cannot redirect policy.
@@ -101,8 +105,9 @@ Global is unchanged. **Policy identity never changes mounts or execution cwd**:
 only canonical current cwd is automatically bound read/write at lexical current cwd.
 Git ancestors, the main root and other worktrees are NEVER implicit mounts.
 
-Catalog bounds are 256 repositories, 4096 registrations per repository and 1 MiB
-per shared config artifact; proof pointer files are limited to 16 KiB. Invalid,
+Catalog bounds are 256 config files, 4096 traversal entries (including directories),
+256 directory levels, 4096 registrations per repository and 1 MiB
+per config artifact; proof pointer files are limited to 16 KiB. Invalid,
 unreadable, symlinked, conflicting or stale catalog metadata fails closed,
 including an unrelated catalog entry whose main/common directory was removed.
 Restore that host-owned repository location or have a human review/remove its

@@ -425,19 +425,8 @@ test("cancelled activation of a shadowed Dockerfile cannot fall back to host wit
 });
 
 
-test("Dockerfile Project ignores and preserves conflicting legacy config/source, rejecting retired destinations", async (t) => {
+test("Dockerfile Project rejects retired destinations", async (t) => {
   const f = await fixture(t); execFileSync("git", ["init", "-q", f.cwd]);
-  const targets = await hostConfigTargets(f.input); const legacy = targets.ignoredLegacyPaths[0]!;
-  await fs.mkdir(join(dirname(legacy), "build-context"), { recursive: true });
-  await fs.writeFile(legacy, "invalid legacy PRIVATE");
-  const unsafe = Buffer.from([0xff, 0xfe]);
-  const legacyDockerfile = join(dirname(legacy), "Dockerfile"); await fs.writeFile(legacyDockerfile, unsafe);
-  const before = await fs.stat(legacyDockerfile);
-  await fs.writeFile(join(dirname(legacy), "build-context", "private"), "PRIVATE");
-  const inspected = await f.run(false, { scope: "project" });
-  assert.equal(inspected.content, null);
-  assert.match(inspected.warnings.join(" "), /Ignored legacy Worktree storage/);
-  assert.doesNotMatch(inspected.warnings.join(" "), /PRIVATE/);
   for (const destination of ["repository", "worktree"]) {
     assert.equal((await f.run(false, { scope: "project", destination })).outcome, "rejected");
     assert.equal((await f.run(true, { scope: "project", destination, content: from })).outcome, "rejected");
@@ -447,11 +436,7 @@ test("Dockerfile Project ignores and preserves conflicting legacy config/source,
   f.configure({ answer: "Yes" });
   assert.equal((await f.run(true, { scope: "project", content: from })).saved, true);
   assert.equal((await f.run(false, { scope: "project" })).content, from);
-  assert.equal(await fs.readFile(legacy, "utf8"), "invalid legacy PRIVATE");
-  assert.deepEqual(await fs.readFile(legacyDockerfile), unsafe);
-  assert.equal((await fs.stat(legacyDockerfile)).ino, before.ino);
-  assert.equal(await fs.readFile(join(dirname(legacy), "build-context", "private"), "utf8"), "PRIVATE");
-  assert.doesNotMatch(f.question(), /This worktree|All worktrees|PRIVATE/);
+  assert.doesNotMatch(f.question(), /This worktree|All worktrees/);
 });
 
 test("retired positional Dockerfile destinations fail closed in storage and control, never becoming shared writes", async (t) => {
@@ -504,10 +489,7 @@ test("Dockerfile Project linked/main/nested writes share config and context, inc
   await draft.save(changed, async () => {});
   const linked = await f.run(false, { scope: "project", contextPaths: ["nested/bootstrap.sh"] });
   assert.equal(linked.content, changed); assert.equal(linked.contextFiles[0].content, "echo updated\n");
-  for (const legacy of targets.ignoredLegacyPaths) {
-    await assert.rejects(fs.lstat(join(dirname(legacy), "Dockerfile")), { code: "ENOENT" });
-    await assert.rejects(fs.lstat(join(dirname(legacy), "build-context")), { code: "ENOENT" });
-  }
+
 });
 
 for (const change of ["association", "alias", "config", "chooser-association"] as const) test(`Dockerfile shared approval rejects real Git ${change} change`, async (t) => {
@@ -769,10 +751,10 @@ for (const externalName of ["created.bin", "CREATED.BIN"]) test(`Dockerfile cont
   assert.ok(!(await fs.readdir(dirname(root))).some((name) => name.startsWith(".dockerfile-")));
 });
 
-test("Dockerfile shared Project review prepares only the shared baseline and never imports legacy source", async (t) => {
+test("Dockerfile shared Project review prepares only the shared baseline uses its readable source siblings", async (t) => {
   const f = await fixture(t); await realLinkedCheckout(f);
-  const targets = await hostConfigTargets(f.input); const legacy = targets.ignoredLegacyPaths[0]!;
-  for (const [config, original] of [[targets.paths.project, "shared-original"], [legacy, "legacy-original"]]) {
+  const targets = await hostConfigTargets(f.input);
+  for (const [config, original] of [[targets.paths.project, "shared-original"]]) {
     await fs.mkdir(join(dirname(config!), "build-context"), { recursive: true });
     await fs.writeFile(join(dirname(config!), "Dockerfile"), from + `RUN ${original}\n`);
     await fs.writeFile(join(dirname(config!), "build-context", "setup.sh"), `echo ${original}\n`);
@@ -789,8 +771,6 @@ test("Dockerfile shared Project review prepares only the shared baseline and nev
   const saved = await f.run(true, { scope: "project", content, context: [{ path: "setup.sh", content: "echo changed", executable: true }] });
   assert.equal(saved.saved, true, JSON.stringify(saved)); assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
   assert.equal(await fs.readFile(join(dirname(targets.paths.project), "Dockerfile"), "utf8"), content);
-  assert.equal(await fs.readFile(join(dirname(legacy), "Dockerfile"), "utf8"), from + "RUN legacy-original\n");
-  assert.equal(await fs.readFile(join(dirname(legacy), "build-context", "setup.sh"), "utf8"), "echo legacy-original\n");
 });
 
 test("Dockerfile combined Project headless and competing lease remain write-free", async (t) => {
@@ -843,4 +823,19 @@ test("Dockerfile combined Project approval retains shared lease through reload a
   assert.equal(await fs.readFile(join(dirname(paths.project), "Dockerfile"), "utf8"), content);
   assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
   const released = f.control.settings!.acquireInteraction(); assert.ok(released); released.release();
+});
+
+test("Dockerfile context-only nonGit save never catalogs source config.toml or its _repository template", async (t) => {
+  const f = await fixture(t);
+  const source = '_repository = { version = 1, common_dir = "/missing/.git", main_root = "/missing" }\n';
+  const saved = await f.run(true, { scope: "project", context: [{ path: "config.toml", content: source }] });
+  assert.equal(saved.saved, true, JSON.stringify(saved));
+  const targets = await hostConfigTargets(f.input);
+  assert.equal(targets.repository, undefined);
+  await assert.rejects(fs.lstat(targets.paths.project), { code: "ENOENT" });
+  await assert.rejects(fs.lstat(join(dirname(targets.paths.project), "Dockerfile")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(join(dirname(targets.paths.project), "build-context", "config.toml"), "utf8"), source);
+  const inspected = await f.run(false, { scope: "project", contextPaths: ["config.toml"] });
+  assert.equal(inspected.contextFiles[0].content, source);
+  await resolveConfig(f.input);
 });

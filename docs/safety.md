@@ -94,8 +94,8 @@ shutdown; transcript resume doesn't restore them. Ordinary settings reload keeps
 them. Persist lasting restrictions in Project or Global. Git main, linked and
 nested cwd share main-root Project policy, never a broader mount or Session grant.
 Session ownership and replacement safety remain per canonical current cwd.
-Non-Git/unsupported layouts remain cwd-local; Global stays unchanged. Ignored
-legacy Worktree files never become shared grants without fresh manual review.
+Non-Git/unsupported layouts remain cwd-local; Global stays unchanged. Readable
+host-owned Project storage never changes the cwd boundary or imports old grants.
 
 ## Approved configuration tools
 
