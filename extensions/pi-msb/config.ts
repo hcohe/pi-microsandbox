@@ -987,7 +987,6 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
       merged.value.image = buildImageReference(imageBuild.identity);
       merged.value.pullPolicy = "never";
       merged.provenance.pullPolicy = selectedSource.scope;
-      warnings.push(`image source: ${selectedSource.scope} Dockerfile ${selectedSource.dockerfile}; generated local image, pull_policy=never`);
     } catch { throw new ConfigError(["host-owned loaded Dockerfile selection could not be safely verified"]); }
   }
   let config = validateConfig(merged.value);

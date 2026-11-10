@@ -42,6 +42,8 @@ export interface SandboxManagerDeps {
   disposed?(): void;
   /** Successful adoption, or conservative loss of VM-instance certainty after inspection. */
   adopted?(request: BootRequest, verification: "created" | "reconnected" | "live"): void;
+  /** Boot attempt, excluding already-active and live-settings-only reloads. */
+  bootInitiated?(request: BootRequest): void;
   onState?(state: RuntimeState): void;
   now?: () => number;
 }
@@ -381,6 +383,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     await activationGuard?.();
 
     lastRequest = request;
+    deps.bootInitiated?.(request);
     publish({ status: "booting", info: null, pendingName: name });
     let owner: LockHandle | null;
     try {

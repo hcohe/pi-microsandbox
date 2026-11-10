@@ -151,9 +151,15 @@ image. Project overrides Global, and a Session `image` disables inherited
 Dockerfile discovery. With neither image nor Dockerfile, the bundled digest pin
 is used. Remove a scope's explicit `image` to enable its Dockerfile; changing
 `pull_policy` alone does not disable discovery. Discovered images always use
-`pull_policy = "never"`. Settings show the generated local reference, source scope
-and a Dockerfile-path warning; unrelated settings saves do **not** persist the
-generated reference. Do not copy effective settings into a policy file.
+`pull_policy = "never"`. Settings show the generated local reference and source
+scope; unrelated settings saves do **not** persist the generated reference. When a
+verified loaded selection enters startup or reload boot (not passive inspection or a no-op/live-settings
+reload), Pi shows one informational notice:
+`Booting from custom image (Project Dockerfile: <path>)` (or `Global Dockerfile`).
+The TUI uses dim theme text; RPC receives plain text, and headless modes do not
+notify. The display path preserves your configured Pi agent directory alias and
+abbreviates your home as `~`. This announces a boot attempt, not success or a build.
+Do not copy effective settings into a policy file.
 
 A minimal Dockerfile can derive from the bundled image (use the exact digest pin
 returned by `msb_dockerfile_get`, not effective `msb_config_get` image, which may

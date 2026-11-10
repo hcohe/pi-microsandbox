@@ -15,6 +15,7 @@ import { registerMsbCommand, systemPromptNote } from "./command.ts";
 import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
+import { notifyCustomImageBoot } from "./image-boot-notice.ts";
 import { registerConfigTools } from "./settings-tools.ts";
 import { registerDiagnosticsTool } from "./diagnostics-tools.ts";
 import { registerDockerfileTools } from "./dockerfile-tools.ts";
@@ -57,6 +58,9 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     env: process.env,
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
     entries: () => currentContext?.sessionManager.getEntries() ?? [],
+    onCustomImageBoot: (source) => {
+      if (currentContext) notifyCustomImageBoot(currentContext, source);
+    },
     onState: (state) => {
       if (currentContext) updateStatus(currentContext, state);
     },

@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import type { DockerfileSource } from "./image-source.ts";
 import { openDockerfile } from "./dockerfile-storage.ts";
 import { BUILD_FAILURE, buildDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
 import { isIP } from "node:net";
@@ -81,6 +82,7 @@ export interface MsbControlOptions {
   entries?: () => readonly unknown[];
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
   onState?: (state: RuntimeState) => void;
+  onCustomImageBoot?: (source: DockerfileSource) => void;
 }
 
 export interface MsbIntegration {
@@ -548,6 +550,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   // Manager preflights reuse the boot request. Retain its originating lifecycle
   // identity so late boot/reconnect callbacks cannot publish obsolete metadata.
   const requestExecutions = new WeakMap<BootRequest, SessionExecutionIdentity>();
+  const requestBootNotices = new WeakMap<BootRequest, () => void>();
+  deps.bootInitiated = (request) => requestBootNotices.get(request)?.();
   let adopted: { identity: SessionExecutionIdentity; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot; mounts: Config["mounts"] } | undefined;
   const currentAdoption = () => adopted?.identity === execution.context.current() ? adopted : undefined;
   deps.adopted = (request, verification) => {
@@ -626,6 +630,9 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       if (!current()) return visibleState();
       // Keep recovery's reviewed runtime status stable until approval is revalidated.
       failureState = null;
+      if (source) requestBootNotices.set(request, () => {
+        if (current()) options.onCustomImageBoot?.(source);
+      });
       const result = await manager.boot(request, approvalBound ? assertApproval : undefined);
       if (approvalBound) await assertApproval();
       if (!current()) return visibleState();

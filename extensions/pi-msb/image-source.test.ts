@@ -31,7 +31,7 @@ test("Dockerfile source is atomic by scope and scalar provenance reflects the ge
   assert.equal(result.provenance.image, "host-default");
   assert.equal(result.provenance.pullPolicy, "host-default");
   assert.equal(result.imageBuild?.dockerfile, f.global);
-  assert.match(result.warnings.join(" "), /image source: host-default Dockerfile/);
+  assert.deepEqual(result.warnings, []);
   await f.write(f.paths.global, 'image="global-explicit"\n');
   result = await resolveConfig(f.input);
   assert.equal(result.config.image, "global-explicit");
@@ -158,7 +158,8 @@ test("settings inspections and unrelated saves preserve discovered source withou
   const editor = new SettingsEditor(f.input, "source-test");
   const inspection = await editor.inspect();
   assert.match(JSON.stringify(inspection), /localhost\/pi-msb-build/);
-  assert.match(JSON.stringify(inspection), /Dockerfile/);
+  assert.deepEqual(inspection.warnings, []);
+  assert.match(JSON.stringify(inspection.origins), /"image":"host-project"/);
   const draft = await editor.open("project");
   draft.set("cpus", 3);
   await draft.apply();
