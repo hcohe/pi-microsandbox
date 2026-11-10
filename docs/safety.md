@@ -25,7 +25,11 @@ There are explicit ways to leave that boundary:
 
 Host recovery first uses passive `msb_diagnostics` and `msb_config_get`. The agent
 must explain the narrow live diagnostic need before requesting approval of the
-exact command, timeout and fixed session cwd. Existing host permission is required;
+exact command and execution cwd (the fixed session cwd by default). The Bash timeout remains part of the
+authorized request and is enforced, but has no separate approval-dialog row.
+The dialog warning is exactly:
+`Warning: this operation runs on the host and bypasses any isolation.`
+Existing host permission is required;
 unresolved configuration/identity and booting/stopping remain blocked. Every call
 needs fresh approval; no grant or automatic host retry is created. Recovery binds
 to the canonical cwd and physical directory identity captured during workspace
@@ -36,6 +40,45 @@ and process spawning are not jointly atomic against host filesystem races.
 Shell commands
 have real host-user privileges, are not guaranteed read-only, and timeout does not
 guarantee descendant confinement.
+
+Agent-requested host Bash must be **one simple, clear, human-readable command per
+call and per approval**: a normal executable with literal arguments and only
+necessary quoting. Run every step separately with fresh approval, and explain
+its purpose, narrow need for host execution and relevant effects in one short
+sentence. Do not repeat the literal command in the agent description or narration;
+the approval dialog already shows the exact command. Do not narrate timeout choices or routine execution settings unless
+asked or diagnosing a timeout failure; timeouts remain enforced. Mention the
+execution directory in request prose only when it differs from the default session
+cwd; otherwise omit directory narration. Avoid repetitive operational narration.
+The approval dialog still shows the actual working directory.
+No chaining (`&&`, `||`, semicolons), pipelines, multiline command sequences,
+shell substitutions (`$()` or backticks), loops, `eval`, encoded payloads,
+`sh -c`, code-oneliners or script wrappers hiding multiple operations. Do not
+characterize arbitrary shell as harmless or read-only. These are strict agent
+instructions, not a shell parser or a change to execution permissions.
+
+Host Bash accepts an optional `cwd` for an existing directory (at most 4096 UTF-8
+bytes, without control/bidi/newline characters). Omitted means the fixed session
+cwd; relative paths resolve against that same session cwd, never the previous
+command or Pi process cwd. Use this parameter instead of `cd` or chaining.
+The dialog shows the normalized directory and, for symlink aliases, the canonical
+execution target. Directories outside the canonical **current session/VM workspace**
+use the theme's error/red color, including sibling-prefix paths and symlink escapes.
+This boundary is not the main checkout's shared Project policy/storage root.
+RPC/select-only prompts show the same paths without color. The TUI command uses
+real Bash syntax highlighting over the theme's green success-color base after
+terminal controls are escaped; wrapping keeps
+the complete visible command intact. RPC/select-only command text remains plain.
+
+Each one-shot approval binds the requested cwd, normalized/canonical paths and
+physical directory identity. Requested-directory and original session-root proofs
+are rechecked before approval, after Yes and before host handoff; failed validation
+consumes/invalidates that approval even if paths are restored. Changing the cwd
+requires fresh approval. The native host Bash tool runs directly in the approved
+canonical directory; this does not change VM mounts or shared Project identity.
+`cwd` is rejected for sandbox Bash, non-Bash tools and explicit off/host-fallback
+mode (whose existing behavior without `cwd` is unchanged). Filesystem validation
+and process spawn still cannot be made jointly atomic with public path APIs.
 
 Keep block mode for untrusted work. The default pass-throughs are `web_search`,
 `source_check`, and `fetch_content`; other third-party tools are blocked unless

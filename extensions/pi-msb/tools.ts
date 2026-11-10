@@ -30,6 +30,9 @@ import type {
   SandboxGrepExecute,
   ToolOpsProvider,
 } from "./types.ts";
+import { approveHostExecution } from "./host-approval.ts";
+import { HOST_COMMAND_GUIDANCE } from "./host-command-guidance.ts";
+import { assertHostBashCwdCurrent, discoverHostBashCwd, hostCwdDisplay, HOST_BASH_CWD_DESCRIPTION, HOST_BASH_CWD_ERROR, HOST_BASH_CWD_MAX_BYTES, validHostBashCwd, type HostBashCwd } from "./host-bash-cwd.ts";
 
 export type ExecutionTarget = ContractExecutionTarget;
 
@@ -37,14 +40,16 @@ type RoutedToolName = "bash" | "edit" | "find" | "grep" | "ls" | "read" | "write
 const ROUTED_TOOLS: readonly RoutedToolName[] = ["bash", "edit", "find", "grep", "ls", "read", "write"];
 const ROUTED_TOOL_SET = new Set<string>(ROUTED_TOOLS);
 const EXECUTION_TARGET_DESCRIPTION =
-  'Where to execute this tool call. Omit this or use "sandbox" normally. Use "host" only when sandbox execution cannot perform the operation; host execution requires individual user approval. For recovery while unavailable/disabled, only bash is allowed, with an explicit finite positive timeout <=120 seconds, ready workspace/configuration and host execution permission. Start with msb_diagnostics and msb_config_get, then explain the narrow diagnostic need. Host commands run with real host-user privileges outside VM/network isolation; timeout does not guarantee descendant confinement.';
+  'Where to execute this tool call. Omit this or use "sandbox" normally. Use "host" only when sandbox execution cannot perform the operation; host execution requires individual user approval. For recovery while unavailable/disabled, only bash is allowed, with an explicit finite positive timeout <=120 seconds, ready workspace/configuration and host execution permission. Host commands run with real host-user privileges outside VM/network isolation; timeout does not guarantee descendant confinement. ' + HOST_COMMAND_GUIDANCE;
 
 /** Add the routing control without changing any of the built-in required fields. */
 export function withExecutionTarget<T extends Type.TProperties>(
   schema: Type.TObject<T>,
+  hostBash = false,
 ): Type.TObject<any> {
   return Type.Object({
     ...schema.properties,
+    ...(hostBash ? { cwd: Type.Optional(Type.String({ minLength: 1, maxLength: HOST_BASH_CWD_MAX_BYTES, description: HOST_BASH_CWD_DESCRIPTION })) } : {}),
     execution_target: Type.Optional(
       Type.Unsafe<ExecutionTarget>({
         type: "string",
@@ -82,31 +87,50 @@ function hostRequestFingerprint(
   return JSON.stringify(sortForFingerprint([tool, cwd, withoutExecutionTarget(input)]));
 }
 
+/** Restore the green base after lexer resets; carry multiline token colors across rendered lines. */
+function highlightHostBash(content: string, theme: Pick<Theme, "fg">): string[] {
+  const base = theme.fg("success", "").replace(/\x1b\[(?:0|39)m$/, "")
+    .match(/^(?:\x1b\[[0-9;:]*m)+/)?.[0] ?? "";
+  let tokenForeground = "";
+  return highlightCode(content, "bash").map((line) => {
+    const continuation = tokenForeground;
+    const highlighted = line.replace(/\x1b\[([0-9;:]*)m/g, (escape, parameters: string) => {
+      if (parameters === "0" || parameters === "39") { tokenForeground = ""; return escape + base; }
+      if (/^(?:3[0-7]|9[0-7]|38[;:])/.test(parameters)) tokenForeground = escape;
+      return escape;
+    });
+    return theme.fg("success", continuation + highlighted);
+  });
+}
+
 export function hostApprovalMessage(
   tool: string,
   input: Record<string, unknown>,
   cwd: string,
   theme?: Pick<Theme, "fg" | "bold">,
+  hostCwd?: HostBashCwd,
 ): string {
   const label = (text: string) => theme ? theme.fg("muted", text) : text;
-  const value = (text: string) => theme ? theme.fg("text", text) : text;
+  const value = (text: string) => theme ? theme.fg(hostCwd?.outsideWorkspace ? "error" : "text", text) : text;
+  const directory = hostCwd?.target.lexicalPath ?? cwd;
   const command = tool === "bash" && typeof input.command === "string" ? input.command : undefined;
   // Commands are no longer JSON-escaped: keep terminal controls visible, not executable.
   const content = command === undefined
     ? JSON.stringify(sortForFingerprint(withoutExecutionTarget(input)), null, 2)
     : command.replace(/[\p{Cc}\p{Cf}]/gu, (char) => char === "\n" ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`);
-  const warning = "Warning: this operation runs on the host and bypasses VM, process, and network isolation.";
+  const warning = "Warning: this operation runs on the host and bypasses any isolation.";
   return [
     `${label("Tool:")} ${theme ? theme.bold(theme.fg("accent", tool)) : tool}`,
-    `${label("Working directory:")} ${value(cwd)}`,
-    ...(command === undefined ? [] : [`${label("Timeout (seconds):")} ${value(input.timeout === undefined ? "not specified" : String(input.timeout))}`]),
+    `${label("Working directory:")} ${value(hostCwdDisplay(directory))}`,
+    ...(hostCwd && hostCwd.target.lexicalPath !== hostCwd.target.canonicalPath
+      ? [`${label("Canonical directory (execution target):")} ${value(hostCwdDisplay(hostCwd.target.canonicalPath))}`] : []),
     "",
     theme ? theme.bold(theme.fg("warning", warning)) : warning,
     "",
     label(command === undefined ? "Exact arguments:" : "Command:"),
     ...(command === undefined ? [] : [""]),
-    ...(theme && command === undefined ? highlightCode(content, "json") : content.split("\n"))
-      .map((line) => command === undefined ? `  ${line}` : theme ? theme.fg("syntaxString", line) : line),
+    ...(theme ? command === undefined ? highlightCode(content, "json") : highlightHostBash(content, theme) : content.split("\n"))
+      .map((line) => command === undefined ? `  ${line}` : line),
   ].join("\n");
 }
 
@@ -135,8 +159,11 @@ interface HostCallApproval {
   fingerprint: string;
   status: RuntimeState["status"];
   token: object | undefined;
+  cwd?: HostBashCwd;
+  rootProofRequired: boolean;
+  requestCurrent(): boolean;
 }
-const HOST_RECOVERY_ROOT_ERROR = "Host recovery requires the originally discovered canonical cwd and physical directory identity; the root is changed, unreadable or unproven. Rediscover the workspace before retrying.";
+const HOST_ROOT_ERROR = "Host execution requires the originally discovered canonical cwd and physical directory identity; the root is changed, unreadable or unproven. Rediscover the workspace before retrying.";
 
 function isHostRecoveryState(state: RuntimeState): boolean {
   return state.status === "unavailable" || state.status === "disabled";
@@ -157,7 +184,7 @@ function isSandboxActive(state: RuntimeState, provider: ToolOpsProvider): boolea
 
 function unavailableError(_state: RuntimeState): Error {
   // Startup/adapter reasons can contain data for which no redaction context exists.
-  return new Error("Sandbox is unavailable; routed tool execution is blocked. Use msb_diagnostics and msb_config_get to diagnose it; msb_config_set can request an approved repair without a running sandbox. After passive inspection, explain the narrow diagnostic need and explicitly request bash with execution_target=\"host\" and a finite positive timeout <=120 seconds for individual human approval, only with ready identity/configuration and host permission. Other routed calls remain blocked; do not disable protection or enable fallback.");
+  return new Error("Sandbox is unavailable; routed tool execution is blocked. Use msb_diagnostics and msb_config_get to diagnose it; msb_config_set can request an approved repair without a running sandbox. After passive inspection, explain the narrow diagnostic need and explicitly request bash with execution_target=\"host\" and a finite positive timeout <=120 seconds for individual human approval, only with ready identity/configuration and host permission. Other routed calls remain blocked; do not disable protection or enable fallback. " + HOST_COMMAND_GUIDANCE);
 }
 
 function routeError(tool: string): Error {
@@ -273,6 +300,14 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     if (typeof id === "string") approvedHostCalls.delete(id);
   };
 
+  const cwdRequestError = (tool: string, input: ToolParams, state: RuntimeState): string | undefined => {
+    if (!("cwd" in input)) return;
+    if (tool !== "bash" || input.execution_target !== "host" || isHostMode(state)) {
+      return "cwd is supported only for explicitly approved host Bash, not sandbox/other tools or off/host-fallback mode.";
+    }
+    if (!Object.hasOwn(input, "cwd") || !validHostBashCwd(input.cwd)) return "Host Bash cwd must be a nonempty safe directory path of at most 4096 UTF-8 bytes, without control/format characters.";
+  };
+
   const hostRequestError = (tool: string, input: ToolParams, state: RuntimeState): string | undefined => {
     if (execution && !execution.isReady()) return unavailableError(state).message;
     const recovery = isHostRecoveryState(state);
@@ -289,10 +324,10 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     return;
   };
 
-  const validateRecoveryRoot = async (identity: SessionExecutionIdentity, token: object | undefined): Promise<void> => {
-    if (!token || !deps.provider.validateHostRecoveryRoot) throw new Error(HOST_RECOVERY_ROOT_ERROR);
+  const validateHostRoot = async (identity: SessionExecutionIdentity, token: object | undefined): Promise<void> => {
+    if (!token || !deps.provider.validateHostRecoveryRoot) throw new Error(HOST_ROOT_ERROR);
     try { await deps.provider.validateHostRecoveryRoot(identity, token); }
-    catch { throw new Error(HOST_RECOVERY_ROOT_ERROR); }
+    catch { throw new Error(HOST_ROOT_ERROR); }
   };
 
   const requireApprovedHostExecution = (
@@ -304,7 +339,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
   ): HostCallApproval => {
     const approved = approvedHostCalls.get(id);
     approvedHostCalls.delete(id);
-    if (!approved || approved.identity !== identity || approved.fingerprint !== hostRequestFingerprint(tool, input, identity.cwd)
+    if (!approved || !approved.requestCurrent() || approved.identity !== identity || approved.fingerprint !== hostRequestFingerprint(tool, input, identity.cwd)
       || approved.status !== state.status || approved.token !== deps.provider.hostExecutionToken?.()) {
       throw new Error("Host execution was not approved for this exact tool call.");
     }
@@ -333,17 +368,26 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       }
       const approved = requireApprovedHostExecution(definition.name, id, input, identity, state);
       if (!ctx.hasUI) throw new Error("Host execution requires user approval, but no interactive UI is available.");
-      if (isHostRecoveryState(state)) {
-        await validateRecoveryRoot(identity, approved.token);
+      const assertApprovedCurrent = () => {
         assertCurrent(identity);
         const currentState = stateOf(deps);
-        if (!isHostTarget(input) || approved.fingerprint !== hostRequestFingerprint(definition.name, input, identity.cwd)
+        if (!approved.requestCurrent() || !isHostTarget(input) || approved.fingerprint !== hostRequestFingerprint(definition.name, input, identity.cwd)
           || currentState.status !== approved.status || deps.provider.hostExecutionToken?.() !== approved.token
-          || !deps.config.routeTools.includes(definition.name as RoutedToolName) || !ctx.hasUI) {
+          || !deps.config.routeTools.includes(definition.name as RoutedToolName) || !ctx.hasUI
+          || cwdRequestError(definition.name, input, currentState) || hostRequestError(definition.name, input, currentState)) {
           throw new Error("Host execution was not approved for this exact tool call.");
         }
-        const currentError = hostRequestError(definition.name, input, currentState);
-        if (currentError) throw new Error(currentError);
+      };
+      if (approved.rootProofRequired) {
+        await validateHostRoot(identity, approved.token);
+        assertApprovedCurrent();
+      }
+      if (approved.cwd) {
+        await assertHostBashCwdCurrent(approved.cwd, assertApprovedCurrent);
+        assertApprovedCurrent();
+        // A per-call native tool pins the actual canonical cwd; never prefix a shell cd.
+        const { cwd: _requestedCwd, ...params } = withoutExecutionTarget(input);
+        return createHostDefinition("bash", approved.cwd.target.canonicalPath).execute(id, params, signal, onUpdate, ctx);
       }
     } else clearApproval(id);
     return definition.execute(id, withoutExecutionTarget(input), signal, onUpdate, ctx);
@@ -353,7 +397,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const hostDefinition = hostDefinitions[name];
     const wrapped: AnyToolDefinition = {
       ...hostDefinition,
-      parameters: withExecutionTarget(hostDefinition.parameters as Type.TObject<any>),
+      parameters: withExecutionTarget(hostDefinition.parameters as Type.TObject<any>, name === "bash"),
       execute: async (id, rawParams, signal, onUpdate, ctx) => {
         const identity = currentIdentity();
         assertCurrent(identity);
@@ -366,6 +410,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         const hostMode = isHostMode(state);
         const active = isSandboxActive(state, deps.provider);
         const targetHost = isHostTarget(params);
+        const cwdError = cwdRequestError(name, params, state);
+        if (cwdError) { clearApproval(id); throw new Error(cwdError); }
 
         if (!deps.config.routeTools.includes(name)) {
           clearApproval(id);
@@ -437,6 +483,8 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       if (!deps.config.routeTools.includes(tool)) {
         return { block: true, reason: `Tool ${tool} is excluded from pi-microsandbox routing by configuration.` };
       }
+      const cwdError = cwdRequestError(tool, input, state);
+      if (cwdError) return { block: true, reason: cwdError };
       if (hostMode) return;
       if (input.execution_target !== "host") {
         if (!active) return { block: true, reason: unavailableError(state).message };
@@ -455,31 +503,45 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       const fingerprint = hostRequestFingerprint(tool, input, identity.cwd);
       const token = deps.provider.hostExecutionToken?.();
       const status = state.status;
+      const requestedCwd = tool === "bash" ? input.cwd as string | undefined : undefined;
+      const reviewedInput = structuredClone(input);
       const changed = () => currentIdentity() !== identity || execution && !execution.isReady()
         || event.toolCallId !== id || event.toolName !== tool || event.input !== input
         || asRecord(event.input).execution_target !== "host"
+        || (tool === "bash" && asRecord(event.input).cwd !== requestedCwd)
         || hostRequestFingerprint(tool, asRecord(event.input), identity.cwd) !== fingerprint
         || stateOf(deps).status !== status || deps.provider.hostExecutionToken?.() !== token
         || !ctx.hasUI || !deps.config.routeTools.includes(tool as RoutedToolName)
+        || cwdRequestError(tool, asRecord(event.input), stateOf(deps))
         || hostRequestError(tool, asRecord(event.input), stateOf(deps));
       const changedResult = () => ({ block: true, reason: "Session execution context or host request/readiness/configuration/runtime changed while awaiting approval; request again." });
-      const recovery = isHostRecoveryState(state);
-      if (recovery) {
-        try { await validateRecoveryRoot(identity, token); }
-        catch { return { block: true, reason: HOST_RECOVERY_ROOT_ERROR }; }
+      const rootProofRequired = isHostRecoveryState(state) || tool === "bash" && !!token && !!deps.provider.validateHostRecoveryRoot;
+      if (rootProofRequired) {
+        try { await validateHostRoot(identity, token); }
+        catch { return { block: true, reason: HOST_ROOT_ERROR }; }
         if (changed()) return changedResult();
       }
-      // Keep RPC prompts plain, and make denial the default in the TUI selector.
-      const message = hostApprovalMessage(tool, input, identity.cwd, ctx.mode === "tui" ? ctx.ui.theme : undefined);
-      const choice = await ctx.ui.select(`Allow host execution?\n\n${message}`, ["No", "Yes"]);
+      let hostCwd: HostBashCwd | undefined;
+      const assertRequestCurrent = () => { if (changed()) throw new Error("Host request changed while awaiting approval."); };
+      if (tool === "bash") {
+        try { hostCwd = await discoverHostBashCwd(identity.cwd, requestedCwd, assertRequestCurrent); }
+        catch { return changed() ? changedResult() : { block: true, reason: HOST_BASH_CWD_ERROR }; }
+        if (changed()) return changedResult();
+      }
+      const choice = await approveHostExecution(ctx, (theme) => hostApprovalMessage(tool, reviewedInput, identity.cwd, theme, hostCwd));
       if (changed()) return changedResult();
       if (choice !== "Yes") return { block: true, reason: "Host execution was denied by the user." };
-      if (recovery) {
-        try { await validateRecoveryRoot(identity, token); }
-        catch { return { block: true, reason: HOST_RECOVERY_ROOT_ERROR }; }
+      if (rootProofRequired) {
+        try { await validateHostRoot(identity, token); }
+        catch { return { block: true, reason: HOST_ROOT_ERROR }; }
         if (changed()) return changedResult();
       }
-      approvedHostCalls.set(id, { identity, fingerprint, status, token });
+      if (hostCwd) {
+        try { await assertHostBashCwdCurrent(hostCwd, assertRequestCurrent); }
+        catch { return changed() ? changedResult() : { block: true, reason: HOST_BASH_CWD_ERROR }; }
+        if (changed()) return changedResult();
+      }
+      approvedHostCalls.set(id, { identity, fingerprint, status, token, cwd: hostCwd, rootProofRequired, requestCurrent: () => !changed() });
       return;
     }
 

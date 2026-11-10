@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { openControlPanel, PanelLaunchError } from "./control-panel.ts";
 import type { MsbControl, RuntimeState } from "./types.ts";
+import { HOST_COMMAND_GUIDANCE } from "./host-command-guidance.ts";
 export type CommandContext = Pick<ExtensionCommandContext, "ui" | "hasUI" | "mode" | "waitForIdle">;
 export type CommandHandler = (args: string, ctx: CommandContext) => Promise<void>;
 
@@ -33,10 +34,10 @@ export function systemPromptNote(state: RuntimeState): string {
   switch (state.status) {
     case "active": {
       const info = state.info;
-      if (!info) return "MSB is active, but runtime details are unavailable.";
+      if (!info) return `MSB is active, but runtime details are unavailable. ${HOST_COMMAND_GUIDANCE}`;
       const targetWarning =
         " Host-target execution, when enabled, is an explicit escape from the sandbox and should be used deliberately.";
-      return `MSB sandbox ${info.name} has the host workspace mounted read/write at ${info.root}.${targetWarning}`;
+      return `MSB sandbox ${info.name} has the host workspace mounted read/write at ${info.root}.${targetWarning} ${HOST_COMMAND_GUIDANCE}`;
     }
     case "off":
       return "MSB is explicitly off: tools run on the host. No sandbox is active.";
@@ -44,7 +45,7 @@ export function systemPromptNote(state: RuntimeState): string {
       return "MSB could not start and is using the configured host fallback. This is different from explicitly turning MSB off.";
     case "disabled":
     case "unavailable":
-      return "MSB is unavailable/disabled and ordinary routed tools are blocked. Use msb_diagnostics for read-only diagnostics, msb_config_get for settings, and msb_config_set for an explicitly approved repair; these host management tools do not require a running sandbox. Start with those passive tools. If live host diagnosis is still needed, explain the narrow need and request one bash call with execution_target=\"host\" and an explicit finite positive timeout <=120 seconds. Recovery requires ready current workspace/configuration, host-execution permission and fresh No-first human approval of the exact command, timeout and fixed session cwd. Commands run with real host-user privileges outside VM/process/network isolation, not guaranteed read-only; timeout does not guarantee descendant confinement. Never automatically retry on host, disable protection, enable fallback or broaden grants as a workaround. Malformed host configuration or workspace discovery errors may require human repair; /msb → Actions → Reload settings retries after repair.";
+      return "MSB is unavailable/disabled and ordinary routed tools are blocked. Use msb_diagnostics for read-only diagnostics, msb_config_get for settings, and msb_config_set for an explicitly approved repair; these host management tools do not require a running sandbox. Start with those passive tools. If live host diagnosis is still needed, explain the narrow need and request one bash call with execution_target=\"host\" and an explicit finite positive timeout <=120 seconds. Recovery requires ready current workspace/configuration, host-execution permission and fresh No-first human approval of the exact command, timeout and execution cwd (default: fixed session cwd). Commands run with real host-user privileges outside VM/process/network isolation, not guaranteed read-only; timeout does not guarantee descendant confinement. Never automatically retry on host, disable protection, enable fallback or broaden grants as a workaround. Malformed host configuration or workspace discovery errors may require human repair; /msb → Actions → Reload settings retries after repair. " + HOST_COMMAND_GUIDANCE;
     case "booting":
       return "MSB is booting; wait for it to become active before using routed tools.";
     case "stopping":

@@ -16,10 +16,22 @@ secret-redacted state—no commands, SDK loading, file/environment reads, logs,
 credential resolution, or VM startup. It isn't a live health check.
 
 If passive inspection is insufficient, ask the agent to explain the narrow live
-diagnostic need and request one `bash` call with `execution_target: "host"` and
-an explicit finite positive `timeout` ≤120 seconds. With ready current workspace
-identity/configuration and existing host permission, unavailable/disabled recovery
-shows the exact command, timeout and fixed session cwd for fresh No-first approval.
+diagnostic need and expected host effects, then request one simple, clear,
+human-readable command in one `bash` call with `execution_target: "host"` and
+an explicit finite positive `timeout` ≤120 seconds. Each step needs its own call
+and fresh approval; never chain commands or hide multiple operations in shell
+syntax or wrappers. Follow the
+[host command instructions](safety.md#fail-closed-by-default).
+With ready current workspace identity/configuration and existing host permission,
+unavailable/disabled recovery shows the exact command and execution directory for fresh No-first approval.
+Use optional host Bash `cwd` for a different existing directory instead of `cd` or
+chaining; relative paths resolve against the fixed session cwd. The approval shows
+any different canonical target and colors outside-workspace directories red in the
+TUI, including symlink escapes. Each directory change needs fresh approval and
+identity validation; the original session-root proof remains required even for
+outside directories. The required timeout remains authorized and enforced, without a separate dialog row.
+The inline TUI approval has no navigation footer; RPC/select-only UI chrome is
+controlled by its adapter.
 No interactive UI means no execution. Other routed tools and booting/stopping
 remain blocked; unresolved identity/configuration requires manual host repair.
 Recovery also rejects changed canonical cwd or physical directory identity, even

@@ -6,8 +6,10 @@ import path from "node:path";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { Type } from "typebox";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { highlightCode, initTheme } from "@earendil-works/pi-coding-agent";
+import { systemPromptNote } from "./command.ts";
 import {
   hostApprovalMessage,
   registerSandboxTools,
@@ -131,6 +133,7 @@ function createHarness(options: {
   grepResult?: unknown;
   select?: () => Promise<string | undefined>;
   operations?: RuntimeExecution["operations"];
+  promptNote?: (state: RuntimeState) => string;
 } = {}) {
   const cwd = process.cwd();
   let current = options.runtimeState ?? state();
@@ -202,7 +205,7 @@ function createHarness(options: {
       truncateLine: (text: string) => ({ text, wasTruncated: false }),
       formatSize: (bytes: number) => `${bytes} bytes`,
     },
-    systemPromptNote: (runtimeState) => `mode:${runtimeState.status}`,
+    systemPromptNote: options.promptNote ?? ((runtimeState) => `mode:${runtimeState.status}`),
   });
   return {
     tools,
@@ -239,33 +242,35 @@ test("approval messages omit routing and use a generic host-isolation warning", 
   }, "/work/repo");
   assert.match(message, /Tool: read/);
   assert.match(message, /Working directory: \/work\/repo/);
-  assert.match(message, /bypasses VM, process, and network isolation/i);
+  assert.equal(message.split("\n").find((line) => line.startsWith("Warning:")), "Warning: this operation runs on the host and bypasses any isolation.");
   assert.doesNotMatch(message, /execution_target|mode|volume/i);
   assert.ok(message.indexOf('"path"') < message.indexOf('"z"'));
 });
 
-test("Bash approval shows the literal command and timeout instead of JSON", () => {
+test("Bash approval shows the literal command without a timeout row or JSON", () => {
   const command = 'ls -la "$HOME/Desktop"\nprintf "hello\\n"';
   const message = hostApprovalMessage("bash", { command, timeout: 10, execution_target: "host" }, "/work/repo");
   assert.equal(message.split("Command:\n\n")[1], command);
-  assert.match(message, /Timeout \(seconds\): 10/);
+  assert.doesNotMatch(message, /Timeout|timeout/);
   assert.doesNotMatch(message, /Exact arguments|"command"|execution_target/);
 });
 
-test("Bash approval colors every command line with the theme's orange string color", () => {
-  const calls: Array<{ color: string; text: string }> = [];
-  const theme = {
-    ...approvalTheme,
-    fg(color: string, text: string) {
-      calls.push({ color, text });
-      return approvalTheme.fg(color, text);
-    },
-  };
+test("Bash approval uses the real Bash lexer without changing visible command text", () => {
   const command = 'ls -la "$HOME/Desktop"\nprintf "hello\\n"';
-  const message = hostApprovalMessage("bash", { command }, "/work/repo", theme);
-  assert.equal(stripVTControlCharacters(message).split("Command:\n\n")[1], command);
-  assert.deepEqual(calls.filter(({ color }) => color === "syntaxString"),
-    command.split("\n").map((text) => ({ color: "syntaxString", text })));
+  const message = hostApprovalMessage("bash", { command }, "/work/repo", approvalTheme);
+  const lines = message.split("\n");
+  const code = lines.slice(lines.findIndex((line) => stripVTControlCharacters(line) === "Command:") + 2).join("\n");
+  const greenStart = approvalTheme.fg("success", "BASE").split("BASE")[0]!;
+  const codeLines = code.split("\n");
+  for (const [index, line] of highlightCode(command, "bash").entries()) {
+    assert.ok(codeLines[index]!.startsWith(greenStart));
+    assert.ok(codeLines[index]!.endsWith("\x1b[39m"));
+    for (const token of line.matchAll(/\x1b\[(?:38;[25];[0-9;]+|3[0-7]|9[0-7])m/g)) {
+      assert.ok(codeLines[index]!.includes(token[0]), "Bash lexer token foregrounds remain intact");
+    }
+  }
+  assert.equal(stripVTControlCharacters(code), command);
+  assert.notEqual(code, approvalTheme.fg("syntaxString", command));
 });
 
 test("Bash approval escapes terminal controls rather than executing or hiding them", () => {
@@ -301,7 +306,7 @@ test("approval selector defaults to denial and keeps non-TUI prompts plain", asy
   await terminal.emit("tool_call", {
     toolName: "bash", toolCallId: "themed", input: { command: "pwd", execution_target: "host" },
   });
-  assert.match(terminal.confirmations[0]!.title, /\x1b\[33mWarning:/);
+  assert.doesNotMatch(terminal.confirmations[0]!.title, /\x1b|Timeout/);
   assert.equal(stripVTControlCharacters(terminal.confirmations[0]!.title), harness.confirmations[0]!.title);
   assert.match(stripVTControlCharacters(terminal.confirmations[0]!.title), /Command:\n\npwd$/);
 
@@ -599,8 +604,8 @@ for (const status of ["unavailable", "disabled"] as const) test(`${status} permi
   const title = h.confirmations[0]!.title;
   assert.ok(title.includes(input.command));
   assert.ok(title.includes(`Working directory: ${cwd}`));
-  assert.match(title, /Timeout \(seconds\): 5/);
-  assert.match(title, /bypasses VM, process, and network isolation/);
+  assert.doesNotMatch(title, /Timeout \(seconds\):/);
+  assert.equal(title.split("\n").find((line) => line.startsWith("Warning:")), "Warning: this operation runs on the host and bypasses any isolation.");
   const result = await runHost(h, input);
   assert.ok(result.content[0].text.includes("host-recovery-fixture"));
   assert.ok(result.content[0].text.includes(cwd));
@@ -755,6 +760,9 @@ test("active adapters and explicit off/fallback retain their existing host behav
     const h = createHarness({ runtimeState: state(status), configReady: false, hasUI: false, config: { allowHostExecution: false } });
     assert.equal((await h.emit("tool_call", hostCall({ command: "not-executed", execution_target: "host" })))[0], undefined);
     assert.equal(h.confirmations.length, 0);
+    const override = { command: "not-executed", execution_target: "host", cwd: "/tmp" };
+    assert.match((await h.emit("tool_call", hostCall(override)))[0].reason, /cwd is supported only/);
+    await assert.rejects(runHost(h, override), /cwd is supported only/);
   }
 });
 
@@ -800,4 +808,66 @@ for (const phase of [1, 2, 3]) test(`recovery rechecks exact authorization acros
     await assert.rejects(runHost(h, input), /not approved/);
     await assert.rejects(access(path.join(cwd, "marker")), { code: "ENOENT" });
   }
+});
+
+for (const status of ["active", "unavailable"] as const) test(`${status} footerless host approval binds Yes to the exact input and timeout`, async () => {
+  for (const change of ["none", "timeout", "command", "input swap"] as const) {
+    const h = createHarness({ mode: "tui", runtimeState: state(status) });
+    const entered = deferred<void>(); let approve!: () => void;
+    let preview = "";
+    (h.ctx.ui as any).custom = (factory: any, options: any) => new Promise((resolve) => {
+      assert.equal(options.overlay, false);
+      const view = factory({ requestRender() {}, terminal: { rows: 24 } }, approvalTheme, new KeybindingsManager(TUI_KEYBINDINGS), resolve);
+      view.render(120); view.handleInput("\x1b[B");
+      preview = stripVTControlCharacters(view.render(120).join("\n"));
+      approve = () => { view.invalidate(); preview = stripVTControlCharacters(view.render(120).join("\n")); view.handleInput("\r"); view.dispose(); }; entered.resolve();
+    });
+    const input = recoveryInput(), event = hostCall(input, "custom-host"), originalCommand = input.command;
+    const pending = h.emit("tool_call", event); await entered.promise;
+    assert.ok(preview.includes(input.command)); assert.doesNotMatch(preview, /Timeout|navigate|select|cancel/);
+    if (change === "timeout") input.timeout = 10;
+    if (change === "command") input.command = "false";
+    if (change === "input swap") event.input = { ...input };
+    approve();
+    assert.ok(preview.includes(originalCommand), "display invalidation retains the original reviewed command");
+    const [gate] = await pending;
+    assert.equal(h.confirmations.length, 0, "custom approval never opens a native selector");
+    if (change === "none") {
+      assert.equal(gate, undefined);
+      await assert.rejects(runHost(h, { ...input, timeout: 10 }, "custom-host"), /not approved/);
+      await assert.rejects(runHost(h, input, "custom-host"), /not approved/, "a mismatched handoff consumes the one-shot grant");
+    } else {
+      assert.match(gate.reason, /changed while awaiting/);
+      await assert.rejects(runHost(h, { ...input, execution_target: "host" }, "custom-host"), /not approved/);
+    }
+  }
+});
+
+for (const status of ["active", "unavailable", "disabled"] as const) test(`${status} model-facing prompt and routed schemas require one simple host command per approval`, async () => {
+  const h = createHarness({ runtimeState: state(status), promptNote: systemPromptNote });
+  const [prompt] = await h.emit("before_agent_start", { systemPrompt: "base" });
+  const descriptions = ROUTED.map((name) => h.tools.get(name).parameters.properties.execution_target.description as string);
+  const instructions = [prompt.systemPrompt as string, ...descriptions];
+  if (status !== "active") {
+    const [blocked] = await h.emit("tool_call", { toolName: "bash", toolCallId: "blocked-guidance", input: { command: "not-run" } });
+    assert.equal(blocked.block, true); instructions.push(blocked.reason);
+  }
+  for (const text of instructions) {
+    assert.match(text, /expected host effects in one short sentence/);
+    assert.match(text, /Do not repeat the literal command in the agent description or narration/);
+    assert.match(text, /the approval dialog already shows the exact command/);
+    assert.match(text, /Do not mention chosen timeout values or routine execution settings/);
+    assert.match(text, /set them silently unless the user asks or a timeout failure needs diagnosis/);
+    assert.match(text, /Mention the execution directory in request prose only when it differs from the default session cwd/);
+    assert.match(text, /otherwise omit directory narration/);
+    assert.match(text, /Avoid repetitive operational narration/);
+    for (const required of ["Start with passive msb_diagnostics and msb_config_get", "exactly ONE simple, clear, human-readable command per call and per approval", "normal executable with literal arguments and only necessary quoting", "Run every step separately", "fresh approval for each step", "explain its purpose", "expected host effects", "No command chaining (&&, || or semicolons)", "pipelines", "multiline command sequences", "shell substitutions ($() or backticks)", "loops", "eval", "encoded payloads", "sh -c", "code-oneliners", "script wrappers hiding multiple operations", "Do not characterize arbitrary shell as harmless or read-only", "Never automatically retry on the host or reuse approval"]) {
+      assert.ok(text.includes(required), `missing host command instruction: ${required}`);
+    }
+  }
+  if (status !== "active") {
+    assert.match(prompt.systemPrompt, /finite positive timeout <=120/);
+    assert.match(prompt.systemPrompt, /host-execution permission.*fresh No-first human approval/);
+  }
+  assert.equal(h.confirmations.length, 0, "instructions and blocked recovery do not run host commands");
 });

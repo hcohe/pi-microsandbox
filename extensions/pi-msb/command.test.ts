@@ -145,3 +145,11 @@ test("blocked recovery guidance starts passive and describes exact bounded host 
     assert.match(note, /Never automatically retry on host/);
   }
 });
+
+test("active prompt retains strict host command instructions when runtime details are unavailable", () => {
+  const note = systemPromptNote({ status: "active", info: null });
+  assert.match(note, /runtime details are unavailable/);
+  assert.match(note, /exactly ONE simple, clear, human-readable command per call and per approval/);
+  assert.match(note, /No command chaining/);
+  assert.match(note, /fresh approval for each step/);
+});

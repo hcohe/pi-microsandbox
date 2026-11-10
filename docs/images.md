@@ -73,15 +73,15 @@ a directly usable bundled digest-pinned `FROM` starter. Propose a complete
 replacement with `msb_dockerfile_set` using the same scope and `content`, and/or
 a relative `context` patch. Getter `contextPaths` requests bounded context text. Its
 No-first per-proposal review combines scope and a compact unified diff in one
-approval: No / Apply shared Project for Git main, linked and nested cwd, or
-No / Apply for Global/cwd-local. The TUI review stays inline in the normal
-editor/approval area, not floating over chat. The one scoped preview has themed
-Dockerfile syntax, wrapping, **Ctrl+N / Ctrl+P** scrolling
-and colored choices below the changed code, separated from a dim shortcut footer
-by whitespace. Only added/removed rows and meaningful file/mode/newline badges
-appear by default; **d** shows full unified context, paths/metadata and all warnings
-(public-network builds, VM restart, persistence and registration effects). RPC
-displays the same scoped changed-code diff in one plain question.
+approval: **Scope: Project** or **Scope: Global**, then **No / Yes** (No default).
+The TUI review stays inline in the normal editor/approval area, not floating over
+chat. A blank line separates Scope from the dim changed-file headings. The one
+scoped preview has themed Dockerfile syntax, wrapping, **Ctrl+N / Ctrl+P** scrolling
+and native-selector choice colors below the changed code. Only added/removed
+rows and meaningful file/mode/newline badges appear; there is no dialog footer
+or expandable details view. Exact paths, provenance and warnings remain in the
+getter and structured results. RPC displays the same scoped changed-code diff
+in one plain question.
 Escape/abort denies. Approved changes publish each file atomically (not jointly/crash atomic)
 and reload settings only after the whole approved bundle is confirmed, building/importing and restarting with the new image when
 selected. This requires no blanket host execution permission or host-shell recipe.

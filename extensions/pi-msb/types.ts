@@ -304,8 +304,8 @@ export interface ToolOpsProvider {
    * Replaced on runtime/configuration lifecycle changes, even if the same state returns.
    * Recovery host execution requires this signal and a ready execution context; fixed active-only adapters may omit it. */
   hostExecutionToken?(): object | undefined;
-  /** Recovery-only filesystem validation against the original discovery-time canonical root/device/inode.
-   * Must reject absent proof and identity/token changes across filesystem awaits. */
+  /** Host filesystem validation against the original discovery-time canonical root/device/inode.
+   * Required for recovery and also used for native active host Bash approvals. Must reject absent proof and identity/token changes across filesystem awaits. */
   validateHostRecoveryRoot?(identity: SessionExecutionIdentity, token: object): Promise<void>;
   /** Passive, non-waking liveness snapshot for UI; never acquires a tool runtime. */
   refreshState?(): Promise<RuntimeState>;

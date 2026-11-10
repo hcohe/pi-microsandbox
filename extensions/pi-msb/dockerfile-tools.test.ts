@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { DEFAULT_CONFIG, hostConfigPaths, hostConfigTargets, readRawConfig, resolveConfig } from "./config.ts";
 import { SettingsEditor } from "./settings.ts";
@@ -44,7 +44,7 @@ async function fixture(t: TestContext) {
       await duringDestination?.(); await duringApproval?.();
       if (answer !== "Yes") return answer;
       if (choices.length === 3) return destination === "cancel" ? "No" : choices.find((choice) => choice.startsWith(destination === "repository" ? "All worktrees" : "This worktree"));
-      assert.match(choices[1]!, /^Apply/); return choices[1]; },
+      assert.deepEqual(choices, ["No", "Yes"]); return choices[1]; },
   } };
   const run = async (set: boolean, args: unknown, signal?: AbortSignal) => (await definitions.get(set ? "msb_dockerfile_set" : "msb_dockerfile_get").execute("test", args, signal, undefined, ctx)).details;
   return { root, cwd, agentDir, input, execution, control, definitions, ctx, run,
@@ -86,13 +86,14 @@ for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${s
   assert.deepEqual(await tree(f.root), before); assert.deepEqual(f.counts(), { approvals: 0, reloads: 0 });
   const result = await f.run(true, { scope, content: from });
   assert.equal(result.saved, true); assert.equal(result.reloaded, true); assert.equal(result.outcome, "saved_shadowed");
+  assert.equal(result.review.destinationLabel, scope === "global" ? "Global" : `Project · cwd-local (${basename(f.cwd)})`);
   const path = missing.paths[scope].dockerfile;
   assert.equal(await fs.readFile(path, "utf8"), from);
   assert.equal((await fs.stat(path)).mode & 0o777, 0o600);
   assert.equal((await fs.stat(dirname(path))).mode & 0o777, 0o700);
   await assert.rejects(fs.stat(missing.paths[scope].config), { code: "ENOENT" });
-  assert.match(f.question(), /Scope: Global|Scope: Project · cwd-local/);
-  assert.ok(!f.question().includes(path), "long canonical paths belong in optional TUI details/getter, not main review");
+  assert.match(f.question(), new RegExp(`^Scope: ${scope === "global" ? "Global" : "Project"}\n\nDockerfile`));
+  assert.ok(!f.question().includes(path), "long canonical paths remain in the getter and structured review, not the dialog");
   for (const pattern of [/Dockerfile \[create\]/, /\+FROM /]) assert.match(f.question(), pattern);
   assert.doesNotMatch(f.question(), /--- \/dev\/null|\+\+\+ b\/Dockerfile|@@|public network|restart|guest-local state/);
   const read = await f.run(false, { scope }); assert.equal(read.content, from); assert.equal(read.exists, true);
@@ -101,7 +102,7 @@ for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${s
   assert.equal((await fs.stat(path)).mtimeMs, stat.mtimeMs); assert.equal((await fs.stat(path)).mode, stat.mode);
   assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
   assert.equal((await f.run(true, { scope, content: from + "# updated\n" })).saved, true);
-  assert.ok(!f.question().includes(` ${from.split("\n")[0]}`), "unchanged FROM stays in details, not main review"); assert.ok(f.question().includes("+# updated"));
+  assert.ok(!f.question().includes(` ${from.split("\n")[0]}`), "unchanged FROM stays in the structured review, not the dialog"); assert.ok(f.question().includes("+# updated"));
   assert.equal(await fs.readFile(path, "utf8"), from + "# updated\n");
   assert.deepEqual(f.counts(), { approvals: 2, reloads: 2 });
 });
@@ -763,6 +764,8 @@ test("Dockerfile shared Project review prepares only the shared baseline uses it
   f.control.openDockerfile = async (scope) => { opened++; return open(scope); };
   f.configure({ answer: "Yes", duringApproval: async () => {
     assert.equal(opened, 1);
+    assert.match(f.question(), /^Scope: Project\n\nDockerfile/);
+    assert.doesNotMatch(f.question(), /Apply shared Project/);
     assert.match(f.question(), /-RUN shared-original/);
     assert.match(f.question(), /-echo shared-original/);
     assert.doesNotMatch(f.question(), /legacy-original|This worktree|All worktrees/);
@@ -770,6 +773,11 @@ test("Dockerfile shared Project review prepares only the shared baseline uses it
   const content = from + "RUN echo changed\r\n";
   const saved = await f.run(true, { scope: "project", content, context: [{ path: "setup.sh", content: "echo changed", executable: true }] });
   assert.equal(saved.saved, true, JSON.stringify(saved)); assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
+  assert.match(saved.review.destinationLabel, /^Apply shared Project \(.+\)$/);
+  assert.equal(saved.review.target.config, targets.paths.project);
+  assert.ok(saved.review.registration.metadata);
+  assert.ok(saved.review.warnings.some((warning: string) => warning.includes("PUBLIC egress")));
+  assert.match(saved.review.diff, /--- a\/Dockerfile[\s\S]*@@/);
   assert.equal(await fs.readFile(join(dirname(targets.paths.project), "Dockerfile"), "utf8"), content);
 });
 

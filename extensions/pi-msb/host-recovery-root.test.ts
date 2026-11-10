@@ -98,7 +98,7 @@ for (const layout of ["symlink", "directory"] as const) {
     assert.equal(await f.request(), undefined);
     assert.ok(f.prompts[0]!.includes(`Working directory: ${f.ctx.cwd}`));
     assert.ok(f.prompts[0]!.includes(f.input.command));
-    assert.match(f.prompts[0]!, /Timeout \(seconds\): 5/);
+    assert.doesNotMatch(f.prompts[0]!, /Timeout \(seconds\):/);
     await f.execute();
     assert.equal(await readFile(join(f.original, "recovery-marker"), "utf8"), "approved-root");
     await assert.rejects(f.execute(), /not approved/);
@@ -131,5 +131,25 @@ test("native root proof does not bypass ordinary routing, noUI, denial, permissi
   assert.match((await f.request()).reason, /Host execution is disabled/);
   f.integration.endSession();
   assert.equal((await f.request()).block, true);
+  await f.noHostAction();
+});
+
+for (const when of ["before prompt", "during approval", "before execution"] as const) test(`native recovery keeps original symlink-root proof with stable outside cwd: ${when}`, async (t) => {
+  const f = await fixture(t, "symlink");
+  const outside = join(f.original, "..", "outside-target"); await mkdir(outside);
+  Object.assign(f.input, { cwd: outside });
+  if (when === "before prompt") await f.replace();
+  if (when === "during approval") {
+    const answer = deferred<string>(); f.setAnswer(() => answer.promise);
+    const pending = f.request(); await f.prompted.promise;
+    await f.replace(); answer.resolve("Yes"); assert.equal((await pending).block, true);
+  } else {
+    const gate = await f.request();
+    if (when === "before prompt") { assert.equal(gate.block, true); assert.equal(f.prompts.length, 0); }
+    else { assert.equal(gate, undefined); await f.replace(); }
+  }
+  await assert.rejects(f.execute(), /canonical cwd|not approved|trustworthy|directory/);
+  await f.restore(); await assert.rejects(f.execute(), /not approved|trustworthy/);
+  await assert.rejects(access(join(outside, "recovery-marker")), { code: "ENOENT" });
   await f.noHostAction();
 });

@@ -8,7 +8,7 @@ import test from "node:test";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { createMsbIntegration } from "./control.ts";
-import { boundDiagnosticsReport } from "./diagnostics-tools.ts";
+import { boundDiagnosticsReport, registerDiagnosticsTool } from "./diagnostics-tools.ts";
 import type { Config } from "./types.ts";
 
 async function fixture(t: test.TestContext, active = false, fault?: { stage: "sdk" | "start" | "prepare"; enabled: boolean }) {
@@ -341,4 +341,12 @@ test("native cached host execution token distinguishes VM failure from unresolve
   assert.notEqual(token(), failedVm);
   f.integration.endSession();
   assert.equal(token(), undefined);
+});
+
+test("diagnostics tool description directs agents to separate simple host commands without hidden operations", () => {
+  let tool: any;
+  registerDiagnosticsTool({ registerTool(value: any) { tool = value; } } as any, {} as any);
+  for (const required of ["passive msb_diagnostics and msb_config_get", "exactly ONE simple, clear, human-readable command per call and per approval", "expected host effects", "No command chaining (&&, || or semicolons)", "pipelines", "multiline command sequences", "shell substitutions", "loops", "eval", "encoded payloads", "sh -c", "code-oneliners", "script wrappers hiding multiple operations", "fresh approval for each step"]) assert.ok(tool.description.includes(required), required);
+  assert.match(tool.description, /finite positive timeout <=120 seconds/);
+  assert.match(tool.description, /existing host permission required/);
 });

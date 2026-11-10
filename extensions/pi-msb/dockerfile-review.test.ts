@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { highlightCode, initTheme, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, isViewportTUI, KeybindingsManager, ScrollView, TUI_KEYBINDINGS, TuiAltScreen, TuiMainScreen, Text, visibleWidth, VStack, type Component, type Terminal } from "@earendil-works/pi-tui";
+import { formatSettingsDiff } from "./settings-diff.ts";
 import { approveDockerfileReview, createDockerfileReview, dockerfileDisplay, dockerfileChangedRows, dockerfileReviewQuestion, highlightedDockerfileDiff, unifiedDockerfileDiff, wrapDockerfileDiffLine, type DockerfileReviewCandidate } from "./dockerfile-review.ts";
 
 // Use theme assets matching the pinned test library, not the invoking Pi installation.
@@ -18,7 +19,7 @@ const candidate = (label: string, code = "+RUN apt-get install -y cowsay", avail
     const lines = code.split("\n");
     code = `Dockerfile [edit]\n--- a/Dockerfile\n+++ b/Dockerfile\n@@ -1,${lines.filter((line) => line.startsWith("-")).length} +1,${lines.filter((line) => line.startsWith("+")).length} @@\n${code}`;
   }
-  return { label, available, sections: [{ text: code, dockerfile: true }], details: "Canonical path: /private/host/policy/Dockerfile\nRepository metadata: reviewed" };
+  return { scope: "project", label, available, sections: [{ text: code, dockerfile: true }] };
 };
 function dialogTheme(appearance: "dark" | "light"): Theme {
   const json = JSON.parse(readFileSync(new URL(`../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/${appearance}.json`, import.meta.url), "utf8"));
@@ -155,29 +156,37 @@ test("createDockerfileReview No default/Enter/Escape/abort/dispose fail closed; 
 
 test("createDockerfileReview unavailable cannot approve; injected application keybindings are honored", () => {
   const f = component([candidate("Unavailable", "UNAVAILABLE", false)]);
-  f.view.handleInput!("\x1b[B"); f.view.render(60); f.view.handleInput!("\r"); assert.deepEqual(f.answers, []); f.abort.abort();
+  f.view.handleInput!("\x1b[B"); f.view.render(60); f.view.handleInput!("d"); f.view.handleInput!("\r"); assert.deepEqual(f.answers, []); f.abort.abort();
   const answers: Array<number | undefined> = [];
   const custom = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "j", "tui.select.confirm": "x" });
   const view = createDockerfileReview([candidate("Apply")], { requestRender() {}, terminal: { rows: 24 } }, theme, custom, (value) => answers.push(value), new AbortController().signal);
   view.handleInput!("j"); view.render(80); view.handleInput!("x"); assert.deepEqual(answers, [0]); view.dispose();
 });
 
-test("createDockerfileReview width-safe wrapping, bounded scroll/resize, optional canonical details and theme invalidation", () => {
+test("createDockerfileReview width-safe wrapping, bounded scroll/resize and theme invalidation", () => {
   const text = Array.from({ length: 100 }, (_, i) => `+RUN echo line-${i} /a/long/path/with/界`).join("\n");
   const f = component([candidate("This worktree — long-project-name", text)], 14);
   for (const width of [1, 2, 7, 20, 80]) {
     const lines = f.view.render(width); assert.ok(lines.length <= 14);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `${width}: ${line}`);
   }
-  let lines = strip(f.view.render(80).join("\n")); assert.ok(!lines.includes("/private/host"));
   const seen: string[] = [];
   for (let i = 0; i < 120; i++) { seen.push(strip(f.view.render(80).join("\n"))); f.view.handleInput!("\x0e"); }
   const all = seen.join("\n"); for (let i = 0; i < 100; i++) assert.ok(all.includes(`line-${i} `), `unreachable diff line ${i}`);
-  f.view.handleInput!("d");
-  const detailViews: string[] = [];
-  for (let i = 0; i < 40; i++) { detailViews.push(strip(f.view.render(80).join("\n"))); f.view.handleInput!("\x0e"); }
-  assert.match(detailViews.join("\n"), /Canonical path: \/private\/host/);
+  assert.doesNotMatch(all, /↑↓|Ctrl\+N|details|Details|Full unified|\d+–\d+\/\d+/);
+  const scrolled = f.view.render(80); f.view.handleInput!("d"); assert.deepEqual(f.view.render(80), scrolled);
+  f.view.handleInput!("\x1b[5~"); assert.notDeepEqual(f.view.render(80), scrolled, "PageUp scrolls without a footer");
+  f.view.handleInput!("\x1b[6~"); assert.deepEqual(f.view.render(80), scrolled, "PageDown restores the position");
   f.view.invalidate(); f.view.render(30); assert.ok(f.renders() > 0); f.view.dispose();
+});
+
+test("Dockerfile review uses the freed footer rows for changed code and ends at Yes", () => {
+  const f = component([candidate("Project", Array.from({ length: 40 }, (_, i) => `+RUN echo line-${i}`).join("\n"))]);
+  const lines = f.view.render(90).map(strip);
+  assert.equal(lines.length, 18);
+  assert.deepEqual(lines.slice(-4), ["", "─ Apply?", "→ No", "  Yes"]);
+  assert.ok(lines.includes("+RUN echo line-10"), "removed footer rows are available to the preview");
+  f.view.dispose();
 });
 
 test("approveDockerfileReview RPC and select-only TUI use one compact question with both distinct diffs; no custom RPC", async () => {
@@ -197,7 +206,7 @@ test("RPC approval discloses existing-file privacy changes without default-creat
   const ctx = { hasUI: true, mode: "rpc", ui: { async select(question: string, choices: string[]) {
     assert.match(question, /Permissions: 0644 → 0600/);
     assert.match(question, /\+RUN install cowsay/);
-    assert.deepEqual(choices, ["No", "Apply"]);
+    assert.deepEqual(choices, ["No", "Yes"]);
     return "No";
   } } } as any;
   assert.equal(await approveDockerfileReview(ctx, views, new AbortController().signal), undefined);
@@ -377,7 +386,7 @@ test("wrapDockerfileDiffLine hard-wraps long image pins and whitespace without l
   }
 });
 
-test("Dockerfile review main view is changed code, bottom choices and help; all technical warnings stay optional", () => {
+test("Dockerfile review shows only scope, changed code and bottom choices", () => {
   const source = "FROM ghcr.io/example/cowsay@sha256:" + "a".repeat(64) + "\nRUN install cowsay \\\n    && cleanup\n";
   const review = diff(null, source);
   assert.ok(!/Mode:|0600|Control\/format|literal backslash/.test(review));
@@ -393,7 +402,7 @@ test("Dockerfile review main view is changed code, bottom choices and help; all 
   assert.doesNotMatch(selected, /Build may use public network/);
   assert.ok(!/Selected:|Preview:|Save \+ reload|Mode:|0600|Control\/format|\d+–\d+\/\d+/.test(selected));
   assert.match(selected, /\+FROM ghcr\.io\/example\/cowsay@sha256:a+/);
-  assert.match(selected, /↑↓ scope.*Ctrl\+N\/P scroll.*d details/);
+  assert.doesNotMatch(selected, /↑↓|Ctrl\+N|details|\d+–\d+\/\d+/);
   f.view.dispose();
 });
 
@@ -408,43 +417,46 @@ test("dockerfileChangedRows retains all separated changes and header-like source
   assert.match(dockerfileChangedRows(diff("RUN old", "RUN new\r\n")).map((row) => row.text).join("\n"), /Line endings:[\s\S]*\\ No newline at end of file/);
 });
 
-test("inline dialog uses real theme colors with spaced bottom actions and a separate dim footer in dark/light", () => {
+test("inline dialog uses real theme colors and ends at the bottom actions in dark/light", () => {
   const outputs: string[] = [];
   for (const appearance of ["dark", "light"] as const) {
     initTheme(appearance, false);
     const palette = dialogTheme(appearance);
     const view = createDockerfileReview([candidate("This worktree — app"), candidate("All worktrees — repo")], { requestRender() {}, terminal: { rows: 24 } }, palette, keys, () => {}, new AbortController().signal);
     const lines = view.render(90), plain = lines.map(strip);
-    const code = plain.findIndex((line) => line.startsWith("+RUN")), heading = plain.findIndex((line) => line.includes("Apply?")), no = plain.indexOf("→ No"), lastAction = plain.indexOf("  All worktrees — repo"), footer = plain.findIndex((line) => line.startsWith("↑↓ scope"));
-    assert.ok(code >= 0 && code < heading && heading < no && lastAction < footer);
-    assert.equal(plain[heading - 1], ""); assert.equal(plain[lastAction + 1], "");
+    const code = plain.findIndex((line) => line.startsWith("+RUN")), heading = plain.findIndex((line) => line.includes("Apply?")), no = plain.indexOf("→ No"), lastAction = plain.indexOf("  All worktrees — repo");
+    assert.ok(code >= 0 && code < heading && heading < no && no < lastAction);
+    assert.equal(plain[heading - 1], ""); assert.equal(lastAction, plain.length - 1);
     assert.equal(lines[heading], palette.fg("borderMuted", "─ ") + palette.fg("accent", "Apply?"));
-    assert.equal(lines[no], palette.fg("error", "→ No"));
-    assert.equal(lines[lastAction], palette.fg("accent", "  All worktrees — repo"));
-    assert.equal(lines[footer], palette.fg("dim", plain[footer]!));
+    assert.equal(lines[no], palette.fg("accent", "→ ") + palette.fg("accent", "No"));
+    assert.equal(lines[lastAction], `  ${palette.fg("text", "All worktrees — repo")}`);
     assert.match(lines[no]!, /\x1b\[/); outputs.push(lines[no]!);
     view.handleInput!("\x1b[B");
     const selected = view.render(90);
-    assert.ok(selected.includes(palette.fg("success", "→ This worktree — app")));
+    assert.ok(selected.includes(palette.fg("accent", "→ ") + palette.fg("accent", "This worktree — app")));
     view.dispose();
   }
   assert.notEqual(outputs[0], outputs[1]);
 });
 
-test("main review has no warnings or unchanged rows; d reveals risks, metadata and full unified context", () => {
+test("Dockerfile review has no footer, progress or details; d cannot change the preview or authorize a selection", () => {
   const before = "FROM unchanged\nRUN old\n", after = "FROM unchanged\nRUN cowsay\n";
-  const c = candidate("All worktrees — repo", diff(before, after));
-  c.details = ["Shared on next reload/start: current/future registered worktrees, subject to overrides.", "Register immutable host-owned repository association in config.toml; TOML formatting/comments may be rewritten.", "Build instructions use PUBLIC egress and may exfiltrate build inputs.", "Source enters the model transcript. NEVER embed credentials or secrets.", "Repository metadata: safe", "Canonical path: /private/host/policy/Dockerfile"].join("\n");
-  const f = component([c]);
-  const main = strip(f.view.render(90).join("\n"));
-  assert.doesNotMatch(main, /Preview:|Build may|Shared on|Register immutable|formatting\/comments|PUBLIC|transcript|Canonical|partial\/unknown|--- a\/|\+\+\+ b\/|^@@|unchanged/m);
-  assert.match(main, /-RUN old\n\+RUN cowsay/);
-  f.view.handleInput!("d");
-  const seen: string[] = [];
-  for (let i = 0; i < 100; i++) { seen.push(strip(f.view.render(90).join("\n"))); f.view.handleInput!("\x0e"); }
-  const details = seen.join("\n");
-  for (const pattern of [/Shared on next reload/, /Register immutable/, /formatting\/comments/, /PUBLIC egress/, /transcript/, /credentials or secrets/, /Repository metadata/, /Canonical path/, /Build may use public network/, /VM may restart/, /not jointly\/crash atomic/, /partial\/unknown/, /--- a\/Dockerfile/, /\+\+\+ b\/Dockerfile/, /@@ -/, /FROM unchanged/]) assert.match(details, pattern);
+  const f = component([candidate("All worktrees — repo", diff(before, after)), candidate("Other destination", "+RUN other")]);
+  const initial = f.view.render(90);
+  f.view.handleInput!("d"); assert.deepEqual(f.view.render(90), initial);
+  f.view.handleInput!("\r"); assert.deepEqual(f.answers, [undefined], "d leaves No selected");
   f.view.dispose();
+
+  const selected = component([candidate("All worktrees — repo", diff(before, after)), candidate("Other destination", "+RUN other")]);
+  selected.view.render(90); selected.view.handleInput!("\x1b[B");
+  selected.view.handleInput!("d"); selected.view.handleInput!("\r");
+  assert.deepEqual(selected.answers, [], "d does not bypass the rendered-preview guard");
+  const rendered = selected.view.render(90);
+  selected.view.handleInput!("d"); assert.deepEqual(selected.view.render(90), rendered);
+  const plain = strip(rendered.join("\n"));
+  assert.match(plain, /-RUN old\n\+RUN cowsay/);
+  assert.doesNotMatch(plain, /↑↓|Ctrl\+N|details|Details|Full unified|Destination:|Build may|Repository metadata|--- a\/|\+\+\+ b\/|@@|unchanged|\d+–\d+\/\d+/);
+  selected.view.handleInput!("\r"); assert.deepEqual(selected.answers, [0]); selected.view.dispose();
 });
 
 test("RPC changed-code review includes both distinct variants before one approval, with no ANSI, context or warning wall", async () => {
@@ -486,5 +498,65 @@ test("narrow clipped actions retain unconditional Escape and No denial", () => {
     if (escape) f.view.handleInput!("\x1b");
     else { f.view.handleInput!("\x1b[B"); f.view.render(7); f.view.handleInput!("\r"); }
     assert.deepEqual(f.answers, [undefined]); f.view.dispose();
+  }
+});
+
+for (const appearance of ["dark", "light"] as const) test(`single-target review matches settings scope and native selector colors; changed-file headings dim in ${appearance}`, () => {
+  initTheme(appearance, false);
+  const palette = dialogTheme(appearance);
+  for (const scope of ["project", "global"] as const) for (const before of [null, "RUN old\n"]) {
+    const c = candidate("Apply shared Project (repo)", diff(before, "RUN cowsay\n"));
+    c.scope = scope;
+    const context = unifiedDockerfileDiff({ path: "build-context/setup.sh", before: null, after: "echo hi\n", modeBefore: null, modeAfter: 0o600 });
+    c.sections.push({ text: context, diff: true });
+    const answers: Array<number | undefined> = [];
+    const view = createDockerfileReview([c], { requestRender() {}, terminal: { rows: 24 } }, palette, keys, (value) => answers.push(value), new AbortController().signal);
+    const lines = view.render(120);
+    const label = scope === "project" ? "Project" : "Global";
+    assert.equal(lines[0], formatSettingsDiff([{ kind: "scope", label: "Scope", text: label }], palette)[0]);
+    assert.equal(lines[0], palette.fg("muted", "Scope: ") + palette.fg("warning", label));
+    assert.equal(lines[1], "");
+    assert.equal(strip(lines[2]!), `Dockerfile [${before === null ? "create" : "edit"}]`);
+    assert.ok(lines.includes(palette.fg("dim", `Dockerfile [${before === null ? "create" : "edit"}]`)));
+    assert.ok(lines.includes(palette.fg("dim", "build-context/setup.sh [create]")));
+    assert.ok(lines.includes(palette.fg("accent", "→ ") + palette.fg("accent", "No")));
+    assert.ok(lines.includes(`  ${palette.fg("text", "Yes")}`));
+    assert.ok(lines.includes(palette.fg("toolDiffAdded", "+") + highlightCode("RUN cowsay", "dockerfile")[0]));
+    assert.doesNotMatch(strip(lines.join("\n")), /Apply shared Project/);
+    view.handleInput!("\x1b[B"); view.handleInput!("\r");
+    assert.deepEqual(answers, [], "a newly selected Yes still requires its preview to render");
+    const selected = view.render(120);
+    assert.ok(selected.includes(`  ${palette.fg("text", "No")}`));
+    assert.ok(selected.includes(palette.fg("accent", "→ ") + palette.fg("accent", "Yes")));
+    view.handleInput!("\r"); assert.deepEqual(answers, [0]); view.dispose();
+  }
+});
+
+test("single-target RPC/select-only TUI use concise scope and exact No/Yes mapping, rejecting old, unavailable and aborted answers", async () => {
+  for (const mode of ["rpc", "tui"] as const) for (const scope of ["project", "global"] as const) {
+    const c = candidate("Apply shared Project (repo)"); c.scope = scope;
+    for (const answer of ["Yes", "No", undefined, "Apply", c.label, "All worktrees — repo", "d", "unexpected"]) {
+      const ctx = { hasUI: true, mode, ui: { async select(question: string, choices: string[]) {
+        assert.match(question, new RegExp(`^Scope: ${scope === "project" ? "Project" : "Global"}\\n\\nDockerfile`));
+        assert.doesNotMatch(question, /Apply shared Project|\x1b/);
+        assert.deepEqual(choices, ["No", "Yes"]); return answer;
+      } } } as any;
+      assert.equal(await approveDockerfileReview(ctx, [c], new AbortController().signal), answer === "Yes" ? 0 : undefined);
+    }
+    for (const available of [false, true]) {
+      const abort = new AbortController(); c.available = available;
+      const ctx = { hasUI: true, mode, ui: { async select(_question: string, choices: string[]) {
+        assert.deepEqual(choices, available ? ["No", "Yes"] : ["No"]);
+        if (available) abort.abort(); return "Yes";
+      } } } as any;
+      assert.equal(await approveDockerfileReview(ctx, [c], abort.signal), undefined);
+    }
+  }
+});
+
+test("multi-target select-only review never treats Yes or duplicate destination labels as an exact candidate", async () => {
+  for (const answer of ["Yes", "No", "Duplicate"]) {
+    const ctx = { hasUI: true, mode: "rpc", ui: { async select() { return answer; } } } as any;
+    assert.equal(await approveDockerfileReview(ctx, [candidate("Duplicate"), candidate("Duplicate", "+RUN other")], new AbortController().signal), undefined);
   }
 });

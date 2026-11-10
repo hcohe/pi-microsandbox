@@ -101,6 +101,9 @@ extensions/pi-msb/prune.ts required
 extensions/pi-msb/sandbox-manager.ts required
 extensions/pi-msb/skill-access.ts required
 extensions/pi-msb/tools.ts required
+extensions/pi-msb/host-approval.ts required
+extensions/pi-msb/host-command-guidance.ts required
+extensions/pi-msb/host-bash-cwd.ts required
 extensions/pi-msb/workspace.ts required
 extensions/pi-msb/transport.ts required
 extensions/pi-msb/types.ts required

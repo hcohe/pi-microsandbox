@@ -46,19 +46,19 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 > the bundled digest pin and add only the requested package instructions, without
 > unrelated packages. Explain the change and recommended Project or Global scope in
 > your normal response, not the file. Propose the complete resulting content via
-> msb_dockerfile_set; let me review only added/removed code and choose scope
-> below it in one approval. Keep technical warnings and full context in d details. Don't use host
+> msb_dockerfile_set; let me review the scope and added/removed code, with
+> No / Yes below it in one approval. Don't use host
 > commands, grant blanket host access or embed secrets.
 > Explain any image/higher-scope blocker and propose image inheritance separately
 > with msb_config_set approval. After saving, distinguish whether the new image is
 > active, shadowed, deferred or failed to activate.
 
-Git Project setter uses one default-No review: **Apply shared Project (<name>)**.
+Git Project setter uses one default-No review: **Scope: Project**, then **No / Yes**.
 Main, linked and nested Git cwd use the same config/Dockerfile/context record.
 The TUI stays inline with changed code above colored choices, Ctrl+N/P scrolling,
-blank spacers and dim shortcuts; d reveals full context and warnings. Enter
+a blank line after Scope and no dialog footer or expandable view. Enter on Yes
 approves that shared target without another question. RPC/select-only adapters
-show the same shared diff. Global/non-Git uses No / Apply. Escape/abort saves
+show the same shared diff. Global/non-Git also uses No / Yes. Escape/abort saves
 nothing. There is no Repository/Worktree destination option. Legacy cwd-keyed Git
 sources are ignored and preserved, never copied or promoted; manually review
 migration into shared Project with fresh approval. First shared saves register

@@ -5,6 +5,16 @@
 Want to configure the sandbox in plain English? Start with the recipes. This
 page is the precise contract for tool arguments, approval, and results.
 
+Host-targeted built-in Bash also accepts optional `cwd`: an existing directory,
+absolute or relative to the fixed session cwd (default). Use it instead of `cd`
+or chaining. The approval displays normalized and canonical execution paths;
+outside the canonical current workspace, directory values use the theme's red/error
+color. This includes symlink escapes and sibling-prefix paths, not shared Project
+policy-root selection. Each exact cwd needs its own approval and physical identity
+checks; changing/restoring paths never revives a consumed approval. `cwd` is
+unsupported for sandbox Bash, non-Bash tools and off/host-fallback execution.
+It does not change VM mounts. See [host execution safety](safety.md#fail-closed-by-default).
+
 | Tool | Job | Needs approval? |
 | --- | --- | --- |
 | `msb_diagnostics` | Passive cached report, even when sandbox execution is blocked | No |
@@ -80,13 +90,13 @@ At least one proposal is required. Context payload/read limits: 16 files,
 context review text. Dockerfile remains 32 KiB. All final sources together obey
 32 MiB / 2048 entries (including Dockerfile/directories) / depth 16.
 
-Project setter uses **one approval**: **No / Apply shared Project (<name>)** for
-Git main, linked and nested cwd, matching config Project. Only the shared baseline
+Project setter uses **one approval**: **Scope: Project** with **No / Yes** for
+Git main, linked and nested cwd. Only the shared baseline
 is prepared and reviewed. Old checkout-only labels are not shared authorization.
 Project affects current/future registered worktrees on reload/start, subject to
 Session overrides. A first shared save also registers immutable host-owned
-`_repository` in the exact shared `config.toml`, explicitly reviewed in the same
-approval. User intent/unknown keys are preserved; adding metadata can rewrite TOML
+`_repository` in the exact shared `config.toml`, bound to the same approval.
+User intent/unknown keys are preserved; adding metadata can rewrite TOML
 formatting/comments. Existing valid metadata/config is never rewritten. There is
 no automatic source copying, migration or hashed-path lookup. Project uses readable
 canonical-main-root storage with config/source siblings; reserved artifact names cannot
@@ -98,8 +108,11 @@ These are owned source tools, **not** host Bash/write tools: no host execution
 permission or blanket host access is required.
 
 Each changed proposal requires an interactive TUI/RPC **No-first** approval.
-Global/cwd-local proposals offer **No / Apply**. Main review shows only all added
-and removed code rows, concise file/create/delete/executable badges, actual
+All proposals show a concise **Scope: Project** or **Scope: Global** and offer
+**No / Yes**, using the native settings selector’s colors. Changed-file headings
+are dim, separated from Scope by a blank line; code retains syntax colors.
+Main review shows only all added and removed code rows, concise
+file/create/delete/executable badges, actual
 permission changes and meaningful CR/no-final-newline data. Patch headers, hunk
 ranges and unchanged context are omitted there, never changed code—even when code
 looks like a patch header. Literal backslashes remain unchanged; actual control
@@ -107,13 +120,12 @@ characters are escaped.
 The TUI review stays inline in the normal editor/approval area, never floating over chat.
 Themed syntax and added/removed colors remain visible, with hard wrapping and
 **Ctrl+N / Ctrl+P** scrolling (PgDown/PgUp also work where delivered).
-Below the code, a blank spacer separates colored **Apply?** choices; another
-spacer separates the dim keyboard footer. No is the default; Escape/abort denies.
-**d** reveals all warnings/consequences, exact paths/permissions/registration
-metadata, and the full unified review with two context lines. Network, restart,
-transcript, persistence and shared-registration explanations stay in details,
-not repeated in the main review. RPC/select-only adapters show the same scoped
-changed-code diff before one plain approval, without ANSI or a warning wall.
+Below the code, a blank spacer separates colored **Apply?** choices.
+No is the default; Escape/abort denies. There is no dialog footer or expandable
+view. Exact destination/provenance, warnings, paths and registration metadata
+remain in the getter and structured results, not in the dialog.
+RPC/select-only adapters show the same scoped changed-code diff before one plain
+approval, without ANSI or a warning wall.
 Secrets must never enter source or transcript. Approval covers saving AND
 settings reload, building/importing the new content image and recreating a running
 sandbox if selected. Off/environment disable and autoStart are respected. Denial,

@@ -1,5 +1,6 @@
 import { highlightCode, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, ScrollView, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type KeybindingsManager } from "@earendil-works/pi-tui";
+import { formatSettingsDiff } from "./settings-diff.ts";
 
 /** Escape nonprinting characters for display only; preserve ordinary Dockerfile syntax. */
 export function dockerfileDisplay(text: string): string {
@@ -92,13 +93,11 @@ export function unifiedDockerfileDiff(change: SourceChange): string {
 }
 
 export interface DockerfileReviewCandidate {
+  scope: "project" | "global";
   label: string;
   available: boolean;
   sections: Array<{ text: string; dockerfile?: boolean; diff?: boolean; source?: { before: string | null; after: string | null } }>;
-  details: string;
 }
-export const DOCKERFILE_IMPACT = "Build may use public network; VM may restart and lose guest-local state.";
-const persistenceNote = "Files are individually atomic, not jointly/crash atomic; partial/unknown saves never activate.";
 interface ChangedDockerfileRow { index: number; text: string; kind: "file" | "note" | "add" | "remove" }
 /** Read actual hunk counts; header-like source text inside a hunk is still changed code. */
 export function dockerfileChangedRows(text: string): ChangedDockerfileRow[] {
@@ -123,8 +122,10 @@ export function dockerfileChangedRows(text: string): ChangedDockerfileRow[] {
   if (oldRemaining || newRemaining) throw new Error("Incomplete unified review hunk");
   return rows;
 }
+const dockerfileScopeLine = (candidate: DockerfileReviewCandidate, theme?: Theme) => formatSettingsDiff([{ kind: "scope", label: "Scope", text: candidate.scope === "global" ? "Global" : "Project" }], theme)[0]!;
+
 export function dockerfileReviewQuestion(candidates: DockerfileReviewCandidate[]): string {
-  return [...candidates.flatMap((candidate) => [candidate.label, ...candidate.sections.flatMap((section) => section.dockerfile || section.diff ? dockerfileChangedRows(section.text).map((row) => row.text) : [section.text]), ""]),
+  return [...candidates.flatMap((candidate) => [dockerfileScopeLine(candidate), "", ...(candidates.length > 1 ? [candidate.label] : []), ...candidate.sections.flatMap((section) => section.dockerfile || section.diff ? dockerfileChangedRows(section.text).map((row) => row.text) : [section.text]), ""]),
     "Apply? Default: No."].join("\n");
 }
 
@@ -133,7 +134,7 @@ export function highlightedDockerfileDiff(text: string, theme: Theme, source?: {
   const highlightSource = (content: string | null) => highlightCode(sourceLines(content).map((line) => dockerfileDisplay(line.endsWith("\n") ? line.slice(0, -1) : line)).join("\n"), "dockerfile");
   const oldLines = source ? highlightSource(source.before) : undefined, newLines = source ? highlightSource(source.after) : undefined;
   let oldIndex = 0, newIndex = 0, inHunk = false;
-  return text.split("\n").map((line) => {
+  return text.split("\n").map((line, index) => {
     const hunk = /^@@ -(\d+),\d+ \+(\d+),\d+ @@$/.exec(line);
     if (hunk) { oldIndex = Math.max(0, Number(hunk[1]) - 1); newIndex = Math.max(0, Number(hunk[2]) - 1); inHunk = true; }
     if (/^[ +\-]/.test(line) && (inHunk || !source && !/^(---|\+\+\+)/.test(line))) {
@@ -142,7 +143,7 @@ export function highlightedDockerfileDiff(text: string, theme: Theme, source?: {
       if (line[0] !== "+") oldIndex++; if (line[0] !== "-") newIndex++;
       return theme.fg(color, line[0]!) + (code ?? highlightCode(line.slice(1), "dockerfile")[0] ?? "");
     }
-    return theme.fg(line.startsWith("@@") ? "accent" : "muted", line);
+    return theme.fg(line.startsWith("@@") ? "accent" : index === 0 ? "dim" : "muted", line);
   });
 }
 
@@ -167,7 +168,7 @@ type ReviewUi = { requestRender(): void; terminal: { rows: number } };
 /** One interaction owns the candidate selector and its exact preview. Denial is always first. */
 export function createDockerfileReview(candidates: DockerfileReviewCandidate[], tui: ReviewUi, theme: Theme, keys: KeybindingsManager,
   done: (value: number | undefined) => void, signal: AbortSignal): Component & { dispose(): void } {
-  let index = 0, renderedIndex = -1, details = false, closed = false;
+  let index = 0, renderedIndex = -1, closed = false;
   let cachedWidth = -1, cachedBody: string[] | undefined;
   const invalidate = () => { cachedBody = undefined; };
   const refresh = () => { invalidate(); tui.requestRender(); };
@@ -179,21 +180,14 @@ export function createDockerfileReview(candidates: DockerfileReviewCandidate[], 
     if (cachedBody && cachedWidth === width) return cachedBody;
     cachedWidth = width;
     const candidate = preview();
-    cachedBody = candidate.sections.flatMap((section) => {
+    cachedBody = [...wrapReviewText(dockerfileScopeLine(candidate, theme), width), "", ...candidate.sections.flatMap((section) => {
       if (!section.dockerfile && !section.diff) return wrapReviewText(section.text, width);
       const highlighted = section.dockerfile ? highlightedDockerfileDiff(section.text, theme, section.source) : undefined;
       return dockerfileChangedRows(section.text).flatMap((row) => {
-        const color = row.kind === "add" ? "toolDiffAdded" : row.kind === "remove" ? "toolDiffRemoved" : row.kind === "file" ? "toolTitle" : "warning";
+        const color = row.kind === "add" ? "toolDiffAdded" : row.kind === "remove" ? "toolDiffRemoved" : row.kind === "file" ? "dim" : "warning";
         return wrapDockerfileDiffLine(highlighted && ["add", "remove"].includes(row.kind) ? highlighted[row.index]! : theme.fg(color, row.text), width);
       });
-    });
-    if (details) {
-      cachedBody.push(...["", "Details", `Destination: ${candidate.label}`, DOCKERFILE_IMPACT, persistenceNote, ...candidate.details.split("\n"), "", "Full unified review"].flatMap((line) => wrapReviewText(theme.fg("muted", line), width)));
-      for (const section of candidate.sections.filter((section) => section.dockerfile || section.diff)) {
-        const lines = section.dockerfile ? highlightedDockerfileDiff(section.text, theme, section.source) : section.text.split("\n");
-        cachedBody.push(...lines.flatMap((line) => wrapDockerfileDiffLine(line, width)));
-      }
-    }
+    })];
     return cachedBody;
   } };
   const scroll = new ScrollView(body, { scrollbar: "hidden", overscroll: "contain" });
@@ -204,25 +198,21 @@ export function createDockerfileReview(candidates: DockerfileReviewCandidate[], 
       // All long labels and code wrap; viewport slicing is scrollable, never content truncation.
       const wrap = (text: string) => wrapReviewText(text, w);
       const heading = w >= 8 ? wrap(theme.fg("borderMuted", "─ ") + theme.fg("accent", "Apply?")) : [];
-      const choiceRows = ["No", ...candidates.map((candidate) => candidate.label + (candidate.available ? "" : " [unavailable]"))]
+      const choiceRows = ["No", ...candidates.map((candidate) => (candidates.length === 1 ? "Yes" : candidate.label) + (candidate.available ? "" : " [unavailable]"))]
         .map((label, choice) => {
-          const color = choice === index ? choice === 0 ? "error" : "success" : choice === 0 ? "muted" : candidates[choice - 1]!.available ? "accent" : "dim";
-          return wrap(theme.fg(color, `${choice === index ? "→ " : "  "}${label}`));
+          // Match Pi’s native ExtensionSelectorComponent: accent selection, text otherwise.
+          return wrap(choice === index ? theme.fg("accent", "→ ") + theme.fg("accent", label) : `  ${theme.fg("text", label)}`);
         });
       const actions = [...heading, ...choiceRows.flat()];
       const selectedActionEnd = heading.length + choiceRows.slice(0, index + 1).reduce((total, lines) => total + lines.length, 0);
-      const help = "↑↓ scope · Enter apply/No · Esc cancel · Ctrl+N/P scroll · d details";
-      const foot = wrap(theme.fg("dim", help));
-      const spacing = rows >= actions.length + Math.min(foot.length, 2) + 3 ? 2 : 0;
-      const actionHeight = Math.min(actions.length, Math.max(1, rows - Math.min(foot.length, 2) - 1));
-      const height = Math.max(1, Math.min(10, rows - actionHeight - Math.min(foot.length, 2) - spacing));
+      const spacing = rows >= actions.length + 3 ? 1 : 0;
+      const actionHeight = Math.min(actions.length, Math.max(1, rows - 1));
+      const height = Math.max(1, rows - actionHeight - spacing);
       const lines = scroll.render(w);
       scroll.updateLayout(lines.length, height, () => tui.requestRender());
       // A rendered code preview is not approval evidence for a clipped destination label.
       renderedIndex = !index || selectedActionEnd <= actionHeight ? index : -1;
-      const progress = lines.length > height ? ` · ${scroll.scrollTop + 1}–${Math.min(lines.length, scroll.scrollTop + height)}/${lines.length}` : "";
-      return [...lines.slice(scroll.scrollTop, scroll.scrollTop + height), ...(spacing ? [""] : []), ...actions.slice(0, actionHeight), ...(spacing ? [""] : []),
-        ...wrap(theme.fg("dim", help + progress)).slice(0, 2)].slice(0, rows);
+      return [...lines.slice(scroll.scrollTop, scroll.scrollTop + height), ...(spacing ? [""] : []), ...actions.slice(0, actionHeight)].slice(0, rows);
     },
     handleInput(data) {
       if (closed) return;
@@ -238,7 +228,7 @@ export function createDockerfileReview(candidates: DockerfileReviewCandidate[], 
       } else if (matchesKey(data, Key.ctrl("n")) || matchesKey(data, Key.ctrl("p")) || matchesKey(data, Key.pageDown) || matchesKey(data, Key.pageUp)) {
         const forward = matchesKey(data, Key.ctrl("n")) || matchesKey(data, Key.pageDown);
         scroll.scrollBy((forward ? 1 : -1) * Math.max(1, scroll.viewportHeight - 1)); tui.requestRender();
-      } else if (data === "d") { details = !details; refresh(); }
+      }
     },
     dispose() { closed = true; cleanup(); },
   };
@@ -265,8 +255,10 @@ export async function approveDockerfileReview(ctx: ExtensionContext, candidates:
       component?.dispose();
     }
   }
-  const choice = await ctx.ui.select(question, ["No", ...candidates.filter((candidate) => candidate.available).map((candidate) => candidate.label)], { signal });
-  if (signal.aborted) return;
-  const index = candidates.findIndex((candidate) => candidate.available && candidate.label === choice);
-  return index >= 0 ? index : undefined;
+  const single = candidates.length === 1;
+  const choice = await ctx.ui.select(question, ["No", ...candidates.filter((candidate) => candidate.available).map((candidate) => single ? "Yes" : candidate.label)], { signal });
+  if (signal.aborted || choice === "No") return;
+  if (single) return choice === "Yes" && candidates[0]!.available ? 0 : undefined;
+  const matches = candidates.flatMap((candidate, index) => candidate.available && candidate.label === choice ? [index] : []);
+  return matches.length === 1 ? matches[0] : undefined;
 }

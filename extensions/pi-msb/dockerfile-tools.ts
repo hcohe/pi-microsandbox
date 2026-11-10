@@ -79,7 +79,7 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
     name: set ? "msb_dockerfile_set" : "msb_dockerfile_get",
     label: set ? "Propose Microsandbox Dockerfile" : "Read Microsandbox Dockerfile",
     description: set
-      ? "Propose Dockerfile replacement and/or relative UTF-8 build-context PATCH in Project or Global. Project is shared by main, linked and nested Git cwd with ONE default-No approval; no copying between scopes. Fixed host-owned source roots only; no host execution permission needed. Explicit per-proposal No-first user review shows complete added/removed code above scope choices; d details hold full unified context, exact paths and all warnings. Approval authorizes save and possible build/restart. Before save, no UI/denial/cancellation/stale source means no write or reload. Cancellation after save preserves bytes but blocks activation. Unchanged is a no-op. Saves never edit image/config intent: inspect get/config_get for shadowing; inherit image separately. Never embed secrets: content/diff may enter transcript. Report SAVED separately from activation. " + minimalEditGuidance
+      ? "Propose Dockerfile replacement and/or relative UTF-8 build-context PATCH in Project or Global. Project is shared by main, linked and nested Git cwd with ONE default-No approval; no copying between scopes. Fixed host-owned source roots only; no host execution permission needed. Explicit per-proposal No-first user review shows complete added/removed code above No/Yes choices. Approval authorizes save and possible build/restart. Before save, no UI/denial/cancellation/stale source means no write or reload. Cancellation after save preserves bytes but blocks activation. Unchanged is a no-op. Saves never edit image/config intent: inspect get/config_get for shadowing; inherit image separately. Never embed secrets: content/diff may enter transcript. Report SAVED separately from activation. " + minimalEditGuidance
       : "Read shared Project target or Global host-owned Dockerfile and bounded build-context inventory/requested text plus exact config/context paths, bundled digest-pinned FROM starter, precedence, limits and build guidance. Passive even Off/blocked with canonical workspace known: no writes, SDK, commands, approval, build or reload. UTF-8 content up to 32 KiB, never truncated; unsafe/oversized sources return bounded metadata/reason. Content is intentionally returned to the model: no embedded credentials/secrets. " + minimalEditGuidance,
     parameters: Type.Object({ scope: scopeSchema, ...(set ? {
       content: Type.Optional(Type.String({ maxLength: DOCKERFILE_MAX_BYTES, description: "Optional complete Dockerfile replacement; at most 32768 UTF-8 bytes. Omit for context-only edits. " + minimalEditGuidance })),
@@ -147,23 +147,15 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
               const candidateReview = { scope: input.scope, destinationLabel: names ? label : input.scope === "global" ? "Global" : `Project · cwd-local (${dockerfileDisplay(basename(ctx.cwd))})`, destination: input.scope, target: draft.target, path: draft.target.dockerfile,
                 ...(diff ? { diff, dockerfileMode: { before: draft.source.mode ?? null, after: 0o600 } } : {}), context, registration: bundle.registration, warnings };
               candidates.push({ draft, review: candidateReview, changed: bundle.changed });
-              views.push({ label, available: true, sections: [
-                ...(!names ? [{ text: input.scope === "global" ? "Scope: Global" : `Scope: Project · cwd-local (${dockerfileDisplay(basename(ctx.cwd))})` }] : []),
+              views.push({ scope: input.scope, label: candidateReview.destinationLabel, available: true, sections: [
                 ...(diff ? [{ text: diff, dockerfile: true, source: { before: draft.source.content, after: input.content ?? null } }] : []), ...context.map((edit) => ({ text: edit.diff, diff: true })),
                 ...(!bundle.changed ? [{ text: "No changes" }] : []),
-              ], details: [
-                ...(names !== undefined ? ["Shared on next reload/start: current/future registered worktrees, subject to overrides."] : []),
-                ...(bundle.registration ? ["Register immutable host-owned repository association in config.toml; preserve image/user intent and unknown keys. TOML formatting/comments may be rewritten."] : []),
-                `Dockerfile: ${dockerfileDisplay(draft.target.dockerfile)}`, `Context: ${dockerfileDisplay(draft.target.buildContext)}`, `Config: ${dockerfileDisplay(draft.target.config)}`,
-                ...(diff ? [`Dockerfile permissions: ${draft.source.mode === undefined ? "missing" : draft.source.mode.toString(8).padStart(4, "0")} → 0600`] : []),
-                ...bundle.context.map((edit) => `build-context/${dockerfileDisplay(edit.path)} permissions: ${edit.modeBefore === null ? "missing" : edit.modeBefore.toString(8).padStart(4, "0")} → ${edit.modeAfter === null ? "deleted" : edit.modeAfter.toString(8).padStart(4, "0")}`),
-                ...(bundle.registration ? [`Repository metadata: ${display(bundle.registration.metadata)}`] : []), ...warnings,
-                "New directories are private (0700). Unspecified files stay unchanged. No activation after partial/unknown save."].join("\n") });
+              ] });
             } catch (error) {
               draftCheck();
               if (error instanceof SettingsConflictError || !names) throw error;
               candidates.push(undefined);
-              views.push({ label, available: false, sections: [{ text: "UNAVAILABLE" }], details: "Cannot safely review this destination. No approval or writes here; inspect/repair with a human host editor. Originals unavailable; no target authorized." });
+              views.push({ scope: input.scope, label, available: false, sections: [{ text: "UNAVAILABLE" }] });
             }
           }
           draftCheck();
