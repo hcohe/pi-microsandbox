@@ -7,14 +7,31 @@ import { prepareBuildArchive } from "./image-archive.ts";
 import { assertBuildPath, BUILD_ROOT_DISK_MIB, buildImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { lockPathFor, tryAcquireOrphanLock } from "./locks.ts";
 import { artifactStore, copyArtifactFile, buildRecordPath, publishArtifact, readArtifact, selectLoadedImage, selectionPath, type BuildArtifact } from "./image-artifact.ts";
-import { createSdkTransport } from "./transport.ts";
+import { causalErrorDetails, createSdkTransport, SandboxTransportError, type StreamDiagnostics } from "./transport.ts";
 import type { LockHandle, SandboxTransport } from "./types.ts";
 
 const BUILD_TIMEOUT_MS = 20 * 60_000;
 const PATH_ENV = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 export const BUILD_FAILURE = "No verified explicitly loaded Dockerfile image is available. Use msb_dockerfile_build then msb_dockerfile_load; no implicit build/import or host fallback was attempted.";
-export interface BuildLog { phase: string; command: string; args: string[]; stdout: string; stderr: string; truncated: boolean; exitCode?: number }
+export interface BuildDiagnostics {
+  sdk: "microsandbox@0.6.16";
+  failureKind: "commandNonzero" | StreamDiagnostics["failureKind"] | "operation";
+  elapsedMs: number;
+  aggregateDeadlineMs: number;
+  builderMaxDurationSec: number;
+  cancellationSource?: "user" | "aggregateDeadline";
+  causes: ReturnType<typeof causalErrorDetails>;
+  observations?: {
+    authority: "observationOnlyNotCompletionProof";
+    builder: { outcome: string; status?: string };
+    archive: { outcome: string; kind?: string; bytes?: number; modifiedAtMs?: number };
+  };
+  cleanup?: { builder: string; staging: string; lock: string };
+  secondaryFailures: Array<{ operation: string; causes: ReturnType<typeof causalErrorDetails> }>;
+}
+export interface BuildLog { phase: string; command: string; args: string[]; stdout: string; stderr: string; truncated: boolean; exitCode?: number; diagnostics?: StreamDiagnostics }
 export class ImagePhaseError extends Error {
+  diagnostics?: BuildDiagnostics;
   readonly phase: string;
   readonly logs: BuildLog[];
   readonly imported: boolean | "unknown";
@@ -35,16 +52,20 @@ export interface ImageBuildOptions {
 /** Export only: this function never imports images or touches runtime lifecycle. */
 export async function buildDockerfileImage(options: ImageBuildOptions): Promise<{ artifact: BuildArtifact; cacheHit: boolean; logs: BuildLog[] }> {
   const { sdk, source } = options;
+  const started = performance.now();
   const logs: BuildLog[] = [];
   let primaryFailure: ImagePhaseError | undefined;
   let phase = "validation";
   const guard = async () => { options.signal?.throwIfAborted(); await options.guard?.(); options.signal?.throwIfAborted(); };
   const abort = new AbortController();
-  const cancel = () => abort.abort();
+  let cancellationSource: BuildDiagnostics["cancellationSource"];
+  const cancel = () => { if (!abort.signal.aborted) { cancellationSource = "user"; abort.abort(); } };
   options.signal?.addEventListener("abort", cancel, { once: true });
   if (options.signal?.aborted) cancel();
-  const timer = setTimeout(cancel, BUILD_TIMEOUT_MS);
-  const check = () => { if (abort.signal.aborted) throw new Error("Build cancelled"); };
+  const timer = setTimeout(() => {
+    if (!abort.signal.aborted) { cancellationSource = "aggregateDeadline"; abort.abort(); }
+  }, BUILD_TIMEOUT_MS);
+  const check = () => { if (abort.signal.aborted) throw new Error(cancellationSource === "aggregateDeadline" ? "Build aggregate deadline elapsed" : "Build cancelled"); };
   let lock: LockHandle | null = null;
   let temporary: string | undefined;
   let temporaryAlias: string | undefined;
@@ -59,6 +80,55 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     if (!temporaryIdentity || !stat.isDirectory() || stat.dev !== temporaryIdentity.dev || stat.ino !== temporaryIdentity.ino) throw new Error("Build staging identity changed");
   };
   let transport: SandboxTransport | undefined;
+  let outputIdentity: { dev: number; ino: number } | undefined;
+  // Read-only, identity-matched observations. No guest exec, reconnect, logs or config dump.
+  const observeFailure = async (): Promise<BuildDiagnostics["observations"]> => {
+    const unavailable = { outcome: "unavailable" };
+    if (abort.signal.aborted) return { authority: "observationOnlyNotCompletionProof", builder: { outcome: "skippedCancellation" }, archive: { outcome: "skippedCancellation" } };
+    let probeTimer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort!: () => void;
+    try {
+      const sample = async (): Promise<NonNullable<BuildDiagnostics["observations"]>> => {
+        const [builder, archive] = await Promise.all([
+          (async () => {
+            try {
+              if (!raw || typeof raw.id !== "string" || !raw.id || sdk.defaultBackendKind?.() !== "local") return unavailable;
+              const id = raw.id;
+              const record = await sdk.Sandbox.get(builderName);
+              if (record.id !== id || record.name !== builderName || record.backendKind !== "local" || sdk.defaultBackendKind?.() !== "local") return { outcome: "identityMismatch" };
+              const statuses = ["created", "starting", "running", "draining", "paused", "stopped", "crashed"];
+              return statuses.includes(record.status) ? { outcome: "sampled", status: record.status } : unavailable;
+            } catch { return { outcome: "probeFailed" }; }
+          })(),
+          (async () => {
+            try {
+              if (!temporary || !outputIdentity) return unavailable;
+              await validateTemporary(temporary);
+              const output = join(temporary, "output");
+              const parent = await fs.lstat(output);
+              if (!parent.isDirectory() || parent.dev !== outputIdentity.dev || parent.ino !== outputIdentity.ino || await fs.realpath(temporary) !== temporary || await fs.realpath(output) !== output) return { outcome: "identityMismatch" };
+              // lstat never follows the final archive component and never reads its bytes.
+              const stat = await fs.lstat(join(output, "image.tar"));
+              await validateTemporary(temporary);
+              const after = await fs.lstat(output);
+              if (!after.isDirectory() || after.dev !== parent.dev || after.ino !== parent.ino) return { outcome: "identityMismatch" };
+              return { outcome: "sampled", kind: stat.isFile() ? "file" : stat.isSymbolicLink() ? "symlink" : "other", bytes: stat.size, modifiedAtMs: stat.mtimeMs };
+            } catch (error) { return { outcome: (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "probeFailed" }; }
+          })(),
+        ]);
+        return { authority: "observationOnlyNotCompletionProof", builder, archive };
+      };
+      return await Promise.race([
+        sample(),
+        new Promise<NonNullable<BuildDiagnostics["observations"]>>((resolve) => {
+          const finish = (outcome: string) => resolve({ authority: "observationOnlyNotCompletionProof", builder: { outcome }, archive: { outcome } });
+          probeTimer = setTimeout(() => finish("probeBudgetElapsed"), 500);
+          onAbort = () => finish("skippedCancellation");
+          abort.signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally { clearTimeout(probeTimer); if (onAbort) abort.signal.removeEventListener("abort", onAbort); }
+  };
   const cleanupBuilder = async () => {
     // Use the owned object, never a fresh name lookup that might select a replacement.
     if (transport) { await transport.dispose(); transport = undefined; }
@@ -136,6 +206,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     const output = join(temporary, "output");
     await fs.mkdir(input, { mode: 0o700 });
     await fs.mkdir(output, { mode: 0o700 });
+    outputIdentity = await fs.lstat(output);
     for (const entry of snapshot.entries) {
       const path = join(input, entry.path);
       if (entry.data === undefined) await fs.mkdir(path, { recursive: true, mode: entry.mode });
@@ -148,7 +219,8 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     const builder = sdk.Sandbox.builder(builderName)
       .image(DEFAULT_CONFIG.image).rootDisk(BUILD_ROOT_DISK_MIB).pullPolicy("if-missing").cpus(2).memory(4096)
       .security("default").user("root").detached(false).maxDuration(BUILD_TIMEOUT_MS / 1000)
-      .idleTimeout(0).workdir("/pi-msb-input").labels({ "pi-msb.builder": owner });
+      // SDK 0.6.16 treats zero as immediate idle expiry, not disabled.
+      .workdir("/pi-msb-input").labels({ "pi-msb.builder": owner });
     builder.network((network: any) => network.policy({ ...publicPolicy, defaultIngress: "deny" }));
     builder.volume("/pi-msb-input", (mount: any) => mount.bind(input).readonly());
     builder.volume("/pi-msb-output", (mount: any) => mount.bind(output));
@@ -175,9 +247,17 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
         log.truncated ||= Buffer.byteLength(text) > 32 * 1024;
         log[key] = Buffer.from(text).subarray(-32 * 1024).toString("utf8");
       };
-      const result = await transport!.execStream("/usr/bin/env", ["-i", PATH_ENV, "HOME=/root", command, ...args], {
+      let result: { exitCode: number };
+      try { result = await transport!.execStream("/usr/bin/env", ["-i", PATH_ENV, "HOME=/root", command, ...args], {
         timeoutMs, signal: abort.signal, onStdout: (data) => append("stdout", data), onStderr: (data) => append("stderr", data),
-      });
+      }); } catch (error) {
+        if (error instanceof SandboxTransportError) {
+          log.diagnostics = error.diagnostics;
+          // An observed status remains evidence even if a later recv fails; never success.
+          if (error.diagnostics?.observedExitCode !== undefined) log.exitCode = error.diagnostics.observedExitCode;
+        }
+        throw error;
+      }
       log.exitCode = result.exitCode;
       if (result.exitCode !== 0) throw new Error(`${command} exited with status ${result.exitCode}`);
       await guard();
@@ -200,24 +280,47 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     return { artifact, cacheHit: false, logs };
   } catch (error) {
     primaryFailure = new ImagePhaseError(phase, error instanceof Error ? error.message : String(error), logs);
+    const last = logs.at(-1);
+    primaryFailure.diagnostics = {
+      sdk: "microsandbox@0.6.16",
+      failureKind: cancellationSource === "aggregateDeadline" ? "timeout" : cancellationSource === "user" ? "cancelled" : last?.diagnostics?.failureKind ?? (last?.exitCode !== undefined && last.exitCode !== 0 ? "commandNonzero" : "operation"),
+      elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000,
+      cancellationSource, causes: causalErrorDetails(error), secondaryFailures: [],
+    };
+    try { primaryFailure.diagnostics.observations = await observeFailure(); }
+    catch (secondary) { primaryFailure.diagnostics.secondaryFailures.push({ operation: "diagnosticProbe", causes: causalErrorDetails(secondary) }); }
+    // Cancellation arriving during observation still takes precedence.
+    if (cancellationSource) {
+      primaryFailure.diagnostics.cancellationSource = cancellationSource;
+      primaryFailure.diagnostics.failureKind = cancellationSource === "user" ? "cancelled" : "timeout";
+    }
     throw primaryFailure;
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", cancel);
-    try {
-      await cleanupBuilder();
-    } catch (error) {
-      // Never remove host output while a failed-to-stop builder might still access it.
-      throw new ImagePhaseError("cleanup", `${primaryFailure ? primaryFailure.message + "; " : ""}Builder cleanup failed; staging retained because builder ownership/stop is unconfirmed: ${error instanceof Error ? error.message : String(error)}`, logs);
-    } finally {
-      try {
-        if ((!createAttempted || builderRemoved) && temporaryAlias) {
-          const path = temporary ?? temporaryAlias;
-          try { await validateTemporary(path); await fs.rm(path, { recursive: true, force: true }); }
-          catch (error) { throw new ImagePhaseError("cleanup", `${primaryFailure ? primaryFailure.message + "; " : ""}Staging cleanup refused: ${error instanceof Error ? error.message : String(error)}`, logs); }
-        }
-      } finally { await lock?.release(); }
+    let cleanupFailure: ImagePhaseError | undefined;
+    const cleanup = { builder: builderRemoved ? "removed" : createAttempted ? "unconfirmed" : "notCreated", staging: temporaryAlias ? "retained" : "notCreated", lock: lock ? "unconfirmed" : "notAcquired" };
+    const secondary = (operation: string, error: unknown, message: string) => {
+      const failure = primaryFailure ?? cleanupFailure ?? (cleanupFailure = new ImagePhaseError("cleanup", message, logs));
+      if (!failure.diagnostics) failure.diagnostics = { sdk: "microsandbox@0.6.16", failureKind: "operation", elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000, causes: [], secondaryFailures: [] };
+      failure.diagnostics.secondaryFailures.push({ operation, causes: causalErrorDetails(error) });
+    };
+    try { await cleanupBuilder(); cleanup.builder = builderRemoved ? "removed" : "notCreated"; }
+    catch (error) {
+      // Never remove output while stop/ownership is unconfirmed; retain primary phase.
+      secondary("builderCleanup", error, "Builder cleanup failed; staging retained because builder ownership/stop is unconfirmed");
     }
+    try {
+      if ((!createAttempted || builderRemoved) && temporaryAlias) {
+        const path = temporary ?? temporaryAlias;
+        await validateTemporary(path); await fs.rm(path, { recursive: true, force: true }); cleanup.staging = "removed";
+      }
+    } catch (error) { secondary("stagingCleanup", error, "Staging cleanup refused; retained for host repair"); }
+    try { await lock?.release(); if (lock) cleanup.lock = "released"; }
+    catch (error) { cleanup.lock = "failed"; secondary("lockRelease", error, "Build lock release failed"); }
+    const failure = primaryFailure ?? cleanupFailure;
+    if (failure?.diagnostics) failure.diagnostics.cleanup = cleanup;
+    if (!primaryFailure && cleanupFailure) throw cleanupFailure;
   }
 }
 

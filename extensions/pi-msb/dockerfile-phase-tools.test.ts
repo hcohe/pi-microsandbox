@@ -11,7 +11,7 @@ import { artifactPath, readArtifact, selectionPath } from "./image-artifact.ts";
 
 const from = `FROM ${DEFAULT_CONFIG.image}\n`;
 function deferred() { let resolve!: () => void; const promise = new Promise<void>((done) => { resolve = done; }); return { resolve, promise }; }
-async function fixture(t: TestContext, options: { autoStart?: boolean; failStep?: string; build?: () => Promise<void>; import?: () => Promise<void>; create?: () => Promise<void>; stderr?: string; sdkAcquire?: () => Promise<void> } = {}) {
+async function fixture(t: TestContext, options: { exportFailure?: "eof" | Error; autoStart?: boolean; failStep?: string; build?: () => Promise<void>; import?: () => Promise<void>; create?: () => Promise<void>; stderr?: string; sdkAcquire?: () => Promise<void> } = {}) {
   const root = await fs.realpath(await fs.mkdtemp("/tmp/pi-msb-phases-"));
   const cwd = join(root, "cwd"), agentDir = join(root, "agent");
   await fs.mkdir(cwd); await fs.mkdir(agentDir);
@@ -707,4 +707,23 @@ for (const mode of ["no-ui", "print", "json"] as const) test(`load tool ${mode} 
   const result = (await f.run("load", { scope: "project", artifactId: built.artifactId })).details;
   assert.equal(result.code, "APPROVAL_FAILED"); assert.equal(result.imported, false); assert.equal(result.selected, false);
   noRuntime(f.calls.slice(boundary));
+});
+
+for (const mode of ["eof", "transport", "timeout"] as const) test(`expanded export ${mode} exposes structured inert diagnostics and keeps EXPORT_FAILED`, async (t) => {
+  const hostile = "partial\x1b[31m\u202eoutput";
+  const f = await fixture(t, { exportFailure: mode === "eof" ? "eof" : Object.assign(new Error("SECRET SDK INFO"), { code: mode === "timeout" ? "TIMEOUT" : "CONNECTION_CLOSED" }), stderr: hostile });
+  const result = await f.run("build");
+  assert.equal(result.details.code, "EXPORT_FAILED");
+  assert.equal(result.details.diagnostics.failureKind, mode === "eof" ? "streamEndedWithoutExit" : mode);
+  assert.equal(result.details.logs.at(-1).exitCode, undefined);
+  assert.match(result.content[0].text, /Stream diagnostics:/);
+  assert.match(result.content[0].text, /observationOnlyNotCompletionProof/);
+  assert.doesNotMatch(JSON.stringify(result.details.diagnostics), /SECRET SDK INFO/);
+  const tool = f.definitions.get("msb_dockerfile_build")!;
+  const rendered = tool.renderResult!(result, { expanded: true } as any, {} as any);
+  const frame = rendered.render(200).join("\n");
+  assert.match(frame, /streamEndedWithoutExit|transport|timeout/);
+  assert.doesNotMatch(frame, /\u202e|\x1b\[31m/);
+  assert.match(frame, /Next: msb_dockerfile_build/);
+  noRuntime(f.calls);
 });

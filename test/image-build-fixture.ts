@@ -35,6 +35,11 @@ export function buildSdk(calls: string[], hooks: {
   archive?: (reference: string) => Buffer;
   create?: () => Promise<void>;
   build?: () => Promise<void>;
+  export?: (archive: string) => Promise<void>;
+  exportFailure?: "eof" | Error;
+  silentExport?: boolean;
+  probe?: () => Promise<void>;
+  destroy?: () => Promise<void>;
   import?: () => Promise<void>;
   failStep?: string;
   persistBeforeCreate?: boolean;
@@ -48,6 +53,7 @@ export function buildSdk(calls: string[], hooks: {
   sdk.Sandbox.get = async (name: string) => {
     if (!name.startsWith("pi-msb-builder-")) return runtimeGet(name);
     calls.push(`builder-get:${name}`);
+    await hooks.probe?.();
     const handle = records.get(name);
     if (!handle) throw Object.assign(new Error("PRIVATE NOT FOUND"), { code: "sandboxNotFound" });
     return handle;
@@ -84,11 +90,12 @@ export function buildSdk(calls: string[], hooks: {
     builder.create = async () => {
       calls.push("builder-create");
       const handle = {
-        name, id: `record-${name}`, backendKind: "local", config: () => ({ name, labels }),
+        name, id: `record-${name}`, status: "running", backendKind: "local", config: () => ({ name, labels }),
         destroy: async (options: { timeoutMs: number }) => {
           calls.push(`builder-record-destroy:${name}:${options.timeoutMs}`);
           if (records.get(name) !== handle) throw new Error("Sandbox replaced");
           calls.push("builder-destroy");
+          await hooks.destroy?.();
           if (hooks.failStep === "destroy") throw new Error("PRIVATE CLEANUP");
           records.delete(name);
         },
@@ -97,7 +104,7 @@ export function buildSdk(calls: string[], hooks: {
       await hooks.create?.();
       if (hooks.failStep === "create") throw new Error("PRIVATE CREATE OUTPUT");
       const raw: any = {
-        name, ownsLifecycle: true, backendKind: "local", config: async () => ({ name, labels }),
+        name, id: handle.id, ownsLifecycle: true, backendKind: "local", config: async () => ({ name, labels }),
         destroy: async (options: { timeoutMs: number }) => handle.destroy(options),
         execStreamWith: async (_command: string, configure: (exec: any) => void) => {
           let args: string[] = [];
@@ -108,9 +115,21 @@ export function buildSdk(calls: string[], hooks: {
             kill: async () => { calls.push("builder-kill"); },
             async *[Symbol.asyncIterator]() {
               if (args.includes("buildx")) { reference = args[args.indexOf("--tag") + 1]!; await hooks.build?.(); }
-              if (args.includes("save")) await fs.writeFile(join(volumes["/pi-msb-output"]!, "image.tar"), (hooks.archive ?? dockerArchive)(reference));
+              if (args.includes("save")) {
+                const archive = join(volumes["/pi-msb-output"]!, "image.tar");
+                await fs.writeFile(archive, (hooks.archive ?? dockerArchive)(reference));
+                await hooks.export?.(archive);
+              }
+              if (args.includes("save") && hooks.silentExport) {
+                if (hooks.exportFailure instanceof Error) throw hooks.exportFailure;
+                return;
+              }
               yield { kind: "stdout", data: Buffer.from("BUILD STDOUT") };
               yield { kind: "stderr", data: Buffer.from(hooks.stderr ?? "PRIVATE GUEST OUTPUT") };
+              if (args.includes("save") && hooks.exportFailure) {
+                if (hooks.exportFailure instanceof Error) throw hooks.exportFailure;
+                return;
+              }
               yield { kind: "exited", code: hooks.failStep === "build" && args.includes("buildx") ? 1 : hooks.failStep === "export" && args.includes("save") ? 42 : 0 };
             },
           };

@@ -3,6 +3,7 @@ import { getEventListeners } from "node:events";
 import test from "node:test";
 
 import {
+  causalErrorDetails,
   createSdkTransport,
   SandboxTransportError,
 } from "./transport.ts";
@@ -555,4 +556,48 @@ test("does not import microsandbox at module load", async () => {
   await assert.rejects(transport.exec("true", []), (error: unknown) => {
     return error instanceof SandboxTransportError && error.code === "INVALID";
   });
+});
+
+test("stream diagnostics retain raw output counts, real observed exit and typed failure without SDK messages", async () => {
+  const wrapped = await sdkHandle([
+    { eventType: "stdout", data: Buffer.from([0xff, 0, 65]) },
+    { eventType: "stderr", data: Buffer.from("partial stderr") },
+    { eventType: "exited", code: 23 },
+    Object.assign(new Error("PRIVATE connection detail\u202e"), { code: "CONNECTION_CLOSED" }),
+  ], { kill: async () => { throw Object.assign(new Error("PRIVATE kill"), { code: "IO" }); }, close: async () => { throw new Error("PRIVATE close"); } });
+  const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+  const stdout: Buffer[] = [], stderr: Buffer[] = [];
+  await assert.rejects(transport.execStream("broken", [], { timeoutMs: 123, onStdout: (data) => stdout.push(Buffer.from(data)), onStderr: (data) => stderr.push(Buffer.from(data)) }), (error: unknown) => {
+    assert.ok(error instanceof SandboxTransportError);
+    assert.equal(error.code, "SANDBOX_DOWN");
+    const diagnostics = error.diagnostics!;
+    assert.equal(diagnostics.failureKind, "transport");
+    assert.equal(diagnostics.observedExitCode, 23);
+    assert.equal(diagnostics.events, 3);
+    assert.equal(diagnostics.stdoutBytes, 3);
+    assert.equal(diagnostics.stderrBytes, 14);
+    assert.equal(diagnostics.requestedTimeoutMs, 123);
+    assert.ok(diagnostics.elapsedMs >= diagnostics.lastOutputElapsedMs!);
+    assert.deepEqual(diagnostics.cleanup, [{ operation: "kill", outcome: "failed", code: "IO" }, { operation: "iteratorReturn", outcome: "failed", code: "UNKNOWN" }]);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE|connection detail/);
+    assert.ok(diagnostics.causes.some((cause) => cause.code === "SANDBOX_DOWN"));
+    return true;
+  });
+  assert.deepEqual(Buffer.concat(stdout), Buffer.from([0xff, 0, 65]));
+  assert.equal(Buffer.concat(stderr).toString(), "partial stderr");
+  await transport.dispose();
+});
+
+
+test("causal diagnostics bound depth, cycles and typed tokens without reading messages", () => {
+  const error: any = new Error("PRIVATE MESSAGE"); error.code = "IO";
+  error.cause = error;
+  assert.deepEqual(causalErrorDetails(error), [{ name: "Error", code: "IO" }]);
+  error.code = "SECRET\u202e\x1b";
+  assert.deepEqual(causalErrorDetails(error), [{ name: "Error" }]);
+  let chain: Error = new Error("private");
+  for (let i = 0; i < 10; i++) chain = new Error("private", { cause: chain });
+  assert.equal(causalErrorDetails(chain).length, 4);
+  const hostile = Object.defineProperty({}, "cause", { get() { throw new Error("private getter"); } });
+  assert.deepEqual(causalErrorDetails(hostile), [{ name: "Error" }]);
 });

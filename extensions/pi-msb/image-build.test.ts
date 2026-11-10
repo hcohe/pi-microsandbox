@@ -48,6 +48,7 @@ test("builder exports a reusable verified artifact without import or runtime cal
   assert.ok(calls.includes("builder-user:root"));
   assert.ok(calls.includes("builder-detached:false"));
   assert.ok(calls.includes("builder-maxDuration:1200"));
+  assert.equal(calls.some((call) => call.startsWith("builder-idleTimeout:")), false);
   assert.ok(calls.includes("builder-profiles:public"));
   assert.match(calls.find((call) => call.startsWith("builder-network:"))!, /"defaultIngress":"deny"/);
   assert.ok(calls.includes("builder-readonly:/pi-msb-input"));
@@ -410,4 +411,129 @@ for (const expectation of [undefined, "missing"]) test(`direct load cannot bypas
     expectedSelectionVersion: expectation as string }), /expectation required|selection changed after approval/);
   assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
   assert.equal(await fs.readFile(selectionPath(f.source), "utf8"), replacement);
+});
+
+
+for (const mode of ["nonzero", "silentEOF", "partialEOF", "transport", "timeout"] as const) test(`export ${mode} retains diagnostic evidence but never publishes even a complete archive`, async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const sdk = buildSdk(calls, {
+    failStep: mode === "nonzero" ? "export" : undefined,
+    exportFailure: mode === "transport" ? Object.assign(new Error("SECRET SDK MESSAGE"), { code: "CONNECTION_CLOSED" }) : mode === "timeout" ? Object.assign(new Error("SECRET SDK MESSAGE"), { code: "TIMEOUT" }) : mode === "nonzero" ? undefined : "eof",
+    silentExport: mode === "silentEOF",
+  });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), (error: unknown) => {
+    assert.ok(error instanceof ImagePhaseError);
+    assert.equal(error.phase, "export");
+    assert.equal(error.diagnostics?.failureKind, mode === "nonzero" ? "commandNonzero" : mode === "transport" ? "transport" : mode === "timeout" ? "timeout" : "streamEndedWithoutExit");
+    const log = error.logs.at(-1)!;
+    assert.equal(log.exitCode, mode === "nonzero" ? 42 : undefined);
+    if (mode !== "silentEOF") { assert.match(log.stdout, /BUILD STDOUT/); assert.match(log.stderr, /PRIVATE GUEST OUTPUT/); }
+    else { assert.equal(log.stdout, ""); assert.equal(log.diagnostics?.stdoutBytes, 0); }
+    if (mode !== "nonzero") {
+      assert.equal(log.diagnostics?.transportCode, mode === "transport" ? "SANDBOX_DOWN" : mode === "timeout" ? "TIMEOUT" : "INVALID");
+      assert.equal(log.diagnostics?.requestedTimeoutMs, 1_200_000);
+      assert.equal(log.diagnostics?.stderrBytes, mode === "silentEOF" ? 0 : Buffer.byteLength(log.stderr));
+      assert.ok(log.diagnostics!.elapsedMs >= 0);
+      assert.equal(log.diagnostics?.cleanup.length, 2);
+    }
+    assert.equal(error.diagnostics?.observations?.authority, "observationOnlyNotCompletionProof");
+    assert.equal(error.diagnostics?.observations?.archive.kind, "file");
+    assert.ok(error.diagnostics!.observations!.archive.bytes! > 1024);
+    assert.equal(error.diagnostics?.observations?.builder.status, "running");
+    assert.doesNotMatch(JSON.stringify(error.diagnostics), /SECRET SDK MESSAGE/);
+    return true;
+  });
+  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
+  await assertClean(calls);
+  // Failure is not cached; explicit retry builds and subsequent reuse is verified.
+  const retrySdk = buildSdk(calls);
+  const retry = await buildDockerfileImage({ sdk: retrySdk, source: f.source, acquireLock });
+  assert.equal(retry.cacheHit, false);
+  assert.equal((await buildDockerfileImage({ sdk: retrySdk, source: f.source, acquireLock })).cacheHit, true);
+});
+
+for (const source of ["user", "aggregateDeadline"] as const) test(`export cancellation reports owned ${source} evidence without invented status`, async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const abort = new AbortController();
+  const entered = deferred(), gate = deferred();
+  const sdk = buildSdk(calls, { export: async () => { entered.resolve(); await gate.promise; }, exportFailure: "eof" });
+  if (source === "aggregateDeadline") t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = buildDockerfileImage({ sdk, source: f.source, acquireLock, signal: abort.signal });
+  await entered.promise;
+  if (source === "user") abort.abort(); else t.mock.timers.tick(1_200_000);
+  gate.resolve();
+  await assert.rejects(pending, (error: unknown) => {
+    assert.ok(error instanceof ImagePhaseError);
+    assert.equal(error.phase, "export");
+    assert.equal(error.diagnostics?.cancellationSource, source);
+    assert.equal(error.diagnostics?.failureKind, source === "user" ? "cancelled" : "timeout");
+    assert.equal(error.logs.at(-1)?.exitCode, undefined);
+    assert.equal(error.logs.at(-1)?.diagnostics?.transportCode, "ABORTED");
+    assert.match(error.logs.at(-1)!.stdout, /BUILD STDOUT/);
+    assert.equal(error.diagnostics?.observations?.builder.outcome, "skippedCancellation");
+    return true;
+  });
+  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  await assertClean(calls);
+});
+
+for (const probe of ["reject", "pending", "replacement"] as const) test(`best-effort ${probe} probe and cleanup failures cannot replace primary export failure`, { timeout: 5000 }, async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const sdk = buildSdk(calls, {
+    exportFailure: "eof",
+    probe: probe === "replacement" ? undefined : async () => { if (probe === "reject") throw new Error("PRIVATE PROBE"); await new Promise(() => undefined); },
+    destroy: async () => { throw new Error("PRIVATE DESTROY"); },
+  });
+  if (probe === "replacement") {
+    const get = sdk.Sandbox.get;
+    sdk.Sandbox.get = async (name: string) => ({ ...await get(name), id: "replacement", status: "crashed" });
+  }
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock: async () => ({ path: "test", release: async () => { throw new Error("PRIVATE RELEASE"); } }) }), (error: unknown) => {
+    assert.ok(error instanceof ImagePhaseError);
+    assert.equal(error.phase, "export");
+    assert.match(error.message, /ended without an exit event/);
+    assert.equal(error.diagnostics?.failureKind, "streamEndedWithoutExit");
+    assert.equal(error.diagnostics?.observations?.builder.outcome, probe === "pending" ? "probeBudgetElapsed" : probe === "replacement" ? "identityMismatch" : "probeFailed");
+    assert.deepEqual(error.diagnostics?.secondaryFailures.map((entry) => entry.operation), ["builderCleanup", "lockRelease"]);
+    assert.doesNotMatch(JSON.stringify(error.diagnostics), /PRIVATE/);
+    return true;
+  });
+  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  // Fake VM only: prove uncertain destruction retains staging before test teardown.
+  for (const path of temporaryPaths(calls)) assert.ok((await fs.stat(path)).isDirectory());
+  for (const directory of new Set(temporaryPaths(calls).map(dirname))) await fs.rm(directory, { recursive: true, force: true });
+});
+
+test("archive observation does not follow a symlink or validate its target", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const target = join(f.root, "private"); await fs.writeFile(target, "private data");
+  const sdk = buildSdk(calls, { exportFailure: "eof", export: async (archive) => { await fs.unlink(archive); await fs.symlink(target, archive); } });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), (error: unknown) => {
+    assert.ok(error instanceof ImagePhaseError);
+    assert.equal(error.diagnostics?.observations?.archive.kind, "symlink");
+    assert.equal(error.diagnostics?.failureKind, "streamEndedWithoutExit");
+    return true;
+  });
+  assert.equal(await fs.readFile(target, "utf8"), "private data"); await assertClean(calls);
+});
+
+test("cancellation interrupts pending diagnostic observation without waiting for its budget or publishing", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const abort = new AbortController();
+  const entered = deferred(), gate = deferred();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sdk = buildSdk(calls, { exportFailure: "eof", probe: async () => { entered.resolve(); await gate.promise; } });
+  const pending = buildDockerfileImage({ sdk, source: f.source, acquireLock, signal: abort.signal });
+  await entered.promise; abort.abort();
+  await assert.rejects(pending, (error: unknown) => {
+    assert.ok(error instanceof ImagePhaseError);
+    assert.equal(error.diagnostics?.failureKind, "cancelled");
+    assert.equal(error.diagnostics?.cancellationSource, "user");
+    assert.equal(error.diagnostics?.observations?.builder.outcome, "skippedCancellation");
+    assert.equal(error.logs.at(-1)?.exitCode, undefined);
+    assert.equal(error.diagnostics?.cleanup?.builder, "removed");
+    return true;
+  });
+  gate.resolve();
+  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  await assertClean(calls);
 });

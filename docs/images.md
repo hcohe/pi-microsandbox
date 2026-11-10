@@ -236,6 +236,89 @@ Build logs include bounded stdout/stderr tails (explicit truncation) and actual
 command exit status; approval/storage errors have no invented process status.
 Build inputs/output are transcript-visible: never include secrets.
 
+### Export failures and diagnostic limits
+
+`EXPORT_FAILED` remains an export-phase failure, not a Docker process exit code.
+In particular, **“Execution stream ended without an exit event”** originates in
+our SDK transport adapter: the async iterator reached EOF without an integer
+`exited` event (and without cancellation/disposal taking precedence). In pinned
+`microsandbox@0.6.16`, the JS iterator ends when native `recv()` returns `null`.
+This is missing completion evidence, **not** proof that `docker save` completed,
+that a timeout fired, or that the VM ran out of memory. Successful retry does not
+identify the original cause. No automatic retry, salvage, import or activation
+is authorized by this failure.
+
+Structured tool `details.diagnostics` reports `failureKind`: `commandNonzero`,
+`streamEndedWithoutExit`, `transport`, `timeout`, `cancelled`, `disposed`, or
+`operation`. Command logs retain only genuine `exitCode` values. An exit observed
+before a later receive failure is retained as evidence, but does not turn that
+failed stream into success. Missing status is never replaced by a synthetic
+process code. Each failed command's `logs[].diagnostics` includes the mapped
+`transportCode`, monotonic `elapsedMs` (including attempted stream cleanup), event
+count, raw `stdoutBytes`/`stderrBytes`, `lastOutputElapsedMs` when output was seen,
+`observedExitCode` if received, abort/disposal flags and kill/iterator-return
+cleanup outcomes. Elapsed minus last-output time describes observed output
+inactivity; it is not a silence timeout. Partial stdout/stderr remain bounded
+32 KiB tails with explicit truncation; expanded tool results escape terminal
+controls and bidi characters. Causal details are at most four typed error
+name/code identities, not arbitrary SDK messages, stacks, environment or config.
+
+Deadlines are distinct:
+
+- A **20-minute aggregate cancellation timer** starts before source validation
+  and lock waiting. `cancellationSource=aggregateDeadline` is owned timer evidence;
+  `cancellationSource=user` means the supplied tool/interaction signal fired.
+  Only the former is classified as deadline timeout. An SDK typed timeout is
+  separately reported as `transportCode=TIMEOUT`; EOF alone is never a timeout.
+- The attached builder separately requests **`maxDuration=1200` seconds**. Its
+  enforcement timing or termination reason is not established by the command
+  stream. Builder idle timeout is now **omitted**: pinned SDK/runtime zero means
+  immediate idle eligibility, not “disable idle timeout”. This fixes a builder-only
+  configuration mismatch, **not a proven cause of the historical incident**.
+  Ordinary runtime idle policy is unchanged.
+- `requestedTimeoutMs` records the SDK exec request (17 seconds for Docker
+  startup; 20 minutes each for build/save). **Pinned streaming exec ignores this
+  argument**, hence `sdkStreamingTimeoutEnforced=false`; these are not independently
+  enforced command deadlines. The guest startup helper has its own 15-second
+  budget. Aggregate cancellation is not a hard return deadline: creation and
+  pending stream acquisition/receive can still need SDK convergence. Stream
+  failure cleanup bounds kill and iterator-return separately to one second;
+  ownership-checked builder destruction requests ten seconds.
+
+Before builder destruction, failure reporting attempts at most **500 ms total**
+for read-only observations (skipped or abandoned on cancellation): an
+identity-matched local database builder status, and no-follow archive type, byte
+size and modification time under the pinned staging directory. Probe failure,
+identity mismatch or budget expiry is reported, not treated as a new command
+failure. There is no reconnect, guest command, captured-log/config dump, or
+start/stop request in these probes. `observations.authority` is explicitly
+`observationOnlyNotCompletionProof`: even a nonempty, apparently complete tar
+cannot prove completion or integrity. Status is a point-in-time database
+observation, not a termination cause or signal. No termination reason/OOM/timeout
+is inferred from it. Primary phase/error/logs survive secondary diagnostic,
+builder/staging cleanup and lock-release failures; `secondaryFailures` and
+`cleanup` describe those outcomes. Unconfirmed builder stop retains staging for
+host repair, never publication.
+
+Publication still requires successful zero-exit commands and stream completion,
+guards, confirmed builder destruction, no-follow regular single-link bounded and
+aligned archive checks, checksummed tar structure/termination, safe unique
+members/types, exactly the expected image tag/platform/config/layers, sanitized
+archive copying, digest/byte verification and guarded receipt publication. These
+are not cryptographic layer-content provenance checks. EOF or an archive's
+presence never skips validation. Failed export has no artifact to load: inspect
+diagnostics, repair source/policy if needed, then explicitly retry build. A
+successful retry can be verified/reused from the artifact cache and still needs
+separate load approval. New diagnostics cannot reconstruct the historical
+attempt's missing stream events, archive state, VM termination cause or first
+`docker save` completion.
+
+Pinned-source references: [SDK async iteration](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/sdk/node-ts/src/internal/async-iter.ts),
+[streaming exec and shared event receiver](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/sdk/rust/lib/sandbox/exec.rs)
+(`exec_stream` timeout ignored; `wait` consumes the same receiver, not an
+independent cached status), [idle option storage](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/sdk/rust/lib/sandbox/builder.rs),
+and [runtime lifetime/idle handling](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/crates/runtime/lib/vm.rs).
+
 Mutable `FROM` tags and external downloads are not refreshed on build-cache hits.
 Prefer pinned dependencies; change the pin/input and explicitly build/load when
 needed. Mtime alone does not rebuild. There is no persistent guest layer cache or

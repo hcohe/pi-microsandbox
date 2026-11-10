@@ -11,9 +11,42 @@ import type {
   TransportExecResult,
 } from "./types.ts";
 
+export interface StreamDiagnostics {
+  failureKind: "streamEndedWithoutExit" | "transport" | "timeout" | "cancelled" | "disposed";
+  transportCode: TransportErrorCode;
+  elapsedMs: number;
+  requestedTimeoutMs?: number;
+  sdkStreamingTimeoutEnforced: false;
+  events: number;
+  stdoutBytes: number;
+  stderrBytes: number;
+  lastOutputElapsedMs?: number;
+  observedExitCode?: number;
+  aborted: boolean;
+  disposed: boolean;
+  causes: Array<{ name: string; code?: string }>;
+  cleanup: Array<{ operation: string; outcome: string; code?: TransportErrorCode }>;
+}
+
+/** Only bounded typed identities, never arbitrary SDK messages/config/environment. */
+export function causalErrorDetails(error: unknown): Array<{ name: string; code?: string }> {
+  const details: Array<{ name: string; code?: string }> = [];
+  const seen = new Set<unknown>();
+  const token = (value: unknown): string | undefined => typeof value === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(value) ? value : undefined;
+  for (let current = error; isRecord(current) && !seen.has(current) && details.length < 4;) {
+    seen.add(current);
+    try {
+      details.push({ name: token(constructorName(current)) ?? "Error", ...(token(current.code) ? { code: token(current.code) } : {}) });
+      current = current.cause;
+    } catch { break; }
+  }
+  return details;
+}
+
 /** An SDK operation failed before it could produce a transport result. */
 export class SandboxTransportError extends Error {
   readonly code: TransportErrorCode;
+  diagnostics?: StreamDiagnostics;
   override readonly cause?: unknown;
 
   constructor(message: string, code: TransportErrorCode, cause?: unknown) {
@@ -373,6 +406,22 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
     args: string[],
     options?: ExecStreamOptions,
   ): Promise<{ exitCode: number }> => {
+    const started = performance.now();
+    let events = 0, stdoutBytes = 0, stderrBytes = 0;
+    let lastOutputElapsedMs: number | undefined;
+    let observedExitCode: number | undefined;
+    let missingExit = false;
+    const cleanup: StreamDiagnostics["cleanup"] = [];
+    const diagnose = (error: unknown): SandboxTransportError => {
+      const mapped = mapSdkError(error, "execStream");
+      mapped.diagnostics = {
+        failureKind: options?.signal?.aborted ? "cancelled" : disposed ? "disposed" : mapped.code === "TIMEOUT" ? "timeout" : missingExit ? "streamEndedWithoutExit" : "transport",
+        transportCode: mapped.code, elapsedMs: Math.round(performance.now() - started), requestedTimeoutMs: options?.timeoutMs, sdkStreamingTimeoutEnforced: false,
+        events, stdoutBytes, stderrBytes, lastOutputElapsedMs, observedExitCode,
+        aborted: options?.signal?.aborted === true, disposed, causes: causalErrorDetails(mapped), cleanup,
+      };
+      return mapped;
+    };
     rejectIfDisposed();
     if (typeof raw.execStreamWith !== "function") invalidSdk("execStreamWith");
 
@@ -446,16 +495,21 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
           while (true) {
             const next = await iterator.next();
             if (next.done) break;
+            events++;
             const event = next.value as StreamEvent;
             if (event.kind === "stdout") {
-              options?.onStdout?.(eventData(event.data));
+              const data = eventData(event.data);
+              stdoutBytes += data.length; lastOutputElapsedMs = Math.round(performance.now() - started);
+              options?.onStdout?.(data);
             } else if (event.kind === "stderr") {
-              options?.onStderr?.(eventData(event.data));
+              const data = eventData(event.data);
+              stderrBytes += data.length; lastOutputElapsedMs = Math.round(performance.now() - started);
+              options?.onStderr?.(data);
             } else if (event.kind === "exited") {
               if (typeof event.code !== "number" || !Number.isInteger(event.code)) {
                 throw new SandboxTransportError("Invalid execution exit code", "INVALID");
               }
-              exitCode = event.code;
+              exitCode = event.code; observedExitCode = exitCode;
             }
           }
           if (aborted) {
@@ -465,6 +519,7 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
             throw new SandboxTransportError("Sandbox transport was disposed", "SANDBOX_DOWN");
           }
           if (exitCode === undefined) {
+            missingExit = true;
             throw new SandboxTransportError("Execution stream ended without an exit event", "INVALID");
           }
           return { exitCode };
@@ -474,10 +529,12 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
           // Close the original iterator; starting a new drain can hang forever
           // after kill or compete with the SDK's failed iterator. Neither a
           // cleanup failure nor a timeout may replace the primary stream error.
-          await kill().catch(() => undefined);
-          await boundedCleanup(async () => {
-            await iterator?.return?.();
-          }).catch(() => undefined);
+          const recordCleanup = async (operation: string, action: () => Promise<void>) => {
+            try { await action(); cleanup.push({ operation, outcome: "completed" }); }
+            catch (secondary) { cleanup.push({ operation, outcome: "failed", code: mapSdkError(secondary, operation).code }); }
+          };
+          await recordCleanup("kill", kill);
+          await recordCleanup("iteratorReturn", () => boundedCleanup(async () => { await iterator?.return?.(); }));
           if (aborted) {
             throw new SandboxTransportError("Sandbox execution aborted", "ABORTED", signal?.reason);
           }
@@ -498,8 +555,10 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
       };
       active.add(entry);
       if (aborted) void kill().catch(() => undefined);
-      entry.done = consume();
+      entry.done = consume().catch((error) => { throw diagnose(error); });
       return entry.done;
+    } catch (error) {
+      throw diagnose(error);
     } finally {
       pendingCreations.delete(creation);
       creation.resolve();
