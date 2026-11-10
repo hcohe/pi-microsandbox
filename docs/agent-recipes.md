@@ -46,14 +46,17 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 > the bundled digest pin and add only the requested package instructions, without
 > unrelated packages. Explain the change and recommended Project or Global scope in
 > your normal response, not the file. Propose the complete resulting content via
-> msb_dockerfile_set; let me review the scope and added/removed code, with
+> msb_dockerfile_write; let me review the scope and added/removed code, with
 > No / Yes below it in one approval. Don't use host
 > commands, grant blanket host access or embed secrets.
 > Explain any image/higher-scope blocker and propose image inheritance separately
-> with msb_config_set approval. After saving, distinguish whether the new image is
-> active, shadowed, deferred or failed to activate.
+> with msb_config_set approval. After writing, explicitly call msb_dockerfile_build,
+> inspect its logs and artifactId, then explicitly call msb_dockerfile_load with
+> that ID. Build runs autonomously without a dialog or UI; write and load retain
+> separate default-No approvals. Report saved/built/loaded
+> separately; never infer activation from writing or building.
 
-Git Project setter uses one default-No review: **Scope: Project**, then **No / Yes**.
+Git Project write uses one default-No review: **Scope: Project**, then **No / Yes**.
 Main, linked and nested Git cwd use the same config/Dockerfile/context record.
 The TUI stays inline with changed code above colored choices, Ctrl+N/P scrolling,
 a blank line after Scope and no dialog footer or expandable view. Enter on Yes
@@ -69,12 +72,15 @@ cwd-local; Global and per-current-cwd execution/session safety are unchanged.
 > the UTF-8 files I want to inspect. Propose a context-only PATCH with scope project
 > and context [{path:"scripts/setup.sh",content:"#!/bin/sh\necho ready\n",executable:true}].
 > Preserve every unspecified file; content:null deletes just one reviewed file.
-> Show full content/mode changes and build/public-egress/restart consequences.
+> Show full content/mode changes; writing only saves. Build can use public egress
+> autonomously; ask separately before load/restart.
 
 Getter is passive Off/blocked when canonical cwd is known. Changed proposals need
 interactive approval; each file is atomic but the bundle is not jointly/crash
-atomic. Partial/unknown persistence never activates. Context-only saves rebuild
-and replace the running VM when selected. See [host-owned Dockerfiles](images.md#host-owned-dockerfile-no-host-docker)
+atomic. Partial/unknown persistence never activates. Context-only writes never
+build or replace a VM. Explicit build produces an artifact; explicit load imports
+and applies it under the existing policy. Failed build preserves source and the
+previous image; failed load retains its artifact for retry. See [host-owned Dockerfiles](images.md#host-owned-dockerfile-no-host-docker)
 for isolated COPY contexts, cache/rebuild behavior and the build network boundary.
 
 ## Less RAM, same ambition

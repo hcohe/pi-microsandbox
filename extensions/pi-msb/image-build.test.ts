@@ -3,11 +3,12 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { buildSdk, dockerArchive, tarArchive } from "../../test/image-build-fixture.ts";
-import { hostConfigPaths, resolveConfig } from "./config.ts";
+import { DEFAULT_CONFIG, hostConfigPaths, resolveConfig } from "./config.ts";
 import { createMsbIntegration } from "./control.ts";
-import { BUILD_FAILURE, ensureDockerfileImage } from "./image-build.ts";
+import { BUILD_FAILURE, buildDockerfileImage, loadDockerfileImage, ImagePhaseError } from "./image-build.ts";
+import { artifactPath, buildRecordPath, readArtifact, selectionPath } from "./image-artifact.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
-import { buildImageReference, nativeBuildPlatform } from "./image-source.ts";
+import { buildImageReference, nativeBuildPlatform, snapshotDockerfile } from "./image-source.ts";
 
 async function fixture(t: TestContext) {
   const root = await fs.mkdtemp("/tmp/pi-msb-builder-test-");
@@ -21,7 +22,8 @@ async function fixture(t: TestContext) {
   await fs.mkdir(dirname(dockerfile), { recursive: true });
   await fs.writeFile(dockerfile, "FROM scratch\n");
   const resolved = await resolveConfig(input);
-  return { root, input, paths, dockerfile, resolved, source: resolved.imageBuild! };
+  const actual = await snapshotDockerfile(resolved.imageBuild!, (await import("./config.ts")).DEFAULT_CONFIG.image);
+  return { root, input, paths, dockerfile, resolved, source: { ...resolved.imageBuild!, identity: actual.identity, platform: actual.platform } };
 }
 const acquireLock = async () => ({ path: "test", release: async () => undefined });
 function deferred() {
@@ -32,14 +34,15 @@ function deferred() {
 const temporaryPaths = (calls: string[]) => calls.filter((call) => call.startsWith("builder-bind:")).map((call) => call.slice(call.indexOf(":", "builder-bind:".length) + 1));
 async function assertClean(calls: string[]) { for (const path of temporaryPaths(calls)) assert.equal(await fs.stat(path).then(() => true, () => false), false, path); }
 
-test("builder uses isolated pinned-image root VM, public-only policy and argv; sanitized archive is imported once and cache reused", async (t) => {
-  const f = await fixture(t);
-  const calls: string[] = [];
-  const sdk = buildSdk(calls);
-  await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
-  assert.ok(calls.includes("builder-cpus:2"));
-  assert.ok(calls.includes("builder-memory:4096"));
+test("builder exports a reusable verified artifact without import or runtime calls", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  sdk.Image!.load = async () => { assert.fail("build must not import"); };
+  sdk.Image!.get = async () => { assert.fail("build must not inspect loaded images"); };
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  assert.equal(built.cacheHit, false);
+  assert.ok(calls.includes("builder-cpus:2")); assert.ok(calls.includes("builder-memory:4096"));
   assert.ok(calls.includes("builder-rootDisk:8192"));
+  assert.equal(calls.find((call) => call.startsWith("builder-image:")), `builder-image:${DEFAULT_CONFIG.image}`);
   assert.ok(calls.findIndex((call) => call.startsWith("builder-image:")) < calls.indexOf("builder-rootDisk:8192"));
   assert.ok(calls.includes("builder-security:default"));
   assert.ok(calls.includes("builder-user:root"));
@@ -52,13 +55,11 @@ test("builder uses isolated pinned-image root VM, public-only policy and argv; s
   assert.equal(calls.some((call) => /secret|envs|allowAll/.test(call)), false);
   assert.match(calls.find((call) => call.includes('"buildx"'))!, /"--load"/);
   assert.match(calls.find((call) => call.includes('"buildx"'))!, /"-i","PATH=/);
-  assert.match(calls.find((call) => call.startsWith("image-load:"))!, /validated-image.tar/);
-  assert.ok(calls.indexOf("builder-destroy") < calls.findIndex((call) => call.startsWith("image-load:")));
-  const record = JSON.parse(await fs.readFile(join(f.source.cacheDir, `${f.source.identity}.json`), "utf8"));
-  assert.equal(record.digest, `sha256:${"a".repeat(64)}`);
-  await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
+  const cached = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  assert.equal(cached.cacheHit, true); assert.equal(cached.artifact.artifactId, built.artifact.artifactId);
   assert.equal(calls.filter((call) => call === "builder-create").length, 1);
-  assert.equal(calls.filter((call) => call.startsWith("image-load:")).length, 1);
+  assert.equal(built.logs.length, 3); assert.equal(built.logs[1]!.exitCode, 0);
+  assert.match(built.logs[1]!.stderr, /PRIVATE GUEST OUTPUT/);
   await assertClean(calls);
 });
 
@@ -67,20 +68,21 @@ test("changed content invalidates image identity; changed source after resolutio
   const calls: string[] = [];
   const sdk = buildSdk(calls);
   await fs.writeFile(f.dockerfile, "FROM scratch\nLABEL changed=true\n");
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
   assert.equal(calls.includes("builder-create"), false);
   const next = await resolveConfig(f.input);
-  assert.notEqual(next.config.image, f.resolved.config.image);
-  await ensureDockerfileImage({ sdk, source: next.imageBuild!, acquireLock });
+  const snapshot = await snapshotDockerfile(next.imageBuild!, (await import("./config.ts")).DEFAULT_CONFIG.image);
+  assert.notEqual(snapshot.identity, f.source.identity);
+  await buildDockerfileImage({ sdk, source: { ...next.imageBuild!, identity: snapshot.identity }, acquireLock });
   await assertClean(calls);
   const alias = join(f.root, "alias");
   await fs.symlink(f.input.agentDir, alias);
   const aliased = await resolveConfig({ ...f.input, agentDir: alias });
   await fs.unlink(alias); await fs.symlink(f.input.cwd, alias);
-  await assert.rejects(ensureDockerfileImage({ sdk, source: aliased.imageBuild!, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: { ...aliased.imageBuild!, identity: f.source.identity }, acquireLock }), ImagePhaseError);
   await fs.rm(next.imageBuild!.cacheDir, { recursive: true });
   await fs.symlink(f.input.cwd, next.imageBuild!.cacheDir);
-  await assert.rejects(ensureDockerfileImage({ sdk, source: next.imageBuild!, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: next.imageBuild!, acquireLock }), ImagePhaseError);
 });
 
 test("cross-process lock deduplicates concurrent content builds and validates cached digest/platform", async (t) => {
@@ -89,23 +91,23 @@ test("cross-process lock deduplicates concurrent content builds and validates ca
   const gate = deferred();
   const entered = deferred();
   const sdk = buildSdk(calls, { build: async () => { entered.resolve(); await gate.promise; } });
-  const first = ensureDockerfileImage({ sdk, source: f.source });
+  const first = buildDockerfileImage({ sdk, source: f.source });
   await entered.promise;
-  const second = ensureDockerfileImage({ sdk, source: f.source });
+  const second = buildDockerfileImage({ sdk, source: f.source });
   gate.resolve();
   await Promise.all([first, second]);
   assert.equal(calls.filter((call) => call === "builder-create").length, 1);
-  const get = sdk.Image!.get;
-  sdk.Image!.get = async (reference) => ({ ...await get(reference), architecture: "wrong" });
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source }), { message: BUILD_FAILURE });
-  assert.equal(calls.filter((call) => call === "builder-create").length, 2);
+  const record = JSON.parse(await fs.readFile(buildRecordPath(f.source), "utf8"));
+  await fs.appendFile(artifactPath(f.source, record.artifactId), "tampered");
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source }), /content mismatch/);
+  assert.equal(calls.filter((call) => call === "builder-create").length, 1);
   await assertClean(calls);
 });
 
-for (const failStep of ["create", "build", "import"]) test(`build ${failStep} failure is generic, uncached and cleans owned resources`, async (t) => {
+for (const failStep of ["create", "build"]) test(`build ${failStep} failure is diagnostic, uncached and cleans owned resources`, async (t) => {
   const f = await fixture(t);
   const calls: string[] = [];
-  await assert.rejects(ensureDockerfileImage({ sdk: buildSdk(calls, { failStep }), source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk: buildSdk(calls, { failStep }), source: f.source, acquireLock }), ImagePhaseError);
   assert.ok(calls.includes("builder-destroy"));
   if (failStep === "create") {
     assert.equal(calls.filter((call) => call.startsWith("builder-get:")).length, 1);
@@ -122,19 +124,19 @@ test("cancellation awaits late creation, kills execution streams and cleans the 
   const entered = deferred();
   const abort = new AbortController();
   const sdk = buildSdk(calls, { create: async () => { entered.resolve(); await gate.promise; } });
-  const pending = ensureDockerfileImage({ sdk, source: f.source, acquireLock, signal: abort.signal });
+  const pending = buildDockerfileImage({ sdk, source: f.source, acquireLock, signal: abort.signal });
   await entered.promise;
   abort.abort(); gate.resolve();
-  await assert.rejects(pending, { message: BUILD_FAILURE });
+  await assert.rejects(pending, ImagePhaseError);
   assert.ok(calls.includes("builder-destroy"));
   assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
   await assertClean(calls);
   const buildGate = deferred(); const buildEntered = deferred(); const activeAbort = new AbortController();
   const activeSdk = buildSdk(calls, { build: async () => { buildEntered.resolve(); await buildGate.promise; } });
-  const active = ensureDockerfileImage({ sdk: activeSdk, source: f.source, acquireLock, signal: activeAbort.signal });
+  const active = buildDockerfileImage({ sdk: activeSdk, source: f.source, acquireLock, signal: activeAbort.signal });
   await buildEntered.promise;
   activeAbort.abort(); buildGate.resolve();
-  await assert.rejects(active, { message: BUILD_FAILURE });
+  await assert.rejects(active, ImagePhaseError);
   assert.ok(calls.includes("builder-kill"));
   await assertClean(calls);
 });
@@ -178,38 +180,12 @@ test("archive preflight rejects extra image/tags, wrong platform, links, truncat
 test("malicious guest archive is never passed to Image.load and cloud backend never builds", async (t) => {
   const f = await fixture(t); const calls: string[] = [];
   const sdk = buildSdk(calls, { archive: (reference) => dockerArchive(reference, "linux/wrong") });
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
   assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
   await assertClean(calls);
   sdk.defaultBackendKind = () => "cloud";
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
   assert.equal(calls.filter((call) => call === "builder-create").length, 1);
-});
-
-test("activation builds before runtime create, uses never-pull labels, and rebuilds before destroying adopted VM", async (t) => {
-  const f = await fixture(t); const calls: string[] = [];
-  const sdk = buildSdk(calls);
-  const integration = createMsbIntegration({ sessionId: "build-lifecycle", cwd: f.input.cwd, configDirName: "pi", agentDir: f.input.agentDir, env: { HOME: f.root }, sdkLoader: async () => sdk,
-    acquireOwnerLock: async () => ({ path: "test", release: async () => undefined }), locksPort: { tryAcquire: async () => null } });
-  t.after(() => integration.manager.shutdown());
-  const config = f.resolved;
-  config.config.pruneOnStart = false; config.config.docker.mode = "disabled";
-  const initial = await integration.configureSession({ sessionId: "build-lifecycle", cwd: f.input.cwd, projectTrusted: true, config });
-  assert.equal(initial.status, "active");
-  assert.ok(calls.includes("pull-policy:never"));
-  assert.match(calls.find((call) => call.startsWith("labels:"))!, new RegExp(f.source.identity));
-  const firstRuntime = calls.findIndex((call) => call.startsWith("create:"));
-  assert.ok(calls.findIndex((call) => call.startsWith("image-load:")) < firstRuntime);
-  await fs.writeFile(f.paths.project, 'prune_on_start=false\n[docker]\nmode="disabled"\n');
-  await fs.writeFile(f.dockerfile, "FROM scratch\nLABEL changed=true\n");
-  const boundary = calls.length;
-  await integration.control.reload();
-  const changed = calls.slice(boundary);
-  const imported = changed.findIndex((call) => call.startsWith("image-load:"));
-  assert.ok(imported >= 0);
-  assert.ok(imported < changed.findIndex((call) => call.startsWith("stop:")));
-  assert.notEqual(integration.control.getEffectiveConfig().config.image, config.config.image);
-  await assertClean(calls);
 });
 
 test("build failure hard-blocks activation even when host fallback is explicitly configured", async (t) => {
@@ -228,6 +204,9 @@ test("build failure hard-blocks activation even when host fallback is explicitly
 for (const failure of ["create", "prepare"]) test(`built-image runtime ${failure} failure blocks configured host fallback`, async (t) => {
   const f = await fixture(t); const calls: string[] = [];
   const sdk = buildSdk(calls);
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  await loadDockerfileImage({ sdk, source: f.source, artifactId: built.artifact.artifactId, expectedSelectionVersion: "missing" });
+  f.resolved = await resolveConfig(f.input);
   const builder = sdk.Sandbox.builder;
   sdk.Sandbox.builder = (name: string) => {
     const value = builder(name);
@@ -255,54 +234,13 @@ for (const failure of ["create", "prepare"]) test(`built-image runtime ${failure
   await assertClean(calls);
 });
 
-test("cache digest mismatch triggers rebuild, and failed builder destruction withholds import and retains only isolated output", async (t) => {
-  const f = await fixture(t); const calls: string[] = [];
-  const sdk = buildSdk(calls);
-  await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
-  const metadata = join(f.source.cacheDir, `${f.source.identity}.json`);
-  const record = JSON.parse(await fs.readFile(metadata, "utf8"));
-  await fs.writeFile(metadata, JSON.stringify({ ...record, digest: `sha256:${"b".repeat(64)}` }));
-  await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
-  assert.equal(calls.filter((call) => call === "builder-create").length, 2);
-  await fs.unlink(metadata);
-  const failedCalls: string[] = [];
-  let released = false;
-  await assert.rejects(ensureDockerfileImage({ sdk: buildSdk(failedCalls, { failStep: "destroy" }), source: f.source,
-    acquireLock: async () => ({ path: "test", release: async () => { released = true; } }) }), { message: BUILD_FAILURE });
-  assert.ok(released);
-  assert.equal(failedCalls.some((call) => call.startsWith("image-load:")), false);
-  assert.equal(await fs.stat(metadata).then(() => true, () => false), false);
-  for (const path of temporaryPaths(failedCalls)) assert.ok((await fs.stat(path)).isDirectory());
-  // Fake SDK has no actual VM; test teardown can safely remove retained output.
-  for (const directory of new Set(temporaryPaths(failedCalls).map(dirname))) await fs.rm(directory, { recursive: true, force: true });
-});
-
-test("Off invalidates a gated build before runtime activation/persistence, and On uses a fresh controller", { timeout: 10_000 }, async (t) => {
-  const f = await fixture(t); const calls: string[] = []; const persisted: any[] = [];
-  const gate = deferred(); const entered = deferred(); let builds = 0;
-  const sdk = buildSdk(calls, { build: async () => { if (++builds === 2) { entered.resolve(); await gate.promise; } } });
-  const integration = createMsbIntegration({ sessionId: "off-build", cwd: f.input.cwd, configDirName: "pi", agentDir: f.input.agentDir, env: { HOME: f.root }, sdkLoader: async () => sdk,
-    appendEntry: (_type, data) => persisted.push(data), acquireOwnerLock: async () => ({ path: "test", release: async () => undefined }) });
-  t.after(() => integration.manager.shutdown());
-  f.resolved.config.pruneOnStart = false; f.resolved.config.docker.mode = "disabled";
-  assert.equal((await integration.configureSession({ sessionId: "off-build", cwd: f.input.cwd, projectTrusted: true, config: f.resolved })).status, "active");
-  await fs.writeFile(f.paths.project, 'prune_on_start=false\n[docker]\nmode="disabled"\n');
-  await fs.writeFile(f.dockerfile, "FROM scratch\nLABEL changed=true\n");
-  const reload = integration.control.reload();
-  await entered.promise;
-  await integration.control.setEnabled(false);
-  const boundary = calls.length; const persistenceBoundary = persisted.length;
-  assert.equal(integration.control.getState().status, "off");
-  gate.resolve();
-  await reload;
-  assert.equal(integration.control.getState().status, "off");
-  assert.equal(calls.slice(boundary).some((call) => call.startsWith("create:")), false);
-  assert.equal(persisted.slice(persistenceBoundary).some((entry) => entry.enabled === true), false);
-  assert.equal(persisted.at(-1).enabled, false);
-  await integration.control.setEnabled(true);
-  assert.equal(integration.control.getState().status, "active");
-  assert.equal(persisted.at(-1).enabled, true);
-  await assertClean(calls);
+test("failed builder destruction withholds publication and retains isolated output", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; let released = false;
+  await assert.rejects(buildDockerfileImage({ sdk: buildSdk(calls, { failStep: "destroy" }), source: f.source,
+    acquireLock: async () => ({ path: "test", release: async () => { released = true; } }) }), ImagePhaseError);
+  assert.ok(released); assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
+  for (const path of temporaryPaths(calls)) assert.ok((await fs.stat(path)).isDirectory());
+  for (const directory of new Set(temporaryPaths(calls).map(dirname))) await fs.rm(directory, { recursive: true, force: true });
 });
 
 test("delayed SDK acquisition cannot borrow a replacement activation source/controller", { timeout: 10_000 }, async (t) => {
@@ -345,7 +283,7 @@ test("builder canonicalizes both private staging binds through an aliased tempor
     assert.equal(calls.includes("builder-readonly:/pi-msb-output"), false);
     assert.equal(calls.some((call) => /follow.*symlink/i.test(call)), false);
   } });
-  await ensureDockerfileImage({ sdk, source: f.source, acquireLock });
+  await buildDockerfileImage({ sdk, source: f.source, acquireLock });
   await assertClean(calls);
 });
 
@@ -366,7 +304,7 @@ for (const retarget of [false, true]) test(`staging realpath failure cleans only
     throw new Error("PRIVATE REALPATH FAILURE");
   });
   const calls: string[] = [];
-  await assert.rejects(ensureDockerfileImage({ sdk: buildSdk(calls), source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk: buildSdk(calls), source: f.source, acquireLock }), ImagePhaseError);
   assert.equal(calls.includes("builder-create"), false);
   if (retarget) {
     assert.equal(await fs.readFile(join(owned, "foreign"), "utf8"), "untouched");
@@ -377,7 +315,7 @@ for (const retarget of [false, true]) test(`staging realpath failure cleans only
 test("failed create before persistence removes staging on authoritative local database absence", async (t) => {
   const f = await fixture(t); const calls: string[] = [];
   const sdk = buildSdk(calls, { failStep: "create", persistBeforeCreate: false });
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
   assert.equal(calls.filter((call) => call.startsWith("builder-get:")).length, 1);
   assert.equal(calls.includes("builder-destroy"), false);
   await assertClean(calls);
@@ -394,7 +332,7 @@ test("failed boot cleanup accepts persisted labels arrays without a handle lifec
     handle.config = () => ({ ...config, labels: Object.entries(config.labels) });
     return handle;
   };
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
   assert.ok(calls.includes("builder-destroy"));
   await assertClean(calls);
 });
@@ -434,7 +372,7 @@ for (const failure of ["label", "name", "config-name", "backend", "id", "inspect
     return handle;
   };
   let released = false;
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock: async () => ({ path: "test", release: async () => { released = true; } }) }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock: async () => ({ path: "test", release: async () => { released = true; } }) }), ImagePhaseError);
   assert.ok(released);
   assert.equal(calls.includes("builder-destroy"), false);
   assert.equal(calls.some((call) => /connect:|start:|image-load:/.test(call)), false);
@@ -455,10 +393,21 @@ test("failed boot cleanup never sweeps previously registered builder names", asy
   const previous = Array.from({ length: 4 }, (_, i) => `pi-msb-builder-00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
   for (const name of previous) await sdk.Sandbox.builder(name).labels({ "pi-msb.builder": "previous-owner" }).create().catch(() => undefined);
   calls.length = 0;
-  await assert.rejects(ensureDockerfileImage({ sdk, source: f.source, acquireLock }), { message: BUILD_FAILURE });
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
   const lookups = calls.filter((call) => call.startsWith("builder-get:"));
   assert.equal(lookups.length, 1);
   assert.equal(previous.some((name) => lookups[0] === `builder-get:${name}`), false);
   for (const name of previous) assert.equal((await sdk.Sandbox.get(name)).config().labels["pi-msb.builder"], "previous-owner");
   await assertClean(calls);
+});
+
+for (const expectation of [undefined, "missing"]) test(`direct load cannot bypass approval-time selection expectation (${expectation ?? "omitted"})`, async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  const replacement = '{"foreign":"selection"}';
+  await fs.writeFile(selectionPath(f.source), replacement);
+  await assert.rejects(loadDockerfileImage({ sdk, source: f.source, artifactId: built.artifact.artifactId,
+    expectedSelectionVersion: expectation as string }), /expectation required|selection changed after approval/);
+  assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
+  assert.equal(await fs.readFile(selectionPath(f.source), "utf8"), replacement);
 });

@@ -552,7 +552,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     const registered = (typeof (pi as ExtensionAPI).getAllTools === "function"
       ? pi.getAllTools()
       : []).find((candidate) => candidate.name === tool);
-    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics" || tool === "msb_dockerfile_get" || tool === "msb_dockerfile_set") && ownedConfigToolEntry
+    if ((tool === "msb_config_get" || tool === "msb_config_set" || tool === "msb_diagnostics" || tool === "msb_dockerfile_get" || tool === "msb_dockerfile_write" || tool === "msb_dockerfile_build" || tool === "msb_dockerfile_load") && ownedConfigToolEntry
       && canonicalEntry(registered?.sourceInfo?.path) === ownedConfigToolEntry) return;
     const source = registered?.sourceInfo?.source;
     if (source === "builtin") return;
@@ -602,7 +602,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
         .map(({ filePath, baseDir }) => ({ filePath, baseDir })),
     );
     const state = stateOf(deps);
-    const note = `${deps.systemPromptNote(state)}\nBefore creating Dockerfile customization, call msb_dockerfile_get with scope project/global for current content, authoritative host-owned paths and the bundled pinned base. Make the smallest Dockerfile edit needed, using minimal instructions. Do not add comments or explanatory boilerplate; put explanations and scope recommendations in the normal response, not the file. Preserve unrelated existing content and functional parser directives. New Dockerfiles start FROM the bundled digest pin. Propose the complete resulting content with msb_dockerfile_set in that scope; its explicit per-proposal approval covers saving and possible build/restart. Never use host commands or sandbox file tools for this flow, grant blanket host access, embed secrets, or silently change image intent; inspect shadowing with msb_config_get and propose image inherit separately.`;
+    const note = `${deps.systemPromptNote(state)}\nBefore creating Dockerfile customization, call msb_dockerfile_get with scope project/global for current content, authoritative host-owned paths and the bundled pinned base. Make the smallest Dockerfile edit needed, using minimal instructions. Do not add comments or explanatory boilerplate; put explanations and scope recommendations in the normal response, not the file. Preserve unrelated existing content and functional parser directives. New Dockerfiles start FROM the bundled digest pin. Propose the complete resulting content with msb_dockerfile_write in that scope; its explicit per-proposal approval covers writing only. Then explicitly call msb_dockerfile_build in that scope (autonomous build/export only, no approval dialog or UI needed), inspect its logs and artifactId, and explicitly call msb_dockerfile_load with that artifactId (separate default-No approval for import/select/guarded activation only). Failed builds preserve source and the previous image; load retries reuse the artifact. Edited sources are never implicitly built at startup/reload; stale artifacts cannot be loaded. Never use host commands or sandbox file tools for this flow, grant blanket host access, embed secrets, or silently change image intent; inspect shadowing with msb_config_get and propose image inherit separately.`;
     return { systemPrompt: note ? `${event.systemPrompt}\n\n${note}` : event.systemPrompt };
   });
 

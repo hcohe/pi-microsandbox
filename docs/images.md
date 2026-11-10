@@ -70,7 +70,7 @@ an updated mutable tag, or `"never"` to require a cached local image.
 **Call `msb_dockerfile_get` with `{"scope":"project"}` (or `"global"`) first.**
 It reads the actual scoped Dockerfile, returns authoritative host paths, and gives
 a directly usable bundled digest-pinned `FROM` starter. Propose a complete
-replacement with `msb_dockerfile_set` using the same scope and `content`, and/or
+replacement with `msb_dockerfile_write` using the same scope and `content`, and/or
 a relative `context` patch. Getter `contextPaths` requests bounded context text. Its
 No-first per-proposal review combines scope and a compact unified diff in one
 approval: **Scope: Project** or **Scope: Global**, then **No / Yes** (No default).
@@ -82,15 +82,22 @@ rows and meaningful file/mode/newline badges appear; there is no dialog footer
 or expandable details view. Exact paths, provenance and warnings remain in the
 getter and structured results. RPC displays the same scoped changed-code diff
 in one plain question.
-Escape/abort denies. Approved changes publish each file atomically (not jointly/crash atomic)
-and reload settings only after the whole approved bundle is confirmed, building/importing and restarting with the new image when
-selected. This requires no blanket host execution permission or host-shell recipe.
-No UI/denial/stale approval means no write/reload; unchanged is a no-op.
-Report saved versus active: explicit images/higher scopes may shadow the file,
-Off/autoStart can defer activation, and build failures leave saved content without
-confirmed activation. Use a separately approved `msb_config_set` image inheritance
-change if needed; never edit other scopes silently or weaken protection.
-[Tool contract](tools.md#msb_dockerfile_get--msb_dockerfile_set).
+Escape/abort denies. Approved write changes publish each file atomically (not
+jointly/crash atomic), **without build, import, image selection, reload or restart**.
+Then explicitly call `msb_dockerfile_build` with the same scope: it runs
+autonomously without an approval dialog or UI, including headless/print sessions,
+and returns a verified reusable `artifactId` plus command logs. Build may use
+PUBLIC egress; it never loads or activates the image. Inspect the result, then explicitly call
+`msb_dockerfile_load` with `{"scope":"project","artifactId":"<returned ID>"}`.
+Load has its own approval, imports that exact artifact, selects it for that source,
+and requests guarded reload under existing Off/autoStart and scope precedence.
+It never builds. Source changes make old artifacts stale for load; build the new
+source explicitly. These tools need no blanket host execution permission.
+Write and load require UI approval; build does not. Denied writes/loads never
+advance automatically, and each phase still needs a separate tool invocation.
+Write `saved` never means active.
+Explicit images/higher scopes can shadow the source; image inheritance requires
+separate `msb_config_set` approval. [Tool contract](tools.md#msb_dockerfile_get--msb_dockerfile_write).
 
 Make the smallest edit needed, with minimal Dockerfile instructions. Do not add
 comments or explanatory boilerplate; explain changes and scope in the normal
@@ -119,7 +126,7 @@ Place a Dockerfile beside your host-owned policy, outside the mounted cwd:
 The default Pi agent directory is `~/.pi/agent`; Pi's `getAgentDir()` (including
 `PI_CODING_AGENT_DIR`) is authoritative. Use the getter's exact Project path, derived from the same current authoritative
 identity as [Project configuration](configuration.md#host-owned-project-overrides),
-not a guessed cwd-to-directory mapping. Project setter uses the same shared
+not a guessed cwd-to-directory mapping. Project write uses the same shared
 main/root record as config from main, linked and nested Git cwd, with no separate
 Repository/Worktree destinations. Shared saves explicitly review registration of immutable
 `_repository` in shared `projects/<home-relative-canonical-main-root>/config.toml` when needed, preserving
@@ -164,7 +171,7 @@ components if runtime Docker is required.
 
 ### Build boundary and lifecycle
 
-On activation (startup, enable or settings reload), the extension snapshots only
+On explicit build, the extension snapshots only
 `Dockerfile` and the **contents of its dedicated `build-context/`**. That directory
 becomes the context root for `COPY`; Dockerfile is staged at its root. No implicit
 repository, TOML files, other projects, policy tree, host credentials, host Docker
@@ -191,35 +198,52 @@ not a guarantee against arbitrary exfiltration of the supplied build inputs.
 Guest `docker buildx build --load` and `docker save` produce an archive. After
 ownership-checked builder destruction, bounded streaming preflight accepts one
 exact generated image reference and the native Linux architecture, and creates a
-Docker-save-only archive without extra index/repository aliases. The host SDK's
-`Image.load` imports that **tar file**, not a directory. The real runtime starts
-from the generated local reference with **pull policy never**. SDK image digest,
-OS and architecture must validate before a successful cache record is written.
+Docker-save-only archive without extra index/repository aliases. Build ends here:
+it publishes a verified archive/receipt, never calls host `Image.load`, and never
+changes the running or selected image. Explicit load imports a private verified
+copy of that **tar file**, validates SDK digest/OS/architecture, and atomically
+publishes the loaded selection. The real runtime uses a unique per-artifact local
+reference with **pull policy never**. Import finishes before a guarded runtime
+replacement; replacement can lose guest-local state.
 
-Build cache records/locks live under `<Pi agent dir>/pi-microsandbox/build-cache/`;
-finished images live in the local Microsandbox SDK cache, separate from guest
-Docker. Inspection/config resolution creates neither cache nor builder. Cache
-keys include exact source bytes, executable bits, native platform, builder image
-pin and build implementation/options. Concurrent builds deduplicate with flock.
-Unchanged inputs reuse a digest/platform-validated finished image. **Changing
-Dockerfile/context content and reloading settings rebuilds**, and the image
-identity invalidates VM reuse. Import completes before an existing runtime is
-destroyed when possible; replacement loses guest-local state. Build failures and
-built-image runtime validation/start failures **block routed execution even with
-`fallback_mode = "host"`**; there is no automatic host build/execution fallback.
-Errors intentionally omit build output to avoid leaking context data.
+Artifacts, receipts, loaded selections and build locks live under
+`<Pi agent dir>/pi-microsandbox/build-cache/`; imported images live separately in
+the local Microsandbox SDK cache. These cache keys may be hashes; Project policy
+paths remain readable. Inspection/config resolution creates no cache or builder.
+Source cache keys include exact bytes, executable bits, native platform, builder
+image pin and build options (including the builder-only 8 GiB disk). Artifact IDs
+also bind the authoritative source path and verified archive bytes. Concurrent
+builds deduplicate with flock. Cache hits verify the retained archive/receipt and
+remain export-only; they do not inspect/import the local runtime image.
 
-Mutable `FROM` tags and external package downloads are **not** refreshed while the
-finished-image cache is reused. Prefer pinned dependencies; update the relevant
-pin or build input when needed. Mtime alone does not rebuild. There is no
-manual rebuild button or persistent guest layer cache in this MVP. Old generated
-images are subject to ordinary Microsandbox image-cache management.
+**Editing source, startup and settings reload never build or import.** Startup
+and reconcile reuse the last explicitly loaded selection, even while edited source
+is broken or deleted. Deleting source is not an unload: its validated receipt
+retains only that same scope; explicit config images still win. New build/load
+requires restored valid source. With no usable loaded selection, activation fails closed without host
+fallback. Failed builds preserve written sources and the previous selected/running
+image. Failed imports report unknown partial import when the SDK cannot confirm
+completion; failed selection/activation reports partial state. Artifacts remain
+available for explicit load retry without rebuilding. Approval/source/artifact or
+directory changes fail closed. There is no automatic rollback over host changes.
+Build logs include bounded stdout/stderr tails (explicit truncation) and actual
+command exit status; approval/storage errors have no invented process status.
+Build inputs/output are transcript-visible: never include secrets.
+
+Mutable `FROM` tags and external downloads are not refreshed on build-cache hits.
+Prefer pinned dependencies; change the pin/input and explicitly build/load when
+needed. Mtime alone does not rebuild. There is no persistent guest layer cache or
+automatic artifact eviction. Retained archives may be large; a human may remove
+unused artifacts while no build/load is in progress, retaining selected images and
+retryable archives as needed. SDK image-cache management is separate. No old cache
+record migration or compatibility lookup is performed.
 
 Export archives are limited to 16 GiB, 16,384 tar entries, and 1 MiB per metadata
 file; links, special entries and unsupported tar extensions fail closed. Reserve
-space for guest Docker storage **plus both original and sanitized host archives**
-(up to 32 GiB of host archive bytes). The cap is an accepted-archive limit, not a
-proactive disk quota. Disk exhaustion fails closed. Normal completion/failure and
+space for guest Docker storage **plus original, sanitized, publication-staging and
+retained host archive copies** (up to 64 GiB transient host archive bytes per build,
+plus other retained artifacts). Load needs another private archive copy. The cap
+is an accepted-archive limit, not a proactive disk quota. Disk exhaustion fails closed. Normal completion/failure and
 cancellation clean temporary `/tmp/pi-msb-build-*` directories and owned builders.
 Staging binds use canonical paths (including `/private/tmp` on macOS), without
 enabling symlink-following mounts. If creation fails after registering a builder,

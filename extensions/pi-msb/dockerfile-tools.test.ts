@@ -46,7 +46,7 @@ async function fixture(t: TestContext) {
       if (choices.length === 3) return destination === "cancel" ? "No" : choices.find((choice) => choice.startsWith(destination === "repository" ? "All worktrees" : "This worktree"));
       assert.deepEqual(choices, ["No", "Yes"]); return choices[1]; },
   } };
-  const run = async (set: boolean, args: unknown, signal?: AbortSignal) => (await definitions.get(set ? "msb_dockerfile_set" : "msb_dockerfile_get").execute("test", args, signal, undefined, ctx)).details;
+  const run = async (set: boolean, args: unknown, signal?: AbortSignal) => (await definitions.get(set ? "msb_dockerfile_write" : "msb_dockerfile_get").execute("test", args, signal, undefined, ctx)).details;
   return { root, cwd, agentDir, input, execution, control, definitions, ctx, run,
     configure(options: { answer?: string; duringApproval?: () => Promise<void>; failReload?: boolean; destination?: string; duringDestination?: () => Promise<void> }) {
       destination = options.destination ?? destination; duringDestination = options.duringDestination;
@@ -77,7 +77,7 @@ test("dockerfile-storage paths use current authoritative Project mapping for nes
   }
 });
 
-for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${scope}: missing/pin/content, approval-bound create/update, no-op preserves mode/mtime`, async (t) => {
+for (const scope of ["project", "global"] as const) test(`dockerfile get/write ${scope}: missing/pin/content, approval-bound create/update, no-op preserves mode/mtime`, async (t) => {
   const f = await fixture(t); const before = await tree(f.root);
   const missing = await f.run(false, { scope });
   assert.equal(missing.outcome, "inspected"); assert.equal(missing.exists, false); assert.equal(missing.content, null);
@@ -85,7 +85,7 @@ for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${s
   assert.equal(missing.minimalDockerfile, from);
   assert.deepEqual(await tree(f.root), before); assert.deepEqual(f.counts(), { approvals: 0, reloads: 0 });
   const result = await f.run(true, { scope, content: from });
-  assert.equal(result.saved, true); assert.equal(result.reloaded, true); assert.equal(result.outcome, "saved_shadowed");
+  assert.equal(result.saved, true); assert.equal(result.reloaded, false); assert.equal(result.outcome, "saved");
   assert.equal(result.review.destinationLabel, scope === "global" ? "Global" : `Project · cwd-local (${basename(f.cwd)})`);
   const path = missing.paths[scope].dockerfile;
   assert.equal(await fs.readFile(path, "utf8"), from);
@@ -100,14 +100,14 @@ for (const scope of ["project", "global"] as const) test(`dockerfile get/set ${s
   await fs.chmod(path, 0o640); const stat = await fs.stat(path);
   assert.equal((await f.run(true, { scope, content: from })).outcome, "no_op");
   assert.equal((await fs.stat(path)).mtimeMs, stat.mtimeMs); assert.equal((await fs.stat(path)).mode, stat.mode);
-  assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
+  assert.deepEqual(f.counts(), { approvals: 1, reloads: 0 });
   assert.equal((await f.run(true, { scope, content: from + "# updated\n" })).saved, true);
   assert.ok(!f.question().includes(` ${from.split("\n")[0]}`), "unchanged FROM stays in the structured review, not the dialog"); assert.ok(f.question().includes("+# updated"));
   assert.equal(await fs.readFile(path, "utf8"), from + "# updated\n");
-  assert.deepEqual(f.counts(), { approvals: 2, reloads: 2 });
+  assert.deepEqual(f.counts(), { approvals: 2, reloads: 0 });
 });
 
-for (const deny of ["No", undefined, "noUI", "cancel"] as const) test(`dockerfile setter ${deny ?? "dismissed"}: no writes/directories/reload`, async (t) => {
+for (const deny of ["No", undefined, "noUI", "cancel"] as const) test(`dockerfile writer ${deny ?? "dismissed"}: no writes/directories/reload`, async (t) => {
   const f = await fixture(t); const before = await tree(f.root); const abort = new AbortController();
   if (deny === "noUI") f.ctx.hasUI = false;
   f.configure({ answer: deny === "cancel" ? "Yes" : deny, duringApproval: async () => { if (deny === "cancel") abort.abort(); } });
@@ -116,7 +116,7 @@ for (const deny of ["No", undefined, "noUI", "cancel"] as const) test(`dockerfil
   assert.deepEqual(await tree(f.root), before); assert.equal(f.counts().reloads, 0);
 });
 
-for (const conflict of ["file", "same-content-inode", "cwd", "session", "execution", "agent-alias", "parent", "missing-parent", "config", "context"] as const) test(`dockerfile setter rejects postapproval ${conflict} conflict`, async (t) => {
+for (const conflict of ["file", "same-content-inode", "cwd", "session", "execution", "agent-alias", "parent", "missing-parent", "config", "context"] as const) test(`dockerfile writer rejects postapproval ${conflict} conflict`, async (t) => {
   const f = await fixture(t);
   await fs.mkdir(f.agentDir);
   const alias = join(f.root, "agent alias"); await fs.symlink(f.agentDir, alias);
@@ -187,13 +187,13 @@ test("dockerfile tools reject schema tampering/session mismatch without backend 
     for (const args of [null, [], {}, { scope: "session", content: from }, { scope: "project", path: "arbitrary", content: from }, { scope: "global", content: from, command: "x" }, { scope: "global", [Symbol()]: true }]) {
       assert.equal((await f.run(set, args)).outcome, "rejected");
     }
-    assert.equal(f.definitions.get(set ? "msb_dockerfile_set" : "msb_dockerfile_get").parameters.additionalProperties, false);
+    assert.equal(f.definitions.get(set ? "msb_dockerfile_write" : "msb_dockerfile_get").parameters.additionalProperties, false);
   }
   assert.equal(calls, 0);
   f.ctx.cwd = f.root;
   assert.equal((await f.run(false, { scope: "global" })).outcome, "unavailable"); assert.equal(calls, 0);
   f.ctx.cwd = f.cwd;
-  const error = await f.run(false, { scope: "global" }); assert.ok(!JSON.stringify(error).includes("PRIVATE"));
+  const error = await f.run(false, { scope: "global" }); assert.match(error.reason, /PRIVATE error/);
 });
 
 test("dockerfile getter native integration passive Off/blocked with invalid config and no SDK/approval/writes", async (t) => {
@@ -216,38 +216,17 @@ test("dockerfile getter native integration passive Off/blocked with invalid conf
   }
 });
 
-for (const failure of [false, true]) test(`dockerfile setter integration builds and reloads new image; build failure=${failure}`, async (t) => {
-  const f = await fixture(t); const calls: string[] = [];
-  const paths = await hostConfigPaths(f.input); await fs.mkdir(dirname(paths.project), { recursive: true });
-  await fs.writeFile(paths.project, 'prune_on_start=false\n[docker]\nmode="disabled"\n');
-  const path = join(dirname(paths.project), "Dockerfile"); await fs.writeFile(path, from);
-  let fail = false;
-  const sdk = buildSdk(calls, { build: async () => { if (fail) throw new Error("PRIVATE build error"); } });
-  const integration = createMsbIntegration({ ...f.input, sessionId: "dockerfile", sdkLoader: async () => sdk,
-    acquireOwnerLock: async () => ({ path: "test", release: async () => {} }), locksPort: { tryAcquire: async () => null } });
-  t.after(() => integration.manager.shutdown());
-  assert.equal((await integration.configureSession({ sessionId: "dockerfile", cwd: f.cwd, projectTrusted: true })).status, "active");
-  const previous = integration.control.getEffectiveConfig().config.image;
-  const count = calls.filter((call) => call.startsWith("create:")).length;
-  const defs: any[] = []; registerDockerfileTools({ registerTool(d: any) { defs.push(d); } } as any, integration.control, integration.provider.execution);
-  fail = failure;
-  const result = (await defs[1].execute("set", { scope: "project", content: from + "# changed\n" }, undefined, undefined, f.ctx)).details;
-  assert.equal(result.saved, true, JSON.stringify(result)); assert.equal(await fs.readFile(path, "utf8"), from + "# changed\n");
-  if (failure) {
-    assert.equal(result.outcome, "saved_but_reload_failed"); assert.equal(result.reloaded, false);
-    assert.equal(calls.filter((call) => call.startsWith("create:")).length, count);
-    assert.notEqual(integration.control.getState().status, "host-fallback"); assert.ok(!JSON.stringify(result).includes("PRIVATE"));
-  } else {
-    assert.equal(result.outcome, "applied", JSON.stringify(result)); assert.equal(result.activation.active, true);
-    assert.notEqual(integration.control.getEffectiveConfig().config.image, previous);
-    assert.equal(integration.control.getEffectiveConfig().config.pullPolicy, "never");
-    assert.equal(calls.filter((call) => call.startsWith("create:")).length, count + 1);
-    assert.equal(calls.filter((call) => call === "builder-create").length, 2);
-    assert.ok(calls.includes("pull-policy:never"));
-  }
+test("Dockerfile write succeeds for broken build source without build/load/reload calls", async (t) => {
+  const f = await fixture(t);
+  f.control.buildDockerfile = async () => { assert.fail("write must not build"); };
+  f.control.loadDockerfile = async () => { assert.fail("write must not load"); };
+  f.control.reload = async () => { assert.fail("write must not reload"); };
+  const saved = await f.run(true, { scope: "project", content: "FROM nonexistent.invalid/broken\nRUN exit 37\n" });
+  assert.equal(saved.success, true); assert.equal(saved.code, "SOURCE_WRITTEN"); assert.equal(saved.reloaded, false);
+  assert.equal(saved.nextAction, "msb_dockerfile_build");
 });
 
-for (const mode of ["off", "environment-disabled", "autoStart-false", "explicit-image", "higher-project"] as const) test(`dockerfile setter activation reports ${mode} without selecting another scope or enabling VM`, async (t) => {
+for (const mode of ["off", "environment-disabled", "autoStart-false", "explicit-image", "higher-project"] as const) test(`dockerfile writer activation reports ${mode} without selecting another scope or enabling VM`, async (t) => {
   const f = await fixture(t); const paths = await hostConfigPaths(f.input);
   await fs.mkdir(dirname(paths.project), { recursive: true });
   const config = mode === "explicit-image" ? 'auto_start=false\nimage="custom:explicit"\n' : 'auto_start=false\n';
@@ -263,13 +242,13 @@ for (const mode of ["off", "environment-disabled", "autoStart-false", "explicit-
   const scope = mode === "higher-project" ? "global" : "project";
   const result = (await defs[1].execute("set", { scope, content: from + "# saved\n" }, undefined, undefined, f.ctx)).details;
   assert.equal(result.saved, true, JSON.stringify(result));
-  assert.equal(result.outcome, ["explicit-image", "higher-project"].includes(mode) ? "saved_shadowed" : "saved_deferred", JSON.stringify(result));
+  assert.equal(result.outcome, "saved", JSON.stringify(result));
   assert.equal(result.activation.active, false); assert.equal(loads, 0);
   assert.equal(await fs.readFile(paths.project, "utf8"), config);
   assert.equal(await fs.readFile(join(dirname(paths[scope]), "Dockerfile"), "utf8"), from + "# saved\n");
 });
 
-test("dockerfile setter holds shared lease, no-op works without UI, and post-save reload guard detects changed bytes", async (t) => {
+test("dockerfile writer holds shared lease, no-op works without UI, and never invokes reload", async (t) => {
   const f = await fixture(t); const paths = await hostConfigPaths(f.input); const path = join(dirname(paths.global), "Dockerfile");
   await fs.mkdir(dirname(path), { recursive: true }); await fs.writeFile(path, from);
   f.ctx.hasUI = false;
@@ -278,10 +257,10 @@ test("dockerfile setter holds shared lease, no-op works without UI, and post-sav
   f.configure({ answer: "Yes", duringApproval: async () => {
     assert.equal(f.control.settings!.acquireInteraction(), undefined);
   } });
-  f.control.reload = async (options) => { await fs.writeFile(path, "# externally replaced after save\n"); await options!.guard!(); };
+  f.control.reload = async () => { assert.fail("write must not reload"); };
   const result = await f.run(true, { scope: "global", content: from + "# approved\n" });
-  assert.equal(result.saved, true); assert.equal(result.reloaded, false); assert.equal(result.outcome, "saved_but_reload_failed");
-  assert.ok(f.control.settings!.acquireInteraction(), "lease released after failed reload");
+  assert.equal(result.saved, true); assert.equal(result.reloaded, false); assert.equal(result.outcome, "saved");
+  assert.ok(f.control.settings!.acquireInteraction(), "lease released after write");
 });
 
 test("dockerfile-storage rejects writable policy descendants and canonical aliases", async (t) => {
@@ -298,61 +277,6 @@ function deferred() {
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 }
-
-for (const change of ["cancel-build", "cancel-import", "cancel-create", "source-during-build", "off-during-build"] as const) test(`dockerfile setter cannot activate stale approval: ${change}`, { timeout: 15_000 }, async (t) => {
-  const f = await fixture(t); const calls: string[] = [], persisted: any[] = [];
-  const paths = await hostConfigPaths(f.input); await fs.mkdir(dirname(paths.project), { recursive: true });
-  await fs.writeFile(paths.project, 'prune_on_start=false\nfallback_mode="host"\n[docker]\nmode="disabled"\n');
-  const path = join(dirname(paths.project), "Dockerfile"); await fs.writeFile(path, from);
-  const entered = deferred(), release = deferred(); let armed = false;
-  t.after(() => release.resolve());
-  const gate = async () => { if (armed) { entered.resolve(); await release.promise; } };
-  const sdk = buildSdk(calls, {
-    build: change === "cancel-import" || change === "cancel-create" ? undefined : gate,
-    import: change === "cancel-import" ? gate : undefined,
-  });
-  if (change === "cancel-create") {
-    const builder = sdk.Sandbox.builder;
-    sdk.Sandbox.builder = (name: string) => {
-      const value = builder(name);
-      if (!name.startsWith("pi-msb-builder-")) {
-        const create = value.create;
-        value.create = async () => { await gate(); return create(); };
-      }
-      return value;
-    };
-  }
-  const integration = createMsbIntegration({ ...f.input, sessionId: "dockerfile", sdkLoader: async () => sdk,
-    appendEntry: (_type, data) => persisted.push(data), acquireOwnerLock: async () => ({ path: "test", release: async () => {} }), locksPort: { tryAcquire: async () => null } });
-  t.after(() => integration.manager.shutdown());
-  assert.equal((await integration.configureSession({ sessionId: "dockerfile", cwd: f.cwd, projectTrusted: true })).status, "active");
-  const initialImage = integration.control.getAgentRuntimePolicy!()!.settings.image;
-  const boundary = calls.length, persistenceBoundary = persisted.length;
-  const defs: any[] = []; registerDockerfileTools({ registerTool(d: any) { defs.push(d); } } as any, integration.control, integration.provider.execution);
-  const abort = new AbortController(); armed = true;
-  const approved = from + "# gated approved change\n";
-  const pending = defs[1].execute("set", { scope: "project", content: approved }, abort.signal, undefined, f.ctx);
-  await entered.promise;
-  assert.equal(await fs.readFile(path, "utf8"), approved);
-  if (change === "source-during-build") await fs.writeFile(path, "# unapproved replacement during build\n");
-  else if (change === "off-during-build") await integration.control.setEnabled(false);
-  else abort.abort();
-  release.resolve();
-  const result = (await pending).details;
-  assert.equal(result.saved, true, JSON.stringify(result)); assert.equal(result.reloaded, false);
-  assert.equal(result.outcome, change === "off-during-build" ? "saved_deferred" : "saved_but_reload_failed", JSON.stringify(result));
-  assert.equal(persisted.slice(persistenceBoundary).some((state) => state.enabled === true), false);
-  assert.notEqual(integration.control.getState().status, "host-fallback");
-  assert.equal(calls.slice(boundary).filter((call) => call.startsWith("create:")).length, change === "cancel-create" ? 1 : 0,
-    "only an already-started uncancelable SDK create may complete, never activation");
-  if (change !== "source-during-build") assert.equal(await fs.readFile(path, "utf8"), approved);
-  if (["cancel-build", "cancel-import", "source-during-build"].includes(change)) {
-    assert.equal(integration.control.getState().status, "active", "old adopted VM is retained before runtime handoff");
-    assert.equal(integration.control.getAgentRuntimePolicy!()!.settings.image, initialImage);
-  }
-  if (change === "off-during-build") assert.equal(integration.control.getState().status, "off", "late request cannot overwrite newer Off");
-  if (change === "cancel-create") assert.equal(integration.control.getState().status, "unavailable", "late handle is never published active");
-});
 
 for (const replacement of ["different-content", "same-content-new-inode", "deleted", "changed-mode", "hardlinked"] as const) test(`dockerfile save does not adopt post-rename ${replacement} baseline`, async (t) => {
   const f = await fixture(t); const paths = await hostConfigPaths(f.input); const path = join(dirname(paths.project), "Dockerfile");
@@ -386,45 +310,12 @@ for (const replacement of ["different-content", "same-content-new-inode", "delet
   }
 });
 
-test("dockerfile setter rechecks cancellation after an adapter reload returns", async (t) => {
+test("dockerfile writer never invokes an adapter reload that would cancel the request", async (t) => {
   const f = await fixture(t); const abort = new AbortController();
   f.control.reload = async () => { abort.abort(); };
   const result = await f.run(true, { scope: "global", content: from }, abort.signal);
-  assert.equal(result.saved, true); assert.equal(result.reloaded, false); assert.equal(result.outcome, "saved_but_reload_failed");
+  assert.equal(result.saved, true); assert.equal(result.reloaded, false); assert.equal(result.outcome, "saved");
 });
-
-test("cancelled activation of a shadowed Dockerfile cannot fall back to host without a local build source", { timeout: 15_000 }, async (t) => {
-  const f = await fixture(t); const calls: string[] = [], persisted: any[] = [];
-  const paths = await hostConfigPaths(f.input); await fs.mkdir(dirname(paths.project), { recursive: true });
-  const intent = 'image="custom:explicit"\nfallback_mode="host"\nprune_on_start=false\n[docker]\nmode="disabled"\n';
-  await fs.writeFile(paths.project, 'auto_start=false\n' + intent);
-  const entered = deferred(), release = deferred(); t.after(() => release.resolve());
-  const sdk = buildSdk(calls); const builder = sdk.Sandbox.builder;
-  sdk.Sandbox.builder = (name: string) => {
-    const value = builder(name); const create = value.create;
-    value.create = async () => { entered.resolve(); await release.promise; return create(); };
-    return value;
-  };
-  const integration = createMsbIntegration({ ...f.input, sessionId: "dockerfile", sdkLoader: async () => sdk,
-    appendEntry: (_type, data) => persisted.push(data), acquireOwnerLock: async () => ({ path: "test", release: async () => {} }) });
-  t.after(() => integration.manager.shutdown());
-  await integration.configureSession({ sessionId: "dockerfile", cwd: f.cwd, projectTrusted: true });
-  // Human-edited startup intent exists before inspection/review; the setter does not edit it.
-  await fs.writeFile(paths.project, 'auto_start=true\n' + intent);
-  const defs: any[] = []; registerDockerfileTools({ registerTool(d: any) { defs.push(d); } } as any, integration.control, integration.provider.execution);
-  const abort = new AbortController();
-  const pending = defs[1].execute("set", { scope: "global", content: from }, abort.signal, undefined, f.ctx);
-  await entered.promise;
-  abort.abort(); release.resolve();
-  const result = (await pending).details;
-  assert.equal(result.saved, true); assert.equal(result.outcome, "saved_but_reload_failed"); assert.equal(result.reloaded, false);
-  assert.equal(integration.control.getEffectiveConfig().imageBuild, undefined);
-  assert.equal(integration.control.getState().status, "unavailable");
-  assert.equal(persisted.some((state) => state.enabled === true), false);
-  assert.equal(calls.includes("builder-create"), false);
-  assert.equal(await fs.readFile(paths.project, "utf8"), 'auto_start=true\n' + intent);
-});
-
 
 test("Dockerfile Project rejects retired destinations", async (t) => {
   const f = await fixture(t); execFileSync("git", ["init", "-q", f.cwd]);
@@ -467,7 +358,7 @@ test("Dockerfile Project linked/main/nested writes share config and context, inc
   const f = await fixture(t); const main = await realLinkedCheckout(f);
   const targets = await hostConfigTargets(f.input);
   const saved = await f.run(true, { scope: "project", content: from, context: [{ path: "nested/bootstrap.sh", content: "#!/bin/sh\necho ready\n", executable: true }] });
-  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(saved.reloaded, true);
+  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(saved.reloaded, false);
   const target = targets.paths.project;
   assert.equal(saved.review.target.config, target);
   assert.equal((await fs.stat(join(dirname(target), "build-context", "nested", "bootstrap.sh"))).mode & 0o777, 0o700);
@@ -619,30 +510,6 @@ for (const scenario of ["denied", "no-ui", "stale-unrequested", "cancel-save", "
   assert.ok(!(await fs.readdir(dirname(root))).some((name) => name.startsWith(".dockerfile-")), "only owned stage files cleaned");
 });
 
-for (const cancellation of [false, true]) test(`Dockerfile context-only fake SDK new image activation/never-pull; cancelled during build=${cancellation}`, { timeout: 15_000 }, async (t) => {
-  const f = await fixture(t); const paths = await hostConfigPaths(f.input); const root = join(dirname(paths.project), "build-context");
-  await fs.mkdir(root, { recursive: true }); await fs.writeFile(paths.project, 'prune_on_start=false\n[docker]\nmode="disabled"\n');
-  await fs.writeFile(join(dirname(paths.project), "Dockerfile"), from + "COPY . /build-inputs/\n"); await fs.writeFile(join(root, "script"), "before");
-  const calls: string[] = []; const entered = deferred(), release = deferred(); let armed = false;
-  t.after(() => release.resolve());
-  const sdk = buildSdk(calls, { build: async () => { if (armed && cancellation) { entered.resolve(); await release.promise; } } });
-  const integration = createMsbIntegration({ ...f.input, sessionId: "dockerfile", sdkLoader: async () => sdk,
-    acquireOwnerLock: async () => ({ path: "test", release: async () => {} }), locksPort: { tryAcquire: async () => null } });
-  t.after(() => integration.manager.shutdown());
-  assert.equal((await integration.configureSession({ sessionId: "dockerfile", cwd: f.cwd, projectTrusted: true })).status, "active");
-  const before = integration.control.getAgentRuntimePolicy!()!.settings.image;
-  const count = calls.filter((call) => call.startsWith("create:")).length;
-  const defs: any[] = []; registerDockerfileTools({ registerTool(d: any) { defs.push(d); } } as any, integration.control, integration.provider.execution);
-  const abort = new AbortController(); armed = true;
-  const pending = defs[1].execute("context", { scope: "project", context: [{ path: "script", content: "after", executable: true }] }, abort.signal, undefined, f.ctx);
-  if (cancellation) { await entered.promise; abort.abort(); release.resolve(); }
-  const saved = (await pending).details;
-  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(await fs.readFile(join(root, "script"), "utf8"), "after");
-  assert.equal(calls.filter((call) => call.startsWith("create:")).length, count + (cancellation ? 0 : 1));
-  assert.equal(saved.outcome, cancellation ? "saved_but_reload_failed" : "applied", JSON.stringify(saved));
-  if (cancellation) assert.equal(integration.control.getAgentRuntimePolicy!()!.settings.image, before);
-  else { assert.notEqual(integration.control.getAgentRuntimePolicy!()!.settings.image, before); assert.equal(integration.control.getEffectiveConfig().config.pullPolicy, "never"); assert.ok(calls.includes("pull-policy:never")); }
-});
 
 test("Dockerfile getter bounded report explicitly marks incomplete inventory; never silently truncates requested contents", async (t) => {
   const f = await fixture(t); const paths = await hostConfigPaths(f.input); const root = join(dirname(paths.global), "build-context");
@@ -772,7 +639,7 @@ test("Dockerfile shared Project review prepares only the shared baseline uses it
   } });
   const content = from + "RUN echo changed\r\n";
   const saved = await f.run(true, { scope: "project", content, context: [{ path: "setup.sh", content: "echo changed", executable: true }] });
-  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
+  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.deepEqual(f.counts(), { approvals: 1, reloads: 0 });
   assert.match(saved.review.destinationLabel, /^Apply shared Project \(.+\)$/);
   assert.equal(saved.review.target.config, targets.paths.project);
   assert.ok(saved.review.registration.metadata);
@@ -797,9 +664,9 @@ test("Dockerfile combined Project headless and competing lease remain write-free
   } finally { lease.release(); }
 });
 
-test("Dockerfile setter result text is compact while getter retains source and minimal comment-free guidance", async (t) => {
+test("Dockerfile writer result text is compact while getter retains source and minimal comment-free guidance", async (t) => {
   const f = await fixture(t);
-  const output = await f.definitions.get("msb_dockerfile_set").execute("test", { scope: "global", content: from }, undefined, undefined, f.ctx);
+  const output = await f.definitions.get("msb_dockerfile_write").execute("test", { scope: "global", content: from }, undefined, undefined, f.ctx);
   assert.equal(output.details.saved, true);
   assert.ok(output.content[0].text.length < 300);
   for (const field of ["review", "warnings", "metadata", "dockerfileMode"]) assert.ok(!output.content[0].text.includes(`"${field}"`));
@@ -809,27 +676,20 @@ test("Dockerfile setter result text is compact while getter retains source and m
   assert.match(read.details.editing, /smallest Dockerfile edit/); assert.match(read.details.editing, /Do not add comments/);
   assert.match(read.details.editing, /normal response/); assert.match(read.details.editing, /parser directives/);
   assert.ok(!read.details.lifecycle.includes("change a Dockerfile comment"));
-  assert.match(f.definitions.get("msb_dockerfile_set").description, /smallest Dockerfile edit/);
-  assert.match(f.definitions.get("msb_dockerfile_set").parameters.properties.content.description, /Do not add comments/);
+  assert.match(f.definitions.get("msb_dockerfile_write").description, /smallest Dockerfile edit/);
+  assert.match(f.definitions.get("msb_dockerfile_write").parameters.properties.content.description, /Do not add comments/);
 });
 
-test("Dockerfile combined Project approval retains shared lease through reload and accepts only the reviewed generation", async (t) => {
+test("Dockerfile write retains shared lease through review and releases without reload", async (t) => {
   const f = await fixture(t); await realLinkedCheckout(f);
-  const paths = await hostConfigPaths(f.input);
-  f.configure({ answer: "Yes", destination: "repository" });
-  const reload = f.control.reload;
-  let blocked = false;
-  f.control.reload = async (options) => {
-    assert.equal(f.control.settings!.acquireInteraction(), undefined, "lease must remain held after saving and through reload");
+  f.configure({ answer: "Yes", duringApproval: async () => {
+    assert.equal(f.control.settings!.acquireInteraction(), undefined);
     const competing = await f.run(true, { scope: "global", content: from });
-    assert.equal(competing.saved, false); assert.equal(competing.outcome, "rejected"); blocked = true;
-    return reload(options);
-  };
-  const content = "#syntax=docker/dockerfile:1\n" + from + "# existing functional/local comments are not backend-banned\nRUN echo ready\n";
-  const saved = await f.run(true, { scope: "project", content });
-  assert.equal(saved.saved, true, JSON.stringify(saved)); assert.equal(blocked, true);
-  assert.equal(await fs.readFile(join(dirname(paths.project), "Dockerfile"), "utf8"), content);
-  assert.deepEqual(f.counts(), { approvals: 1, reloads: 1 });
+    assert.equal(competing.saved, false);
+  } });
+  f.control.reload = async () => { assert.fail("write must not reload"); };
+  const saved = await f.run(true, { scope: "project", content: from });
+  assert.equal(saved.saved, true); assert.deepEqual(f.counts(), { approvals: 1, reloads: 0 });
   const released = f.control.settings!.acquireInteraction(); assert.ok(released); released.release();
 });
 
@@ -846,4 +706,21 @@ test("Dockerfile context-only nonGit save never catalogs source config.toml or i
   const inspected = await f.run(false, { scope: "project", contextPaths: ["config.toml"] });
   assert.equal(inspected.contextFiles[0].content, source);
   await resolveConfig(f.input);
+});
+
+for (const failure of ["approval", "storage"] as const) test(`Dockerfile write ${failure} failure returns structured diagnostics without a process status`, async (t) => {
+  const f = await fixture(t);
+  if (failure === "approval") f.ctx.ui.select = async () => { throw new Error("specific approval channel failure"); };
+  else {
+    const open = fs.open.bind(fs);
+    t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).includes(".dockerfile-")) throw new Error("specific source storage failure");
+      return open(...args);
+    });
+  }
+  const result = await f.run(true, { scope: "project", content: from });
+  assert.equal(result.success, false); assert.equal(result.code, failure === "approval" ? "APPROVAL_FAILED" : "STORAGE_FAILED");
+  assert.equal(result.phase, failure); assert.deepEqual(result.logs, []);
+  assert.ok(!("exitCode" in result)); assert.match(result.reason, /specific .* failure/);
+  assert.equal(result.nextAction, "msb_dockerfile_get"); assert.equal(f.counts().reloads, 0);
 });

@@ -137,7 +137,7 @@ A first shared source save explicitly registers the same immutable `_repository`
 metadata in shared config; it preserves user/unknown keys and image intent (TOML
 formatting/comments may change only when adding metadata). Existing valid config
 metadata is never rewritten. This covers current/future registered worktrees,
-including after gitfile deletion. Getter and setter expose only Project or Global,
+including after gitfile deletion. Getter and write expose only Project or Global,
 with no Repository/Worktree destination argument. Non-Git/unsupported layouts stay
 local. Neither config nor source saves copy existing Dockerfiles/contexts. Source tools support bounded relative UTF-8 context PATCH
 (create/update/delete/executable), preserving unspecified and binary files.
@@ -148,12 +148,20 @@ Do not save a generated image reference as policy unless you intend to disable
 discovery. Unrelated edits preserve source discovery.
 
 Builds run inside an isolated disposable rootful VM using the bundled digest pin
-and guest Docker/Buildx, then import a validated single-image tar via the host SDK.
+and guest Docker/Buildx, exporting a validated single-image tar. Explicit load
+imports that artifact via the host SDK.
 No host Docker or CLI is needed. Build networking is public-download access plus
 DNS, independently of runtime restrictions; no runtime secrets/env/mounts are
-inherited. Source/content changes rebuild on the next settings reload/activation;
-unchanged sources use a validated local cache. Build and built-image runtime
-failures always block, even with host fallback configured. Inspection never builds
+inherited. `msb_dockerfile_write` persists sources only; explicit
+`msb_dockerfile_build` autonomously exports a reusable verified artifact without an
+approval dialog or UI (including headless/print). Write and load retain separate
+default-No approval; explicit `msb_dockerfile_load` imports/selects the chosen
+artifact and requests guarded reload. Source edits
+never rebuild on startup/reload: the last explicitly loaded image is reused, or
+activation fails closed if none is usable. Failed build leaves sources and the
+previous image intact; failed load retains the artifact for retry. Unchanged
+sources reuse a verified export cache only through explicit build. Built-image
+runtime failures block even with host fallback configured. Inspection never builds
 or creates cache directories. Input bounds, trust rules, disk requirements,
 refresh behavior and the opt-in roundtrip are documented in
 [Host-owned Dockerfile](images.md#host-owned-dockerfile-no-host-docker).

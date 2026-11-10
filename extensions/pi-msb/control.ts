@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { openDockerfile } from "./dockerfile-storage.ts";
-import { BUILD_FAILURE, ensureDockerfileImage } from "./image-build.ts";
+import { BUILD_FAILURE, buildDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
@@ -613,7 +613,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           if (request.config.image !== resolved.config.image || request.config.pullPolicy !== "never") throw new Error(BUILD_FAILURE);
           const msb = await sdk();
           if (!current()) return visibleState();
-          await ensureDockerfileImage({ sdk: msb, source, signal });
+          await verifyDockerfileImage({ sdk: msb, source, signal });
         } catch {
           await assertApproval();
           if (!current()) return visibleState();
@@ -621,7 +621,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           return { status: "unavailable", info: null, reason: BUILD_FAILURE } as RuntimeState;
         }
       }
-      // Build/import awaits do not retain approval; revalidate before runtime handoff.
+      // Image verification awaits do not retain approval; revalidate before runtime handoff.
       await assertApproval();
       if (!current()) return visibleState();
       // Keep recovery's reviewed runtime status stable until approval is revalidated.
@@ -858,6 +858,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return openDockerfile(settingsInput(), selected.hostRoot, scope, check,
         [...configSnapshot().mounts, ...(currentAdoption()?.mounts ?? [])]);
     },
+    async buildDockerfile(options) { return buildDockerfileImage({ ...options, sdk: await sdk() }); },
+    async loadDockerfile(options) { return loadDockerfileImage({ ...options, sdk: await sdk() }); },
     async getDiagnostics() {
       const state = visibleState();
       const statuses = ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"];

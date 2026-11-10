@@ -1,3 +1,4 @@
+import { registerDockerfilePhaseTools } from "./dockerfile-phase-tools.ts";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -15,7 +16,7 @@ const starter = () => `FROM ${DEFAULT_CONFIG.image}\n`;
 const minimalEditGuidance = "Make the smallest Dockerfile edit needed, using minimal instructions. Do not add comments or explanatory boilerplate; put explanations and scope recommendations in the normal response, not the file. Preserve unrelated existing content and functional parser directives. New Dockerfiles start FROM the bundled digest pin.";
 const warnings = [
   "Dockerfile, requested context text and full diff are returned to the model and may appear in the transcript. NEVER embed credentials or secrets.",
-  "Approval authorizes saving this exact scope/path/content AND settings reload, build execution and possible VM start/restart. Restart can lose guest-local state.",
+  "Approval authorizes only saving this exact scope/path/content. Build is a separate autonomous export-only tool; load requires separate default-No approval. No reload, image selection or VM restart occurs here.",
   "Dockerfile build instructions (including scripts they run) execute in the disposable builder VM. Copied inputs may also run inside the resulting sandbox VM, never as host commands. Builds can download over PUBLIC egress independently of runtime network deny; no host credentials, runtime secrets or mounts are supplied. Public egress can exfiltrate build inputs.",
   "Project shares the main/root record from main, linked and nested Git cwd; non-Git/unsupported layouts stay cwd-local. Shared registration adds only immutable host-owned repository metadata, never image/user intent. No existing Dockerfile/context is copied. Project overrides Global; explicit image at a scope wins over that scope's Dockerfile. Session image can shadow it. Only reviewed repository registration can edit config metadata; this tool never changes image intent. Inspect msb_config_get; propose image inherit via msb_config_set separately with its own approval if needed.",
 ];
@@ -25,20 +26,22 @@ const guidance = () => ({
   selection: "No activation is inferred from file existence. Use msb_config_get for effective image intent/source; generated local image references must not be persisted. Saving a shadowed Dockerfile does not select it.",
   context: "Only the selected scope's optional build-context/ contents are COPY root, never the policy tree or repository. Use context PATCH entries {path,content,executable?} for bounded relative UTF-8 text edits; null deletes one file, unspecified files (including binary) are preserved. .dockerignore and nested executable scripts are supported. Use exact inventory spelling: case-folded/canonically Unicode-normalized aliases of files or ancestor directories (including between proposals) are rejected even on case-sensitive hosts; root Dockerfile aliases are reserved. Getter contextPaths explicitly requests text; inventory never reads unrequested file contents. No arbitrary host paths, mounts, secrets or user config intent changes. build-context/Dockerfile, symlinks, hardlinks and special files are rejected by the builder. The selected agent root symlink is supported; descendants cannot be symlinks.",
   limits: { dockerfileUtf8Bytes: DOCKERFILE_MAX_BYTES, build: BUILD_LIMITS, context: CONTEXT_LIMITS, text: "Valid UTF-8 without control/format characters except tab, CR and LF. Oversized/binary files are not returned or overwritten; no silent truncation." },
-  lifecycle: "Getter is passive: no writes, approval, SDK, commands, build, VM start or reload. Setter requires per-proposal No-first UI approval, stages outside COPY root, atomically replaces each changed file (NOT jointly/crash atomic), then requests guarded settings reload respecting Off/autoStart. Build/import failures do not undo a saved file and never grant host fallback. Partial/unknown multi-artifact persistence never reloads; external replacements are retained. Unchanged bundle is a no-op; unchanged build inputs reuse the validated local never-pull cache. Mtime alone does not rebuild.",
+  lifecycle: "Getter is passive: no writes, approval, SDK, commands, build, VM start or reload. Write requires per-proposal No-first UI approval and only persists approved sources, individually atomic (NOT jointly/crash atomic). Explicit build autonomously exports a reusable verified artifact without UI approval; explicit load requires default-No approval and imports/selects it and requests guarded reload respecting Off/autoStart. Failed build preserves written source and prior image; failed load retains the artifact. Runtime never builds/imports edited source. Stale source rejects load. No host fallback. Unchanged write is a no-op.",
   imageContract: "Use the bundled published digest pin above, NOT effective config.image. Keep required guest commands in the final image; Docker is optional unless docker.mode=require.",
 });
 // Escape untrusted display strings, including terminal/bidi controls in host-selected paths.
 const display = (value: unknown) => JSON.stringify(value).replace(/[\x7f-\x9f\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => char.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
 function result(details: Record<string, unknown>) {
+  const success = ["inspected", "saved", "no_op"].includes(String(details.outcome));
+  details = { success, logs: [], recovery: success ? "none" : "Inspect with msb_dockerfile_get and request fresh write approval; host repair is required for unsafe/unreviewable originals. No build/load was attempted.", code: success ? details.readOnly ? "SOURCE_INSPECTED" : details.outcome === "no_op" ? "WRITE_UNCHANGED" : "SOURCE_WRITTEN" : details.outcome === "cancelled" ? "APPROVAL_CANCELLED" : details.outcome === "conflict" ? "SOURCE_CONFLICT" : "WRITE_REJECTED", phase: details.readOnly ? "inspection" : "write", nextAction: success ? details.readOnly ? "msb_dockerfile_write" : "msb_dockerfile_build" : "msb_dockerfile_get", ...details };
   const review = details.review as Record<string, unknown> | undefined;
   const text = details.readOnly ? display(details) : [
     `Dockerfile: ${String(details.outcome)} · ${details.saved === true ? "SAVED" : details.saved === "unknown" ? "SAVE UNCONFIRMED" : "not saved"} · ${details.reloaded ? "settings reloaded (activation separate)" : "not reloaded"}.`,
     review?.destinationLabel ? `Destination: ${String(review.destinationLabel)}.` : undefined,
-    details.reason, details.activation ? `Activation: ${String((details.activation as Record<string, unknown>).status)}.` : undefined,
+    details.reason, `Next: ${String(details.nextAction)}.`, details.activation ? `Activation: ${String((details.activation as Record<string, unknown>).status)}.` : undefined,
     details.persistedArtifacts ? `Confirmed publications: ${display(details.persistedArtifacts)}; uncertain: ${display(details.uncertainArtifact ?? null)}.` : undefined,
   ].filter(Boolean).join("\n");
-  if (Buffer.byteLength(text) > 256 * 1024) return { content: [{ type: "text" as const, text: "Dockerfile/context report exceeds 256 KiB; inventory and requested contents are not returned or silently truncated. No activation inferred." }], details: { outcome: details.readOnly ? "unavailable" : details.outcome, saved: details.saved, reloaded: details.reloaded, inventoryComplete: false, persistedArtifacts: details.persistedArtifacts, uncertainArtifact: details.uncertainArtifact, target: details.target ?? (details.review as Record<string, unknown> | undefined)?.target, reason: "Complete report exceeds bounded output limit; inventory/contents omitted, not truncated. Use a human host editor for this large source inventory." } };
+  if (Buffer.byteLength(text) > 256 * 1024) return { content: [{ type: "text" as const, text: "Dockerfile/context report exceeds 256 KiB; inventory and requested contents are not returned or silently truncated. No activation inferred." }], details: { success: false, code: "REPORT_TOO_LARGE", logs: [], recovery: "Inspect a bounded source inventory; no next phase authorized.", phase: details.phase, nextAction: "msb_dockerfile_get", outcome: details.readOnly ? "unavailable" : details.outcome, saved: details.saved, reloaded: details.reloaded, inventoryComplete: false, persistedArtifacts: details.persistedArtifacts, uncertainArtifact: details.uncertainArtifact, target: details.target ?? (details.review as Record<string, unknown> | undefined)?.target, reason: "Complete report exceeds bounded output limit; inventory/contents omitted, not truncated. Use a human host editor for this large source inventory." } };
   return { content: [{ type: "text" as const, text }], details };
 }
 function request(params: unknown, set: boolean): { scope: DockerfileScope; content?: string; context?: ContextEdit[]; contextPaths?: string[] } {
@@ -76,10 +79,10 @@ const session = (ctx: ExtensionContext) => JSON.stringify([ctx.sessionManager.ge
 
 export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, execution?: SessionExecutionContext): void {
   for (const set of [false, true]) pi.registerTool({
-    name: set ? "msb_dockerfile_set" : "msb_dockerfile_get",
+    name: set ? "msb_dockerfile_write" : "msb_dockerfile_get",
     label: set ? "Propose Microsandbox Dockerfile" : "Read Microsandbox Dockerfile",
     description: set
-      ? "Propose Dockerfile replacement and/or relative UTF-8 build-context PATCH in Project or Global. Project is shared by main, linked and nested Git cwd with ONE default-No approval; no copying between scopes. Fixed host-owned source roots only; no host execution permission needed. Explicit per-proposal No-first user review shows complete added/removed code above No/Yes choices. Approval authorizes save and possible build/restart. Before save, no UI/denial/cancellation/stale source means no write or reload. Cancellation after save preserves bytes but blocks activation. Unchanged is a no-op. Saves never edit image/config intent: inspect get/config_get for shadowing; inherit image separately. Never embed secrets: content/diff may enter transcript. Report SAVED separately from activation. " + minimalEditGuidance
+      ? "Propose Dockerfile replacement and/or relative UTF-8 build-context PATCH in Project or Global. Project is shared by main, linked and nested Git cwd with ONE default-No approval; no copying between scopes. Fixed host-owned source roots only; no host execution permission needed. Explicit per-proposal No-first user review shows complete added/removed code above No/Yes choices. Approval authorizes source persistence only; never builds/imports/loads/restarts/selects an image. Before save, no UI/denial/cancellation/stale source means no write or reload. Cancellation after save preserves bytes but blocks activation. Unchanged is a no-op. Saves never edit image/config intent: inspect get/config_get for shadowing; inherit image separately. Never embed secrets: content/diff may enter transcript. After saving call msb_dockerfile_build, then msb_dockerfile_load with its artifactId. " + minimalEditGuidance
       : "Read shared Project target or Global host-owned Dockerfile and bounded build-context inventory/requested text plus exact config/context paths, bundled digest-pinned FROM starter, precedence, limits and build guidance. Passive even Off/blocked with canonical workspace known: no writes, SDK, commands, approval, build or reload. UTF-8 content up to 32 KiB, never truncated; unsafe/oversized sources return bounded metadata/reason. Content is intentionally returned to the model: no embedded credentials/secrets. " + minimalEditGuidance,
     parameters: Type.Object({ scope: scopeSchema, ...(set ? {
       content: Type.Optional(Type.String({ maxLength: DOCKERFILE_MAX_BYTES, description: "Optional complete Dockerfile replacement; at most 32768 UTF-8 bytes. Omit for context-only edits. " + minimalEditGuidance })),
@@ -96,10 +99,10 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
     async execute(_id, params, signal, _onUpdate, ctx) {
       let input;
       try { input = request(params, set); }
-      catch { return result({ outcome: "rejected", saved: false, reloaded: false, reason: "Supply scope project/global. Set accepts optional content and/or context PATCH (1–16 relative UTF-8 files, 32KiB/file, 64KiB total); get accepts optional contextPaths. No arbitrary host paths, duplicate/overlapping paths, controls or binary content." }); }
+      catch { return result({ phase: "input", code: "INVALID_INPUT", outcome: "rejected", saved: false, reloaded: false, reason: "Supply scope project/global. Write accepts optional content and/or context PATCH (1–16 relative UTF-8 files, 32KiB/file, 64KiB total); get accepts optional contextPaths. No arbitrary host paths, duplicate/overlapping paths, controls or binary content." }); }
       let release: (() => void) | undefined;
       let saved = false;
-      let phase: "open" | "review" | "save" | "reload" = "open";
+      let phase: "open" | "review" | "save" = "open";
       let review: Record<string, unknown> | undefined;
       try {
         const caller = ctx ? session(ctx) : undefined;
@@ -111,7 +114,7 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
         check();
         if (set) {
           const lease = control.settings?.acquireInteraction();
-          if (!lease) return result({ outcome: "rejected", saved: false, reloaded: false, reason: "Settings interaction unavailable or another review is open." });
+          if (!lease) return result({ phase: "approval", code: "APPROVAL_UNAVAILABLE", outcome: "rejected", saved: false, reloaded: false, reason: "Settings interaction unavailable or another review is open." });
           release = lease.release;
           const outerCheck = check;
           // Lease cancellation covers session changes even for adapters without execution context.
@@ -161,8 +164,8 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
           draftCheck();
           if (candidates.every((candidate) => candidate && !candidate.changed)) return result({ outcome: "no_op", saved: false, reloaded: false, scope: input.scope });
           if (!candidates.some(Boolean)) throw new Error("No available target");
-          if (!ctx?.hasUI || !["tui", "rpc"].includes(ctx.mode)) return result({ outcome: "rejected", saved: false, reloaded: false, reason: "Explicit approval in an interactive TUI or RPC UI is required; no changes made." });
-          const guard = async () => { draftCheck(); if (phase !== "reload" && JSON.stringify([control.getState(), control.getAgentRuntimePolicy?.()]) !== runtimeBefore) throw new SettingsConflictError(); };
+          if (!ctx?.hasUI || !["tui", "rpc"].includes(ctx.mode)) return result({ phase: "approval", code: "APPROVAL_REQUIRED", outcome: "rejected", saved: false, reloaded: false, reason: "Explicit approval in an interactive TUI or RPC UI is required; no changes made." });
+          const guard = async () => { draftCheck(); if (JSON.stringify([control.getState(), control.getAgentRuntimePolicy?.()]) !== runtimeBefore) throw new SettingsConflictError(); };
           await assertProjectReviewState();
           await guard();
           phase = "review";
@@ -179,13 +182,9 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
           phase = "save";
           const applied = await draft.save(input.content, guard);
           saved = true;
-          phase = "reload";
-          await control.reload({ allowRestart: true, signal: abort, guard: async () => { draftCheck(); await applied.assertUnchanged(); draftCheck(); } });
           draftCheck();
           await applied.assertUnchanged();
-          draftCheck();
-          const activation = selection(control, String(review.path));
-          return result({ outcome: activation.active ? "applied" : activation.status === "shadowed_or_not_selected" ? "saved_shadowed" : "saved_deferred", saved: true, reloaded: true, activation, review, instruction: warnings[3] });
+          return result({ outcome: "saved", saved: true, reloaded: false, review, activation: { active: false, status: "not_requested" }, reason: "Source saved only. Build explicitly with msb_dockerfile_build; then load its artifactId with msb_dockerfile_load." });
         }
         const draft = await control.openDockerfile?.(input.scope);
         check();
@@ -197,14 +196,12 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
           inventory: draft.context.map(({ version: _version, ...entry }) => entry), inventoryComplete: true, contextFiles, ...guidance(), warnings, lastKnownSelection: selection(control, draft.target.dockerfile) });
       } catch (error) {
         if (error instanceof BundlePersistenceError) return result({ outcome: "conflict", saved: "unknown", reloaded: false,
-          persistedArtifacts: error.persisted, uncertainArtifact: error.uncertain, review,
+          phase: "storage", code: "STORAGE_PARTIAL", persistedArtifacts: error.persisted, uncertainArtifact: error.uncertain, review,
           reason: "Partial or unknown multi-artifact persistence. Listed artifacts were individually confirmed at publication; inspect fresh because external replacements may exist. No reload/activation. No rollback or jointly/crash-atomic guarantee; unspecified files/external replacements retained." });
-        if (phase === "reload" && control.getState().status === "off") return result({ outcome: "saved_deferred", saved, reloaded: false, review,
-          activation: { active: false, status: "deferred_off" }, reason: "SAVED; activation deferred because sandbox is Off or disabled by the environment. No VM start/build/restart authorized beyond that safety boundary.", instruction: warnings[3] });
-        if (phase === "reload") return result({ outcome: "saved_but_reload_failed", saved, reloaded: false, review, reason: "SAVED, but build/reload/activation failed or was superseded. No confirmed activation. Inspect msb_config_get/msb_diagnostics and use /msb to request reload; do not silently retry or use host fallback.", instruction: warnings[3] });
-        return result({ outcome: signal?.aborted ? "cancelled" : phase === "open" ? "unavailable" : "conflict", saved: phase === "save" && !(error instanceof SettingsConflictError) ? "unknown" : false, reloaded: false,
-          reason: "Unavailable/unsafe source, cancellation or changed file/path/workspace/session/runtime. No reload performed. Request a fresh inspection/review; raw host errors withheld." });
+        return result({ outcome: signal?.aborted ? "cancelled" : phase === "open" ? "unavailable" : "conflict", saved: saved ? true : phase === "save" && !(error instanceof SettingsConflictError) ? "unknown" : false, reloaded: false,
+          phase: phase === "save" ? "storage" : phase === "review" ? "approval" : "inspection", code: signal?.aborted ? "APPROVAL_CANCELLED" : error instanceof SettingsConflictError ? "SOURCE_CONFLICT" : phase === "save" ? "STORAGE_FAILED" : phase === "review" ? "APPROVAL_FAILED" : "SOURCE_UNAVAILABLE", reason: error instanceof Error ? error.message : String(error) });
       } finally { release?.(); }
     },
   });
+  registerDockerfilePhaseTools(pi, control, execution);
 }

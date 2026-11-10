@@ -1,9 +1,11 @@
+import { scanContext } from "./build-context-storage.ts";
+import { readLoadedImage } from "./image-artifact.ts";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { buildImageReference, discoverDockerfile, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
+import { nativeBuildPlatform, buildImageReference, discoverDockerfile, type DockerfileSource } from "./image-source.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { projectConfigPath } from "./project-storage-path.ts";
 import { repositoryMetadata, type RepositoryMetadata } from "./repository-catalog.ts";
@@ -949,9 +951,14 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (Object.hasOwn(policy.value, "image")) break;
     const dockerfile = join(dirname(file), "Dockerfile");
     try {
-      if (await discoverDockerfile(targets.canonicalAgentDir, dockerfile)) {
+      const source = { dockerfile, agentRoot: targets.canonicalAgentDir, agentAlias: targets.agentDir, cacheDir: join(targets.canonicalAgentDir, "pi-microsandbox", "build-cache"), scope: name };
+      const exists = await discoverDockerfile(targets.canonicalAgentDir, dockerfile);
+      // A loaded selection survives missing editable source, never an unsafe source layout.
+      const loaded = await readLoadedImage({ ...source, platform: nativeBuildPlatform() });
+      if (exists || loaded) {
+        await scanContext(join(dirname(dockerfile), "build-context"));
         policy.value.image = `pi-msb-discovered:${name}`;
-        buildSources.set(name, { dockerfile, agentRoot: targets.canonicalAgentDir, agentAlias: targets.agentDir, cacheDir: join(targets.canonicalAgentDir, "pi-microsandbox", "build-cache"), scope: name });
+        buildSources.set(name, source);
         break;
       }
     } catch { throw new ConfigError(["host-owned Dockerfile could not be safely inspected"]); }
@@ -974,13 +981,14 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   const selectedSource = buildSources.get(merged.provenance.image!);
   if (selectedSource && merged.value.image === `pi-msb-discovered:${selectedSource.scope}`) {
     try {
-      const snapshot = await snapshotDockerfile(selectedSource, DEFAULT_CONFIG.image);
-      imageBuild = { ...selectedSource, identity: snapshot.identity, platform: snapshot.platform };
-      merged.value.image = buildImageReference(snapshot.identity);
+      const platform = nativeBuildPlatform();
+      const loaded = await readLoadedImage({ ...selectedSource, platform });
+      imageBuild = { ...selectedSource, identity: loaded?.artifact.artifactId ?? "unloaded", platform, ...(loaded ? { loadedDigest: loaded.digest } : {}) };
+      merged.value.image = buildImageReference(imageBuild.identity);
       merged.value.pullPolicy = "never";
       merged.provenance.pullPolicy = selectedSource.scope;
       warnings.push(`image source: ${selectedSource.scope} Dockerfile ${selectedSource.dockerfile}; generated local image, pull_policy=never`);
-    } catch { throw new ConfigError(["host-owned Dockerfile/context could not be safely snapshotted (regular files only; bounded context required)"]); }
+    } catch { throw new ConfigError(["host-owned loaded Dockerfile selection could not be safely verified"]); }
   }
   let config = validateConfig(merged.value);
   config = {

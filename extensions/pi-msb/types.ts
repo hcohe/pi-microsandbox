@@ -424,6 +424,8 @@ export interface AgentRuntimePolicySnapshot {
   adoptedAt: number;
 }
 export interface MsbControl {
+  buildDockerfile?(options: Omit<import("./image-build.ts").ImageBuildOptions, "sdk">): ReturnType<typeof import("./image-build.ts").buildDockerfileImage>;
+  loadDockerfile?(options: Omit<import("./image-build.ts").ImageLoadOptions, "sdk">): ReturnType<typeof import("./image-build.ts").loadDockerfileImage>;
   /** Fixed-scope owned Dockerfile backend; no host-tool routing or arbitrary paths. */
   openDockerfile?(scope: import("./dockerfile-storage.ts").DockerfileScope, ...retiredDestinations: never[]): Promise<import("./dockerfile-storage.ts").DockerfileDraft | undefined>;
   /** Passive allowlisted snapshot from held state only. No settings.inspect,

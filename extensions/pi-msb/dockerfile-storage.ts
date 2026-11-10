@@ -38,6 +38,7 @@ export interface DockerfileDraft {
   source: DockerfileSnapshot;
   context: ContextEntry[];
   readContext(paths: string[]): Promise<unknown[]>;
+  assertUnchanged(): Promise<void>;
   prepare(content?: string, context?: ContextEdit[]): Promise<BundleReview>;
   save(content: string | undefined, guard: () => Promise<void>): Promise<{ assertUnchanged(): Promise<void> }>;
 }
@@ -212,7 +213,7 @@ export async function openDockerfile(input: ResolveConfigInput, canonicalCwd: st
     await validate();
     return result;
   };
-  return { paths, scope, target, source, context, readContext, async prepare(content, edits = []) {
+  return { paths, scope, target, source, context, readContext, assertUnchanged: validate, async prepare(content, edits = []) {
     await validate(); validateContextEdits(edits);
     reviewedContextPaths = edits.map((edit) => edit.path);
     await validate();

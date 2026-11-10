@@ -10,6 +10,7 @@ export interface DockerfileSource {
   scope: "host-default" | "host-project";
   identity: string;
   platform: string;
+  loadedDigest?: string;
 }
 export interface BuildEntry { path: string; data?: Buffer; mode: number }
 export const BUILD_LIMITS = { bytes: 32 * 1024 * 1024, entries: 2048, depth: 16 } as const;
@@ -39,8 +40,9 @@ export async function assertBuildPath(agentRoot: string, path: string): Promise<
 }
 export async function discoverDockerfile(agentRoot: string, path: string): Promise<boolean> {
   try {
-    if (!(await fs.lstat(path)).isFile()) throw new Error("Dockerfile must be a regular file");
     await assertBuildPath(agentRoot, path);
+    const stat = await fs.lstat(path);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("Dockerfile must be an unlinked regular file");
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;

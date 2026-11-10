@@ -38,6 +38,7 @@ export function buildSdk(calls: string[], hooks: {
   import?: () => Promise<void>;
   failStep?: string;
   persistBeforeCreate?: boolean;
+  stderr?: string;
 } = {}): MicrosandboxModule {
   const sdk = fakeSdk(calls);
   const runtimeBuilder = sdk.Sandbox.builder;
@@ -108,8 +109,9 @@ export function buildSdk(calls: string[], hooks: {
             async *[Symbol.asyncIterator]() {
               if (args.includes("buildx")) { reference = args[args.indexOf("--tag") + 1]!; await hooks.build?.(); }
               if (args.includes("save")) await fs.writeFile(join(volumes["/pi-msb-output"]!, "image.tar"), (hooks.archive ?? dockerArchive)(reference));
-              yield { kind: "stderr", data: Buffer.from("PRIVATE GUEST OUTPUT") };
-              yield { kind: "exited", code: hooks.failStep === "build" && args.includes("buildx") ? 1 : 0 };
+              yield { kind: "stdout", data: Buffer.from("BUILD STDOUT") };
+              yield { kind: "stderr", data: Buffer.from(hooks.stderr ?? "PRIVATE GUEST OUTPUT") };
+              yield { kind: "exited", code: hooks.failStep === "build" && args.includes("buildx") ? 1 : hooks.failStep === "export" && args.includes("save") ? 42 : 0 };
             },
           };
         },

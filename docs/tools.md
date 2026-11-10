@@ -19,7 +19,9 @@ It does not change VM mounts. See [host execution safety](safety.md#fail-closed-
 | --- | --- | --- |
 | `msb_diagnostics` | Passive cached report, even when sandbox execution is blocked | No |
 | `msb_dockerfile_get` | Read scoped Dockerfile, context inventory/requested text, exact paths and pinned FROM starter | No |
-| `msb_dockerfile_set` | Propose Project/Global Dockerfile and/or bounded context PATCH, then reload/build/restart | **Every changed proposal**, through interactive UI |
+| `msb_dockerfile_write` | Persist approved Project/Global Dockerfile/context PATCH only | **Every changed proposal**, through interactive UI |
+| `msb_dockerfile_build` | Autonomous build/export verified reusable artifact; no import/activation | No; works headless/print |
+| `msb_dockerfile_load` | Import exact artifactId, select and guarded reload; no build | **Every invocation**, through interactive UI |
 | `msb_config_get` | Inspect settings, schemas, origins, desired/adopted policy | No |
 | `msb_config_set` | Propose one scoped edit or an atomic same-scope batch | **Every call**, through interactive UI |
 
@@ -31,12 +33,12 @@ The model can discover and inspect settings with **`msb_config_get`** and propos
 one operation or an atomic same-scope batch with **`msb_config_set`**. Use
 **`msb_diagnostics`** when startup fails or routed tools are blocked. None grants
 general host execution. Call **`msb_dockerfile_get`** before proposing a Dockerfile
-replacement with **`msb_dockerfile_set`**. These five exact names remain available under default third-party blocking only when public
+replacement with **`msb_dockerfile_write`**. These seven exact names remain available under default third-party blocking only when public
 registration provenance resolves to this extension's actual entry module. Missing,
 mismatched or duplicate-winning foreign registration receives no exemption;
 other `msb_*` names have no exemption.
 
-## `msb_dockerfile_get` / `msb_dockerfile_set`
+## `msb_dockerfile_get` / `msb_dockerfile_write`
 
 ```json
 {"scope":"project"}
@@ -67,7 +69,7 @@ in the normal response, not the file. Preserve unrelated existing content and
 functional parser directives (`#syntax`/`#escape`). New Dockerfiles start with only
 `FROM` the bundled digest pin, plus the instructions actually needed.
 
-Setter accepts optional full Dockerfile `content` and/or a `context` **PATCH**:
+Write accepts optional full Dockerfile `content` and/or a `context` **PATCH**:
 
 ```json
 {"scope":"project","content":"FROM <bundled digest pin returned by get>\nCOPY scripts/setup.sh /usr/local/bin/setup\n","context":[{"path":"scripts/setup.sh","content":"#!/bin/sh\necho ready\n","executable":true},{"path":".dockerignore","content":"*.bak\n"}]}
@@ -90,7 +92,7 @@ At least one proposal is required. Context payload/read limits: 16 files,
 context review text. Dockerfile remains 32 KiB. All final sources together obey
 32 MiB / 2048 entries (including Dockerfile/directories) / depth 16.
 
-Project setter uses **one approval**: **Scope: Project** with **No / Yes** for
+Project write uses **one approval**: **Scope: Project** with **No / Yes** for
 Git main, linked and nested cwd. Only the shared baseline
 is prepared and reviewed. Old checkout-only labels are not shared authorization.
 Project affects current/future registered worktrees on reload/start, subject to
@@ -126,14 +128,15 @@ view. Exact destination/provenance, warnings, paths and registration metadata
 remain in the getter and structured results, not in the dialog.
 RPC/select-only adapters show the same scoped changed-code diff before one plain
 approval, without ANSI or a warning wall.
-Secrets must never enter source or transcript. Approval covers saving AND
-settings reload, building/importing the new content image and recreating a running
-sandbox if selected. Off/environment disable and autoStart are respected. Denial,
-no approving UI, dismissal, cancellation or stale identity before commit means no
-save/reload. Cancellation after commit preserves saved bytes but blocks late runtime
-adoption. The approval guard is checked again after build/import, inside the runtime
-queue, before SDK creation and before publishing/persisting activation. Already-started
-SDK create/import operations may finish, but cancelled results cannot be adopted.
+Secrets must never enter source or transcript. Write approval covers persistence
+only, never build/import/selection/reload/restart. Denial, no approving UI,
+dismissal, cancellation or stale identity before publication means no save.
+After writing, explicitly build, inspect logs/artifactId, then explicitly load.
+Build runs autonomously without UI or an approval dialog, including headless/print
+sessions; its PUBLIC egress may exfiltrate build inputs. Load still requires fresh
+default-No approval bound to the exact source, artifact, policy and workspace/session.
+Already-started SDK import/create operations may finish, but cancelled results
+cannot be adopted; partial/unknown effects are reported, never silently retried.
 An unchanged bundle is `no_op`: no save approval, filesystem mutation or reload
 (a mixed Project proposal may offer one unchanged destination), and file
 mode/mtime are preserved. Reads/previews/denials never create policy directories.
@@ -155,25 +158,55 @@ review after a partial save.
 
 Dockerfiles accept at most **32 KiB UTF-8**, with no control/format characters except
 TAB/CR/LF. Invalid UTF-8, binary/control-containing or larger existing Dockerfiles
-return bounded metadata/reason, never truncated content; the setter refuses to
+return bounded metadata/reason, never truncated content; write refuses to
 overwrite an original it cannot fully review. Human host repair is then needed.
 Approval/report output is bounded at 256 KiB; oversized reviews are rejected,
 never truncated. Dockerfile contents are intentionally returned **verbatim to the
 model** and the full diff may enter the transcript: **never embed credentials or
 secrets** in Dockerfiles or context.
 
-Results distinguish `saved` and `reloaded` from verified activation: `applied`
-requires the selected image to be known adopted by an active runtime;
-`saved_shadowed` means the Dockerfile was saved but not selected;
-`saved_deferred` means activation is Off, deferred or unverified;
-`saved_but_reload_failed` means saved bytes remain but build/reload failed. A
-`conflict` does not reload; an I/O failure during commit can leave `saved: "unknown"`
-and requires inspection. Never claim the new image is active from a successful
-save alone. Inspect `msb_config_get` for explicit `image`/higher-scope blockers and
-propose `image` inheritance separately with its own `msb_config_set` approval.
-No automatic protection weakening, host fallback or unrelated config edits.
-See [images](images.md#host-owned-dockerfile-no-host-docker) for precedence,
-isolated contexts, cache/rebuild and network boundaries.
+### Explicit phase contracts
+
+- `msb_dockerfile_write({scope, content?, context?})`: `SOURCE_WRITTEN` or
+  `WRITE_UNCHANGED`; always `reloaded:false`. Next: `msb_dockerfile_build`.
+- `msb_dockerfile_build({scope})`: `ARTIFACT_BUILT`, `artifactId`, verified
+  `artifact` metadata, `cacheHit`, command `logs`; no import, selection or runtime
+  lifecycle calls. Autonomous and UI-free; inspect logs before separately approved
+  `msb_dockerfile_load`.
+- `msb_dockerfile_load({scope, artifactId})`: `ARTIFACT_LOADED`, `imported`,
+  `selected`, digest and `activation` (`active`, `shadowed`, or
+  `deferred_or_unverified`). Never builds. Source must still match the build
+  receipt; IDs cannot be substituted across authoritative source paths. A
+  shadowed source stays shadowed; load does not change config image intent.
+
+Every tool returns readable text plus structured `success`, `code`, `phase` and
+`nextAction`. Failures include `reason` and recovery guidance. Write reports
+`INVALID_INPUT`, `WRITE_REJECTED`, `SOURCE_UNAVAILABLE`, `SOURCE_CONFLICT`,
+`APPROVAL_CANCELLED`, `APPROVAL_REQUIRED`, `APPROVAL_UNAVAILABLE`,
+`APPROVAL_FAILED`, `STORAGE_FAILED`, `STORAGE_PARTIAL` or `REPORT_TOO_LARGE`.
+Build/load report `INVALID_INPUT`, `APPROVAL_CANCELLED`, `APPROVAL_FAILED`,
+`VALIDATION_FAILED`, `SOURCE_MISSING`, `STALE_SOURCE`, `BUILD_FAILED`,
+`EXPORT_FAILED`, `STORAGE_FAILED`, `IMPORT_FAILED`,
+`SELECTION_FAILED`, `ACTIVATION_FAILED` or `CLEANUP_FAILED`. Approval codes are
+load-only. Autonomous build also reports `BUILD_BUSY` for retryable internal
+interaction contention and `BUILD_CANCELLED` for cancellation, never denied approval.
+`logs` contain phase, command/args, stdout/stderr (32 KiB tail per stream, with
+`truncated:true` when bounded), and `exitCode` only when a command actually
+reported an exit status. No invented status for approval/validation/storage errors.
+Failed imports may leave `imported:"unknown"`; selection publication may be
+`selected:"unknown"`; activation errors are partial/unverified, not claimed active.
+Retained archives make load retryable without rebuild unless source changed.
+Load retains the approval-time selection receipt identity (or exact absence)
+through SDK acquisition/import; a concurrent replacement requires fresh approval.
+Expanded build/load results show artifact IDs, diagnostics, actual command statuses,
+partial effects and recovery. Terminal control/bidi payloads are escaped, not executed.
+Failed build never removes saved source or changes the previous loaded/running
+image. Startup/reload verify the last loaded selection and never rebuild edited
+source; no usable selection means fail closed. No silent host fallback.
+
+Inspect `msb_config_get` for explicit-image/higher-scope blockers; inheritance
+requires separate config approval. See [images](images.md#host-owned-dockerfile-no-host-docker)
+for precedence, cache lifecycle and build networking.
 
 ## `msb_diagnostics`
 
