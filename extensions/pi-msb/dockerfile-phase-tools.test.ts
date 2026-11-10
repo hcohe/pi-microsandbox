@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { buildSdk } from "../../test/image-build-fixture.ts";
 import { DEFAULT_CONFIG, hostConfigPaths } from "./config.ts";
 import { createMsbIntegration } from "./control.ts";
@@ -29,7 +30,11 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; failStep?
   registerDockerfileTools({ registerTool(tool: any) { definitions.set(tool.name, tool); } } as any, integration.control, integration.provider.execution);
   let answer: string | undefined = "Yes";
   let duringApproval: (() => Promise<void>) | undefined;
-  const ctx: any = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "phases" }, ui: { async select(_text: string, choices: string[]) {
+  const ctx: any = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "phases" }, ui: { async select(question: string, choices: string[]) {
+    if (question.startsWith("Do you approve loading")) {
+      assert.match(question, /^Do you approve loading local built image using custom Dockerfile\?\n\nScope: (Project|Global)$/);
+      assert.deepEqual(choices, ["No", "Yes"]);
+    }
     assert.equal(choices[0], "No"); await duringApproval?.(); return answer;
   } } };
   const run = async (name: "write" | "build" | "load", args: unknown = { scope: "project" }, signal?: AbortSignal) => (await definitions.get(`msb_dockerfile_${name}`).execute("test", args, signal, undefined, ctx));
@@ -662,4 +667,44 @@ for (const change of ["cancel", "source", "cache", "root", "session", "policy"] 
   assert.doesNotMatch(failed.code, /APPROVAL/); assert.doesNotMatch(failed.reason, /fresh (?:approval|review)/i);
   assert.equal(f.calls.includes("builder-create"), false); noRuntime(f.calls);
   if (change === "cancel") assert.equal(failed.code, "BUILD_CANCELLED");
+});
+
+
+for (const action of ["initial-no", "yes", "escape", "ctrl-c", "abort", "source", "selection"] as const) test(`load minimal custom TUI ${action} preserves explicit approval and request guards`, async (t) => {
+  const f = await fixture(t);
+  const built = (await f.run("build")).details;
+  const abort = new AbortController();
+  f.ctx.mode = "tui";
+  f.ctx.ui.select = async () => { assert.fail("Custom TUI must not use native select"); };
+  f.ctx.ui.custom = async (factory: any, options: unknown) => {
+    assert.deepEqual(options, { overlay: false });
+    let complete!: (value: boolean) => void;
+    const answer = new Promise<boolean>((resolve) => { complete = resolve; });
+    const view = factory({ terminal: { rows: 24, columns: 80 }, requestRender() {} }, { fg: (_role: string, text: string) => text }, new KeybindingsManager(TUI_KEYBINDINGS), complete);
+    assert.deepEqual(view.render(80), ["Do you approve loading local built image using custom Dockerfile?", "", "Scope: Project", "", "Yes", "No"]);
+    if (action !== "initial-no") { view.handleInput("\x1b[A"); view.render(80); }
+    if (action === "source") await fs.writeFile(f.dockerfile, from + "RUN echo changed\n");
+    if (action === "selection") await fs.writeFile(selectionPath(f.integration.control.getEffectiveConfig().imageBuild!), '{"foreign":"selection"}');
+    if (action === "abort") abort.abort();
+    view.handleInput(action === "escape" ? "\x1b" : action === "ctrl-c" ? "\x03" : "\r");
+    return answer;
+  };
+  const boundary = f.calls.length;
+  const result = (await f.run("load", { scope: "project", artifactId: built.artifactId }, abort.signal)).details;
+  assert.equal(result.success, action === "yes", JSON.stringify(result));
+  if (action !== "yes") {
+    assert.equal(result.imported, false); assert.equal(result.selected, false); noRuntime(f.calls.slice(boundary));
+  }
+  if (action === "selection") assert.equal(await fs.readFile(selectionPath(f.integration.control.getEffectiveConfig().imageBuild!), "utf8"), '{"foreign":"selection"}');
+});
+
+for (const mode of ["no-ui", "print", "json"] as const) test(`load tool ${mode} remains fail-closed with no prompt/import/activation`, async (t) => {
+  const f = await fixture(t);
+  const built = (await f.run("build")).details;
+  f.ctx.hasUI = mode !== "no-ui"; f.ctx.mode = mode === "no-ui" ? "rpc" : mode;
+  f.ctx.ui = new Proxy({}, { get() { assert.fail("Load cannot prompt in an unsupported context"); } });
+  const boundary = f.calls.length;
+  const result = (await f.run("load", { scope: "project", artifactId: built.artifactId })).details;
+  assert.equal(result.code, "APPROVAL_FAILED"); assert.equal(result.imported, false); assert.equal(result.selected, false);
+  noRuntime(f.calls.slice(boundary));
 });

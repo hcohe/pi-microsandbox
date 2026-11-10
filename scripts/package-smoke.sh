@@ -63,6 +63,7 @@ extensions/pi-msb/build-context-storage.ts required
 extensions/pi-msb/dockerfile-storage.ts required
 extensions/pi-msb/dockerfile-tools.ts required
 extensions/pi-msb/dockerfile-review.ts required
+extensions/pi-msb/dockerfile-load-approval.ts required
 extensions/pi-msb/project-identity.ts required
 extensions/pi-msb/project-storage-path.ts required
 extensions/pi-msb/repository-catalog.ts required

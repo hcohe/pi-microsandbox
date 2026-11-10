@@ -179,6 +179,15 @@ secrets** in Dockerfiles or context.
   receipt; IDs cannot be substituted across authoritative source paths. A
   shadowed source stays shadowed; load does not change config image intent.
 
+Load's custom TUI approval shows only
+“Do you approve loading local built image using custom Dockerfile?”, a blank line,
+`Scope: Project` (or `Global`), another blank line, then **Yes / No**.
+**No is selected by default**; only an explicitly selected Yes from the current,
+unclipped component render can approve. There is no diff, artifact ID, inventory, footer or details toggle
+in this prompt. RPC/select-only fallback uses the same plain question and Scope,
+with **No / Yes** to preserve default denial because native select has no initial-index option.
+Write's detailed diff review is unchanged; build remains autonomous.
+
 Every tool returns readable text plus structured `success`, `code`, `phase` and
 `nextAction`. Failures include `reason` and recovery guidance. Write reports
 `INVALID_INPUT`, `WRITE_REJECTED`, `SOURCE_UNAVAILABLE`, `SOURCE_CONFLICT`,

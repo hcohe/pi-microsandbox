@@ -5,7 +5,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { SettingsConflictError } from "./settings-conflict.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
-import { approveDockerfileReview, dockerfileDisplay } from "./dockerfile-review.ts";
+import { approveDockerfileLoad } from "./dockerfile-load-approval.ts";
 import { ImagePhaseError, type BuildLog } from "./image-build.ts";
 import { artifactStore, readArtifact, selectionPath } from "./image-artifact.ts";
 import { snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
@@ -112,11 +112,8 @@ export function registerDockerfilePhaseTools(pi: ExtensionAPI, control: MsbContr
         if (load) {
           phase = "approval";
           if (!ctx.hasUI || !["tui", "rpc"].includes(ctx.mode)) throw new Error("Explicit interactive TUI/RPC approval required");
-          const selectedReview = await approveDockerfileReview(ctx, [{ scope: input.scope as "project" | "global", label: `${input.scope} · Load artifact`, available: true, sections: [
-            { text: `Import artifact ${artifactId}; select and request reload/restart (guest-local state may be lost). Never rebuild.\nSource identity: ${source.identity}\nContext inventory: ${dockerfileDisplay(JSON.stringify(draft.context.map(({ version: _version, ...entry }) => entry)))}` },
-            { text: dockerfileDisplay(draft.source.content ?? ""), dockerfile: true, source: { before: null, after: draft.source.content } },
-          ] }], abort);
-          if (selectedReview === undefined || abort.aborted) return report({ success: false, code: "APPROVAL_CANCELLED", phase, nextAction: "msb_dockerfile_load", imported, selected, artifactId, reason: "No import/activation authorized." });
+          const approved = await approveDockerfileLoad(ctx, input.scope as "project" | "global", abort);
+          if (!approved || abort.aborted) return report({ success: false, code: "APPROVAL_CANCELLED", phase, nextAction: "msb_dockerfile_load", imported, selected, artifactId, reason: "No import/activation authorized." });
           phase = "validation";
           await guard();
         }
