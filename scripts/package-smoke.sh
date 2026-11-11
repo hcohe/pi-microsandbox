@@ -92,6 +92,7 @@ extensions/pi-msb/footer.ts required
 extensions/pi-msb/flock.ts required
 extensions/pi-msb/image-archive.ts required
 extensions/pi-msb/image-build.ts required
+extensions/pi-msb/image-build-lock.ts required
 extensions/pi-msb/image-boot-notice.ts required
 extensions/pi-msb/image-artifact.ts required
 extensions/pi-msb/dockerfile-phase-tools.ts required

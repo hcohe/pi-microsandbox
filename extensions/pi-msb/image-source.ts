@@ -6,7 +6,6 @@ export interface DockerfileSource {
   dockerfile: string;
   agentRoot: string;
   agentAlias: string;
-  cacheDir: string;
   scope: "host-default" | "host-project";
   identity: string;
   platform: string;
@@ -112,4 +111,12 @@ export async function snapshotDockerfile(source: Pick<DockerfileSource, "dockerf
   }
   return { entries, identity: hash.digest("hex"), platform };
 }
-export function buildImageReference(identity: string): string { return `localhost/pi-msb-build:${identity}`; }
+export const IMAGE_REFERENCE_VERSION = "pi-msb-native-image-v1";
+type NativeSource = Pick<DockerfileSource, "dockerfile" | "platform">;
+const referenceKey = (values: string[]) => createHash("sha256").update(JSON.stringify(values)).digest("hex");
+export function buildImageReference(source: NativeSource & Pick<DockerfileSource, "identity">): string {
+  return `localhost/pi-msb-build:${referenceKey([IMAGE_REFERENCE_VERSION, source.dockerfile, source.platform, source.identity])}`;
+}
+export function selectedImageReference(source: NativeSource): string {
+  return `localhost/pi-msb-selected:${referenceKey([IMAGE_REFERENCE_VERSION, source.dockerfile, source.platform])}`;
+}

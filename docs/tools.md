@@ -175,8 +175,8 @@ secrets** in Dockerfiles or context.
   `msb_dockerfile_load`.
 - `msb_dockerfile_load({scope, artifactId})`: `ARTIFACT_LOADED`, `imported`,
   `selected`, digest and `activation` (`active`, `shadowed`, or
-  `deferred_or_unverified`). Never builds. Source must still match the build
-  receipt; IDs cannot be substituted across authoritative source paths. A
+  `deferred_or_unverified`). Never builds. Source must still match the process-local pending
+  artifact; IDs cannot be substituted across authoritative source paths. A
   shadowed source stays shadowed; load does not change config image intent.
 
 Load's custom TUI approval shows only
@@ -204,9 +204,18 @@ interaction contention and `BUILD_CANCELLED` for cancellation, never denied appr
 reported an exit status. No invented status for approval/validation/storage errors.
 Failed imports may leave `imported:"unknown"`; selection publication may be
 `selected:"unknown"`; activation errors are partial/unverified, not claimed active.
-Retained archives make load retryable without rebuild unless source changed.
-Load retains the approval-time selection receipt identity (or exact absence)
-through SDK acquisition/import; a concurrent replacement requires fresh approval.
+Valid pending archives in private OS temp allow same-process retry after denial
+or failed import, with fresh approval and verification. Successful import cleans
+them; after restart or cleanup explicitly build again (an approved native build
+can be exported without a VM build). No tars, receipts or build locks are written
+to the configuration directory. Only Microsandbox's native image cache persists
+approved builds and the stable selected alias.
+Load binds the approval-time native selected digest (or exact absence), then
+verifies both additive native aliases/config identity after import. The SDK has
+no atomic alias update/CAS or rollback: partial durable mutations and same-digest
+ABA cannot be excluded; observed conflicts withhold activation. Native cache
+save/reimport may change the digest; approval binds the exact new exported archive.
+See the [native cache trust/lifecycle contract](images.md#build-boundary-and-lifecycle).
 Expanded build/load results show artifact IDs, diagnostics, actual command statuses,
 partial effects and recovery. Terminal control/bidi payloads are escaped, not executed.
 Failed build never removes saved source or changes the previous loaded/running

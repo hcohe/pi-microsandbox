@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 
 interface TarEntry { offset: number; size: number; header: Buffer }
@@ -6,7 +7,7 @@ const MAX_ARCHIVE_BYTES = 16 * 1024 ** 3;
 const MAX_METADATA_BYTES = 1024 * 1024;
 
 /** Reduce an untrusted guest export to one Docker-save image, excluding all OCI/index aliases. */
-export async function prepareBuildArchive(input: string, output: string, reference: string, platform: string, signal?: AbortSignal): Promise<void> {
+export async function prepareBuildArchive(input: string, output: string, reference: string, platform: string, signal?: AbortSignal): Promise<{ configDigest: string }> {
   const file = await fs.open(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
@@ -70,6 +71,8 @@ export async function prepareBuildArchive(input: string, output: string, referen
     const image = manifest[0];
     if (!image || !Array.isArray(image.RepoTags) || image.RepoTags.length !== 1 || image.RepoTags[0] !== reference || typeof image.Config !== "string" || !Array.isArray(image.Layers) || image.Layers.length > 4096 || image.Layers.some((layer: unknown) => typeof layer !== "string")) throw new Error("Unexpected exported image references");
     const config = await json(image.Config);
+    const configEntry = entries.get(image.Config)!;
+    const configDigest = `sha256:${createHash("sha256").update(await read(configEntry.offset, configEntry.size)).digest("hex")}`;
     if (config.os !== "linux" || `linux/${config.architecture}` !== platform) throw new Error("Exported image platform mismatch");
     if ([image.Config, ...image.Layers].some((path) => ["manifest.json", "index.json", "oci-layout", "repositories"].includes(path))) throw new Error("Reserved image member name");
     const required: string[] = ["manifest.json", image.Config, ...image.Layers];
@@ -92,5 +95,6 @@ export async function prepareBuildArchive(input: string, output: string, referen
     } finally { await destination.close(); }
     const after = await file.stat();
     if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) throw new Error("Archive changed during validation");
+    return { configDigest };
   } finally { await file.close(); }
 }

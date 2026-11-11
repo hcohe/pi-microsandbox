@@ -4,9 +4,10 @@ import { join } from "node:path";
 import type { MicrosandboxModule } from "./control.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
-import { assertBuildPath, BUILD_ROOT_DISK_MIB, buildImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
+import { BUILD_ROOT_DISK_MIB, buildImageReference, selectedImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { lockPathFor, tryAcquireOrphanLock } from "./locks.ts";
-import { artifactStore, copyArtifactFile, buildRecordPath, publishArtifact, readArtifact, selectLoadedImage, selectionPath, type BuildArtifact } from "./image-artifact.ts";
+import { cachedImage, copyArtifactFile, pendingArtifacts, PendingArtifacts, readArtifactFile, selectionVersion, type BuildArtifact } from "./image-artifact.ts";
+import { buildLockDirectory } from "./image-build-lock.ts";
 import { causalErrorDetails, createSdkTransport, SandboxTransportError, type StreamDiagnostics } from "./transport.ts";
 import type { LockHandle, SandboxTransport } from "./types.ts";
 
@@ -42,6 +43,7 @@ export class ImagePhaseError extends Error {
 }
 export interface ImageBuildOptions {
   sdk: MicrosandboxModule;
+  artifacts?: PendingArtifacts;
   source: DockerfileSource;
   signal?: AbortSignal;
   guard?: () => Promise<void>;
@@ -161,39 +163,54 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     check();
     await guard();
     if (!sdk.defaultBackendKind || sdk.defaultBackendKind() !== "local") throw new Error("Local image backend required");
-    await assertBuildPath(source.agentRoot, source.cacheDir);
     const snapshot = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
     if (snapshot.identity !== source.identity || snapshot.platform !== source.platform) throw new Error("Build source changed; inspect and reinvoke msb_dockerfile_build");
-    check();
-    await fs.mkdir(source.cacheDir, { recursive: true, mode: 0o700 });
-    await assertBuildPath(source.agentRoot, source.cacheDir);
-    const cacheStat = await fs.stat(source.cacheDir);
-    const validateLocation = async () => {
-      await assertBuildPath(source.agentRoot, source.cacheDir);
-      const current = await fs.stat(source.cacheDir);
-      if (await fs.realpath(source.agentAlias) !== source.agentRoot || await fs.realpath(source.agentRoot) !== source.agentRoot || current.dev !== cacheStat.dev || current.ino !== cacheStat.ino) throw new Error("Build cache identity changed");
-    };
-    const acquire = options.acquireLock ?? (async (directory, identity) => {
+    const directory = await buildLockDirectory();
+    const validateLocation = directory.check;
+    const acquire = options.acquireLock ?? (async (path, identity) => {
+      await directory.check();
       const session = `image-build:${identity}`;
-      await assertBuildPath(source.agentRoot, lockPathFor(directory, session));
-      return tryAcquireOrphanLock({ lockDir: directory }, session);
+      const lockPath = lockPathFor(path, session);
+      try {
+        const stat = await fs.lstat(lockPath);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== process.getuid?.()) throw new Error("Unsafe build lock ownership");
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const handle = await tryAcquireOrphanLock({ lockDir: path }, session);
+      try { await directory.check(); return handle; }
+      catch (error) { await handle?.release(); throw error; }
     });
+    const reference = buildImageReference(source);
     while (!lock) {
-      check();
-      lock = await acquire(source.cacheDir, source.identity);
+      check(); await guard();
+      lock = await acquire(directory.path, reference);
       if (!lock) await new Promise((resolve) => setTimeout(resolve, 100));
     }
     await validateLocation();
-    const reference = buildImageReference(source.identity);
-    const store = await artifactStore(source, true);
-    try {
-      const record = JSON.parse((await store.read(buildRecordPath(source))).text);
-      const cached = await readArtifact(source, record.artifactId);
-      await guard(); await cached.assertUnchanged(); check();
-      return { artifact: cached.artifact, cacheHit: true, logs };
-    } catch (error) {
-      // Only absence is a cache miss; tampering is not authorization to overwrite.
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const artifacts = options.artifacts ?? pendingArtifacts;
+    const cached = await artifacts.current(source);
+    if (cached) { await guard(); await cached.assertUnchanged(); check(); return { artifact: cached.artifact, cacheHit: true, logs }; }
+    const native = await cachedImage(sdk, reference, source.platform);
+    if (native) {
+      const alias = await fs.mkdtemp("/tmp/pi-msb-export-");
+      const owner = await fs.lstat(alias);
+      let path = alias;
+      const checkExportDirectory = async () => {
+        const current = await fs.lstat(path);
+        if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== owner.dev || current.ino !== owner.ino) throw new Error("Export staging identity changed");
+      };
+      try {
+        path = await fs.realpath(alias); await checkExportDirectory();
+        await guard(); check();
+        await sdk.Image!.save(reference, { outputPath: join(path, "image.tar"), format: "docker" });
+        if ((await cachedImage(sdk, reference, source.platform))?.manifestDigest !== native.manifestDigest) throw new Error("Native build reference changed during export");
+        const artifact = await artifacts.publish(source, join(path, "image.tar"), async () => { check(); await guard();
+          if ((await cachedImage(sdk, reference, source.platform))?.manifestDigest !== native.manifestDigest) throw new Error("Native build reference changed during export");
+        });
+        return { artifact, cacheHit: true, logs };
+      } finally {
+        await checkExportDirectory();
+        await fs.rm(path, { recursive: true });
+      }
     }
     check();
     // Keep staging in /tmp, but never pass its platform-specific aliases to
@@ -276,7 +293,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     check();
     await guard();
     phase = "storage";
-    const artifact = await publishArtifact(source, sanitizedArchive, async () => { check(); await guard(); await validateLocation(); });
+    const artifact = await artifacts.publish(source, sanitizedArchive, async () => { check(); await guard(); await validateLocation(); });
     return { artifact, cacheHit: false, logs };
   } catch (error) {
     primaryFailure = new ImagePhaseError(phase, error instanceof Error ? error.message : String(error), logs);
@@ -331,7 +348,7 @@ export interface ImageLoadOptions extends ImageBuildOptions {
   onSelectionPublished?: (assertSelected: () => Promise<void>) => void;
 }
 
-/** Explicit import only; successful artifacts remain available after every failure. */
+/** Explicit approved import only. Native aliases are additive and nontransactional. */
 export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ artifact: BuildArtifact; digest: string; assertSelected(): Promise<void> }> {
   let phase = "validation";
   let imported: boolean | "unknown" = false;
@@ -346,16 +363,13 @@ export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ 
   try {
     const { sdk, source } = options;
     if (typeof expectedSelectionVersion !== "string" || !expectedSelectionVersion) throw new Error("Approval-time loaded selection expectation required");
-    const store = await artifactStore(source);
     assertSelection = async () => {
-      let version: string;
-      try { version = (await store.read(selectionPath(source))).version; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; version = "missing"; }
-      if (version !== expectedSelectionVersion) throw new Error("Loaded selection changed after approval; request fresh approval");
+      if (await selectionVersion(sdk, source) !== expectedSelectionVersion) throw new Error("Loaded selection changed after approval; request fresh approval");
     };
     await guard();
     if (!sdk.Image || sdk.defaultBackendKind?.() !== "local") throw new Error("Local image backend required");
-    const candidate = await readArtifact(source, options.artifactId);
+    const artifacts = options.artifacts ?? pendingArtifacts;
+    const candidate = await artifacts.read(source, options.artifactId);
     await guard(); await candidate.assertUnchanged();
     // Import from an exclusive verified copy, not a mutable cache pathname passed to the SDK.
     const alias = await fs.mkdtemp("/tmp/pi-msb-load-");
@@ -369,25 +383,47 @@ export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ 
       const archive = join(temporary, "image.tar");
       await copyArtifactFile(candidate.path, archive);
       // Verify the copy through the same no-follow digest reader before giving it to the importer.
-      const copied = await artifactStore({ agentRoot: temporary, agentAlias: temporary, cacheDir: join(temporary, "verify") }, true);
-      const data = await copied.read(archive, true);
+      const data = await readArtifactFile(archive);
       if (data.digest !== candidate.artifact.archiveDigest) throw new Error("Import copy content mismatch");
       await guard(); await candidate.assertUnchanged();
-      phase = "import"; imported = "unknown";
-      await sdk.Image.load(archive, { tag: candidate.artifact.reference });
-      imported = true;
-      await guard(); await candidate.assertUnchanged();
-      const image = await sdk.Image.get(candidate.artifact.reference);
-      if (image.reference !== candidate.artifact.reference || image.os !== "linux" || `linux/${image.architecture}` !== source.platform || !/^sha256:[a-f0-9]{64}$/.test(image.manifestDigest ?? "")) throw new Error("Imported image metadata mismatch");
+      const reference = candidate.artifact.reference;
+      const selectedRef = selectedImageReference(source);
+      const existingBuild = await cachedImage(sdk, reference, source.platform);
+      const existingSelected = await cachedImage(sdk, selectedRef, source.platform);
+      const inspectConfig = async (ref: string) => (await sdk.Image!.inspect(ref)).config?.digest;
+      let digest: string;
+      if (existingBuild && existingSelected && existingBuild.manifestDigest === existingSelected.manifestDigest
+        && await inspectConfig(reference) === candidate.artifact.configDigest && await inspectConfig(selectedRef) === candidate.artifact.configDigest) {
+        await guard(); await candidate.assertUnchanged();
+        digest = existingBuild.manifestDigest!;
+      } else {
+        await guard(); await candidate.assertUnchanged();
+        if ((await readArtifactFile(archive)).version !== data.version) throw new Error("Import copy changed");
+        phase = "import"; imported = "unknown"; selected = "unknown";
+        const handles = await sdk.Image.load(archive, { tag: selectedRef });
+        // Image.load imports BOTH the sanitized RepoTag and the extra selected tag.
+        const build = handles.find((image) => image.reference === reference);
+        const chosen = handles.find((image) => image.reference === selectedRef);
+        if (handles.length !== 2 || !build || !chosen || !/^sha256:[a-f0-9]{64}$/.test(build.manifestDigest ?? "")
+          || handles.some((image) => image.manifestDigest !== build.manifestDigest || image.os !== "linux" || `linux/${image.architecture}` !== source.platform)) throw new Error("Import returned inconsistent native references; native aliases may be partially changed");
+        digest = build.manifestDigest!;
+        imported = true;
+      }
+      if ((await readArtifactFile(archive)).version !== data.version) throw new Error("Import copy changed during import; native aliases may be partially changed");
       phase = "selection";
-      const loaded = { artifact: candidate.artifact, digest: image.manifestDigest! };
-      selected = "unknown";
-      const assertSelected = await selectLoadedImage(source, loaded, async () => { await guard(); await candidate.assertUnchanged(); });
+      const assertSelected = async () => {
+        for (const ref of [reference, selectedRef]) {
+          if ((await cachedImage(sdk, ref, source.platform))?.manifestDigest !== digest || await inspectConfig(ref) !== candidate.artifact.configDigest) throw new Error("Approved native image selection changed; native aliases may be partially changed");
+        }
+      };
+      await assertSelected();
       selected = true;
       assertSelection = assertSelected;
       options.onSelectionPublished?.(assertSelected);
-      await guard(); await candidate.assertUnchanged();
-      await assertSelected();
+      await guard(); await candidate.assertUnchanged(); await assertSelected();
+      const loaded = { artifact: { ...candidate.artifact, reference: selectedRef }, digest };
+      await artifacts.discard(options.artifactId);
+      await guard(); await assertSelected();
       return { ...loaded, assertSelected };
     } catch (error) { primaryError = error; throw error; }
     finally {
@@ -407,6 +443,6 @@ export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ 
 export async function verifyDockerfileImage(options: ImageBuildOptions): Promise<void> {
   const { sdk, source } = options;
   if (!source.loadedDigest || !sdk.Image || sdk.defaultBackendKind?.() !== "local") throw new Error(BUILD_FAILURE);
-  const image = await sdk.Image.get(buildImageReference(source.identity));
-  if (image.reference !== buildImageReference(source.identity) || image.manifestDigest !== source.loadedDigest || image.os !== "linux" || `linux/${image.architecture}` !== source.platform) throw new Error(BUILD_FAILURE);
+  const image = await cachedImage(sdk, selectedImageReference(source), source.platform);
+  if (image?.manifestDigest !== source.loadedDigest) throw new Error(BUILD_FAILURE);
 }

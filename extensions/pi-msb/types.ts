@@ -424,6 +424,8 @@ export interface AgentRuntimePolicySnapshot {
   adoptedAt: number;
 }
 export interface MsbControl {
+  readDockerfileArtifact?(source: import("./image-source.ts").DockerfileSource, id: string): ReturnType<import("./image-artifact.ts").PendingArtifacts["read"]>;
+  dockerfileSelectionVersion?(source: import("./image-source.ts").DockerfileSource): Promise<string>;
   buildDockerfile?(options: Omit<import("./image-build.ts").ImageBuildOptions, "sdk">): ReturnType<typeof import("./image-build.ts").buildDockerfileImage>;
   loadDockerfile?(options: Omit<import("./image-build.ts").ImageLoadOptions, "sdk">): ReturnType<typeof import("./image-build.ts").loadDockerfileImage>;
   /** Fixed-scope owned Dockerfile backend; no host-tool routing or arbitrary paths. */

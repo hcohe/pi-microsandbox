@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -7,7 +5,6 @@ import { SettingsConflictError } from "./settings-conflict.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { approveDockerfileLoad } from "./dockerfile-load-approval.ts";
 import { ImagePhaseError, type BuildLog } from "./image-build.ts";
-import { artifactStore, readArtifact, selectionPath } from "./image-artifact.ts";
 import { snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import type { MsbControl, SessionExecutionContext } from "./types.ts";
 
@@ -31,7 +28,7 @@ export function registerDockerfilePhaseTools(pi: ExtensionAPI, control: MsbContr
     name: load ? "msb_dockerfile_load" : "msb_dockerfile_build",
     label: load ? "Load Microsandbox Dockerfile artifact" : "Build Microsandbox Dockerfile artifact",
     description: load
-      ? "Explicitly import/select the exact successful artifactId from msb_dockerfile_build, then guarded settings reload under existing Off/autoStart policy. Never builds. Separate default-No approval binds source, artifact, policy and session. Changed source/artifact fails closed. Import/activation failures retain artifact for load retry; partial import/selection is reported. Shadowed sources remain shadowed; never changes image/config intent. Restart may lose guest-local state."
+      ? "Explicitly import/select the exact successful artifactId from msb_dockerfile_build, then guarded settings reload under existing Off/autoStart policy. Never builds. Separate default-No approval binds source, artifact, policy and session. Changed source/artifact fails closed. Valid pending artifacts remain retryable after failed import in this process; successful import cleans them, so activation retry may require explicit cache export via build. Partial nontransactional native effects are reported. Shadowed sources remain shadowed; never changes image/config intent. Restart may lose guest-local state."
       : "Autonomously build/export current host-owned Project/Global Dockerfile/context in an isolated builder, including headless/print sessions. No approval dialog or interactive UI is required. Returns verified reusable artifactId, command stdout/stderr/actual exit status. Never imports, selects, reloads or restarts runtime. Public build egress may exfiltrate build inputs; no host secrets/mounts. Cache hit verifies artifact without building. After success inspect logs/artifactId, then explicitly call msb_dockerfile_load with its separate default-No approval. Failed builds preserve source and previously loaded/running image.",
     parameters: Type.Object({ scope: Type.Union([Type.Literal("project"), Type.Literal("global")]), ...(load ? { artifactId: Type.String({ pattern: "^[a-f0-9]{64}$" }) } : {}) }, { additionalProperties: false, description: load ? "Explicit artifact load requires interactive default-No approval." : "Autonomous build/export; no interactive approval or UI required." }),
     executionMode: "sequential",
@@ -77,20 +74,12 @@ export function registerDockerfilePhaseTools(pi: ExtensionAPI, control: MsbContr
         if (draft.source.reason) throw new Error(draft.source.reason);
         const partial = { dockerfile: draft.target.dockerfile, agentRoot: draft.paths.canonicalAgentDir, agentAlias: draft.paths.agentDir };
         const snapshot = await snapshotDockerfile(partial, DEFAULT_CONFIG.image);
-        const source: DockerfileSource = { ...partial, cacheDir: join(partial.agentRoot, "pi-microsandbox", "build-cache"), scope: input.scope === "project" ? "host-project" : "host-default", identity: snapshot.identity, platform: snapshot.platform };
-        const candidate = load ? await readArtifact(source, artifactId!) : undefined;
-        let store: Awaited<ReturnType<typeof artifactStore>> | undefined;
-        try { store = await artifactStore(source); }
-        catch (error) { if (load || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-        const assertCache = async () => {
-          if (store) { await store.check(); return; }
-          try { await fs.lstat(source.cacheDir); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-          throw new Error(load ? "Artifact directory appeared after review; request fresh approval" : "Artifact directory appeared during build request; inspect and retry msb_dockerfile_build");
-        };
+        const source: DockerfileSource = { ...partial, scope: input.scope === "project" ? "host-project" : "host-default", identity: snapshot.identity, platform: snapshot.platform };
+        const candidate = load ? await control.readDockerfileArtifact?.(source, artifactId!) : undefined;
+        if (load && !candidate) throw new Error("Pending artifact unavailable; rebuild explicitly");
         const selectionVersion = async () => {
-          try { return (await store!.read(selectionPath(source))).version; }
-          catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing"; throw error; }
+          if (!control.dockerfileSelectionVersion) throw new Error("Native selection lookup unavailable");
+          return control.dockerfileSelectionVersion(source);
         };
         const originalSelection = load ? await selectionVersion() : undefined;
         let assertSelected: (() => Promise<void>) | undefined;
@@ -100,10 +89,10 @@ export function registerDockerfilePhaseTools(pi: ExtensionAPI, control: MsbContr
           check();
           try { await draft.assertUnchanged(); }
           catch (error) { if (!load && error instanceof SettingsConflictError) throw new Error(buildConflictGuidance); throw error; }
-          await assertCache(); check();
+          check();
           const now = await snapshotDockerfile(partial, DEFAULT_CONFIG.image);
           if (now.identity !== source.identity || now.platform !== source.platform) throw new Error(load ? "Source changed after approval; build the current source explicitly" : "Source changed during build request; inspect and reinvoke msb_dockerfile_build");
-          await candidate?.assertUnchanged();
+          if (!assertSelected) await candidate?.assertUnchanged();
           if (assertSelected) await assertSelected();
           else if (load && await selectionVersion() !== originalSelection) throw new Error("Loaded selection changed after approval");
           if (!activating && JSON.stringify([control.getEffectiveConfig(), control.getState(), control.getAgentRuntimePolicy?.()]) !== runtime) throw new Error(load ? "Runtime/policy changed; request fresh approval" : "Runtime/policy changed during build request; inspect and retry msb_dockerfile_build");
@@ -119,11 +108,6 @@ export function registerDockerfilePhaseTools(pi: ExtensionAPI, control: MsbContr
           await guard();
         }
         if (!load) {
-          if (!store) {
-            phase = "storage";
-            await fs.mkdir(source.cacheDir, { mode: 0o700 });
-            store = await artifactStore(source);
-          }
           phase = "build";
           if (!control.buildDockerfile) throw new Error("Build backend unavailable");
           const built = await control.buildDockerfile({ source, signal: abort, guard });
@@ -148,7 +132,7 @@ export function registerDockerfilePhaseTools(pi: ExtensionAPI, control: MsbContr
         phase = failure?.phase ?? phase;
         const explicitCode = (error as { code?: string })?.code;
         const code = !load && operationSignal?.aborted ? "BUILD_CANCELLED" : !load && explicitCode === "BUILD_BUSY" ? "BUILD_BUSY" : ["SOURCE_MISSING", "STALE_SOURCE"].includes(explicitCode ?? "") ? explicitCode : phase === "input" ? "INVALID_INPUT" : phase === "approval" ? "APPROVAL_FAILED" : phase === "validation" ? "VALIDATION_FAILED" : phase === "build" ? "BUILD_FAILED" : phase === "export" ? "EXPORT_FAILED" : phase === "import" ? "IMPORT_FAILED" : phase === "storage" ? "STORAGE_FAILED" : phase === "selection" ? "SELECTION_FAILED" : phase === "cleanup" ? "CLEANUP_FAILED" : "ACTIVATION_FAILED";
-        return report({ success: false, code, phase, nextAction: code === "BUILD_BUSY" || code === "BUILD_CANCELLED" ? "msb_dockerfile_build" : phase === "validation" ? "msb_dockerfile_get" : load ? "msb_dockerfile_load" : "msb_dockerfile_build", reason: !load && error instanceof SettingsConflictError ? buildConflictGuidance : error instanceof Error ? error.message : String(error), logs: failure?.logs ?? [], diagnostics: failure?.diagnostics, imported: failure?.imported ?? imported, selected: failure?.selected ?? selected, artifactId, activation: phase === "activation" ? "partial_or_unverified" : "not_requested", recovery: load ? "Artifact retained; inspect source/artifact/policy conflict, then retry load without rebuilding unless source changed. No host fallback." : "Written source and prior loaded/running image preserved. Repair via write if needed, then retry build. No load attempted." });
+        return report({ success: false, code, phase, nextAction: code === "BUILD_BUSY" || code === "BUILD_CANCELLED" ? "msb_dockerfile_build" : phase === "validation" ? "msb_dockerfile_get" : load ? "msb_dockerfile_load" : "msb_dockerfile_build", reason: !load && error instanceof SettingsConflictError ? buildConflictGuidance : error instanceof Error ? error.message : String(error), logs: failure?.logs ?? [], diagnostics: failure?.diagnostics, imported: failure?.imported ?? imported, selected: failure?.selected ?? selected, artifactId, activation: phase === "activation" ? "partial_or_unverified" : "not_requested", recovery: load ? "Native import is nontransactional: aliases may be partially changed; activation withheld on uncertainty. Inspect native cache/source/policy and explicitly rebuild if pending artifact is unavailable. No rollback or host fallback." : "Written source and prior loaded/running image preserved. Repair via write if needed, then retry build. No load attempted." });
       } finally { release?.(); }
     },
   });
