@@ -30,7 +30,7 @@ just dev
 ```
 
 `dev-flock` builds and smoke-tests the native owner-lock addon for the current
-host. `dev-image` builds the current `default` variant as
+host. `dev-image` builds the current default image as
 `pi-microsandbox-dev:local` and imports it into Microsandbox's separate image
 cache. `dev` runs both prerequisites, then starts Pi with this checkout's
 extension explicitly loaded alongside your normal discovered extensions. `pi` is
@@ -309,9 +309,9 @@ test image; the default is `ghcr.io/hcohe/pi-microsandbox:latest`. The main
 scenarios use `pull_policy = "always"` by default. To test an image already
 imported with `msb load`, set `PI_MSB_LIVE_PULL_POLICY=never`; do not use that
 override as evidence for a published image.
-The prepared-image scenario boots all six latest variant tags under
+The prepared-image scenario boots the default latest tag under
 `network.mode = "deny"` with bootstrap disabled. Set
-`PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated image cohort, or use the
+`PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated custom image list, or use the
 legacy singular `PI_MSB_LIVE_PREPARED_IMAGE` to test one image. The live matrix
 uses `pull_policy = "always"` intentionally so mutable development tags cannot
 remain stale on the self-hosted runner. Review the output to confirm that every scenario reports `PASS`, not `SKIP`.
@@ -334,16 +334,19 @@ scenario is not release evidence.
 
 ## Image development
 
-The image workflow derives the `base`, `node`, `python`, `rust`, `go`, and
-`default` build matrix from `default-image/variants.json`. Pull requests build
-and verify all six variants for AMD64 and ARM64. Main-branch builds publish each
-variant's mutable latest tag and a commit-specific tag. Release builds pin the
-Ubuntu image digest and one dated apt snapshot for all variants, while published
-images restore normal apt sources for project use. See [Images](images.md#add-a-language-variant)
-for the modular installer and verifier architecture, contribution rules, and
-local validation commands. Docker changes must also pass:
+The image workflow derives a single-default build matrix from
+`default-image/variants.json`. Validation rejects extra images or any change to
+the fixed Node.js, Python, Rust, and Go runtime set. Pull requests build and
+verify the complete image for AMD64 and ARM64. Main-branch builds publish
+`latest` and `sha-COMMIT` tags. The Ubuntu base image remains digest-pinned;
+assembly and runtime use Ubuntu's normal signed apt repositories, with strict
+index updates and bounded acquisition retries. Apt package versions can change
+between builds. See [Images](images.md#maintain-the-default-image) for the modular
+installer and verifier architecture and local validation commands. Docker changes
+must also pass:
 
 ```sh
+node scripts/image-variants.mjs self-test
 node scripts/image-variants.mjs matrix
 shellcheck -e SC1091 default-image/install/*.sh default-image/verify/*.sh
 ```
@@ -585,17 +588,16 @@ temporary staging tree, records each binary's SHA-256, smoke-tests the exact
 tarball on every supported target, and packs only once. The publish job downloads
 and publishes those verified bytes without repacking.
 
-The sandbox image workflow publishes all six AMD64 and ARM64 variants to
+The sandbox image workflow publishes one AMD64 and ARM64 default image to
 `ghcr.io/hcohe/pi-microsandbox`. An `image-vX.Y.Z` Git tag publishes the
-write-once image cohort: `base-X.Y.Z`, `node-X.Y.Z`, `python-X.Y.Z`,
-`rust-X.Y.Z`, `go-X.Y.Z`, and `X.Y.Z` for the default variant. Package tags
+write-once `X.Y.Z` image tag. Package tags
 remain `vX.Y.Z` and never start image builds. Manual image workflow runs validate
 only. The workflow refuses to overwrite an existing version tag.
 
-Image and package releases are independent. Publish and verify an image cohort
+Image and package releases are independent. Publish and verify an image
 before changing the extension default to its `VERSION@sha256:DIGEST` reference.
 The npm workflow requires that digest-qualified reference, checks it against the
-public default tag, checks every variant and both platforms against the image
+public default tag, checks the default image on both platforms against the image
 tag commit, and verifies image provenance before publishing. A package
 administrator must make the GHCR package public before the package release so
 both release verification and Microsandbox can pull it without registry

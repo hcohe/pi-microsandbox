@@ -86,10 +86,11 @@ const IMAGE = process.env.PI_MSB_LIVE_IMAGE || DEFAULT_IMAGE;
 const LIVE_PULL_POLICY = process.env.PI_MSB_LIVE_PULL_POLICY || "always";
 assert.ok(["always", "if-missing", "never"].includes(LIVE_PULL_POLICY), "PI_MSB_LIVE_PULL_POLICY is invalid");
 const ROOT = "__ROOT__";
-const variantDocument = JSON.parse(await readFile(join(ROOT, "default-image", "variants.json"), "utf8"));
-const declaredPreparedImages = variantDocument.variants.map(
-  (variant) => `ghcr.io/hcohe/pi-microsandbox:${variant.tags.latest}`,
-);
+// Use the same validated single-default reference generator as publication.
+const { stdout: preparedRefs } = await execFile(process.execPath, [
+  join(ROOT, "scripts", "image-variants.mjs"), "refs", "latest", "ghcr.io/hcohe/pi-microsandbox",
+]);
+const declaredPreparedImages = preparedRefs.trim().split("\n").map((line) => line.split("\t")[1]);
 const PREPARED_IMAGES = process.env.PI_MSB_LIVE_PREPARED_IMAGES
   ? process.env.PI_MSB_LIVE_PREPARED_IMAGES.split(",").map((item) => item.trim()).filter(Boolean)
   : process.env.PI_MSB_LIVE_PREPARED_IMAGE

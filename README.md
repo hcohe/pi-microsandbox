@@ -8,7 +8,7 @@ playground. You get to choose its tools, network access, mounts, and secrets.
 
 - **Real Linux. Your actual files.** Edits land directly in your working directory.
 - **Bring your stack.** The default image includes Node.js, Python, Rust, Go,
-  and Docker. Pick a smaller [image](docs/images.md), or place a
+  and Docker. Use this complete [image](docs/images.md), or place a
   [host-owned Dockerfile](docs/images.md#host-owned-dockerfile-no-host-docker)
   to build inside a disposable VM—no host Docker needed.
 - **Ask, review, approve.** Let the agent propose sandbox settings instead of

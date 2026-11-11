@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -101,6 +101,105 @@ printf 'verification completed\\n'
         assert.ok(result.stderr.includes(`SHA-256 verification failed for ${url} (expected ${checksum})`), result.stderr);
         assert.ok(!result.stdout.includes("verification completed"));
       }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("default image uses normal Ubuntu repositories without bootstrap trust overrides", () => {
+  const dockerfile = readFileSync(new URL("../../default-image/Dockerfile", import.meta.url), "utf8");
+  assert.match(dockerfile, /FROM docker\.io\/library\/ubuntu:26\.04@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d AS assembled/);
+  assert.doesNotMatch(dockerfile, /snapshot|CaInfo|pi-image-bootstrap|sources\.list|ubuntu\.sources|AllowUnauthenticated|AllowInsecure|Verify-Peer/i);
+  assert.equal(existsSync(new URL("../../default-image/install/ubuntu-snapshot-ca.pem", import.meta.url)), false);
+  assert.match(dockerfile, /ca-certificates/);
+  assert.match(dockerfile, /AWS_CA_BUNDLE=\/etc\/ssl\/certs\/ca-certificates\.crt/);
+  assert.match(dockerfile, /CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=\/etc\/ssl\/certs\/ca-certificates\.crt/);
+});
+
+test("default image build has no runtime-selection knobs and retains common CLI installation", () => {
+  const dockerfile = readFileSync(new URL("../../default-image/Dockerfile", import.meta.url), "utf8");
+  assert.doesNotMatch(dockerfile, /IMAGE_VARIANT|TOOLCHAINS/);
+  for (const cli of ["docker", "gcloud", "aws"]) {
+    assert.ok(dockerfile.includes(`/opt/pi-image-install/${cli}.sh;`));
+  }
+  assert.match(dockerfile, /\/opt\/pi-image-install\/dispatch\.sh;/);
+  assert.match(dockerfile, /\/opt\/pi-image-verify\/dispatch\.sh;/);
+  assert.match(dockerfile, /org\.opencontainers\.image\.variant="default"/);
+  for (const path of ["../../.github/workflows/default-image.yml", "../../Justfile"]) {
+    assert.doesNotMatch(readFileSync(new URL(path, import.meta.url), "utf8"), /IMAGE_VARIANT=|TOOLCHAINS=/);
+  }
+});
+
+test("image-variants CLI emits only the all-runtime default matrix and references", () => {
+  const script = fileURLToPath(new URL("../../scripts/image-variants.mjs", import.meta.url));
+  const run = (...args: string[]) => {
+    const result = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  assert.deepEqual(JSON.parse(run("matrix")), { include: [{
+    variant: "default", toolchains: "node python rust go", latestTag: "latest",
+    releaseTemplate: "{version}", shaPrefix: "sha-",
+  }] });
+  assert.equal(run("refs", "latest", "example.invalid/image"), "default\texample.invalid/image:latest\n");
+  assert.equal(run("refs", "release", "example.invalid/image", "2.3.4"), "default\texample.invalid/image:2.3.4\n");
+  assert.equal(run("self-test"), "image-variants self-test: PASS\n");
+});
+
+for (const kind of ["install", "verify"] as const) {
+  test(`image ${kind} dispatcher always runs all four runtimes and fails closed`, () => {
+    const directory = mkdtempSync(join(tmpdir(), `pi-msb-image-${kind}-`));
+    const runtimes = ["node", "python", "rust", "go"];
+    const writeScript = (name: string, content: string) => {
+      const path = join(directory, name);
+      writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${content}\n`);
+      chmodSync(path, 0o755);
+    };
+    try {
+      copyFileSync(new URL(`../../default-image/${kind}/dispatch.sh`, import.meta.url), join(directory, "dispatch.sh"));
+      if (kind === "verify") {
+        copyFileSync(new URL("../../default-image/verify/default.sh", import.meta.url), join(directory, "default.sh"));
+      }
+      // Only the orchestration runs for real; no host installs, downloads, or probes.
+      writeScript("_common.sh", `
+        target_arch() { printf 'architecture\\n'; }
+        cleanup_apt() { printf 'cleanup\\n'; }
+        verify_base_contract() { printf 'base\\n'; }
+      `);
+      for (const runtime of runtimes) writeScript(`${runtime}.sh`, `printf '${runtime}\\n'`);
+      const run = (...args: string[]) => {
+        const entrypoint = kind === "verify" ? "default.sh" : "dispatch.sh";
+        const result = spawnSync("bash", [join(directory, entrypoint), ...args], {
+          encoding: "utf8",
+          env: { ...process.env, IMAGE_VARIANT: "base", TOOLCHAINS: "" },
+        });
+        assert.ifError(result.error);
+        return result;
+      };
+      const expected = kind === "install" ? [...runtimes, "cleanup"] : ["base", ...runtimes];
+      const success = run();
+      assert.equal(success.status, 0, success.stderr);
+      assert.deepEqual(success.stdout.trim().split("\n"), expected);
+      for (const args of [[""], ["node"], ["default", "node python rust go"], ["../node"]]) {
+        const rejected = run(...args);
+        assert.equal(rejected.status, 1);
+        assert.equal(rejected.stdout, "");
+        assert.match(rejected.stderr, /no arguments are supported/);
+      }
+      // A missing module must fail before any runtime work.
+      rmSync(join(directory, "go.sh"));
+      const missing = run();
+      assert.equal(missing.status, 1);
+      assert.equal(missing.stdout, "");
+      assert.match(missing.stderr, /No executable .* for toolchain: go/);
+      writeScript("go.sh", "exit 0");
+      // Any installer or functional verifier failure must stop later modules.
+      writeScript("python.sh", "exit 42");
+      const failed = run();
+      assert.equal(failed.status, 42);
+      assert.deepEqual(failed.stdout.trim().split("\n"), kind === "install" ? ["node"] : ["base", "node"]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

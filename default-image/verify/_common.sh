@@ -38,16 +38,3 @@ verify_base_contract() {
     rg -q '^pi-microsandbox$' "${tmp_dir}/curl.txt"
     rm -rf "${tmp_dir}"
 }
-
-verify_no_language_toolchains() {
-    local command_name
-    for command_name in \
-        cargo corepack go node npm npx pip pip3 pnpm python python3 rustc rustup \
-        uv uvx yarn; do
-        if command -v "${command_name}" >/dev/null 2>&1; then
-            printf 'Base image unexpectedly contains language command: %s\n' \
-                "${command_name}" >&2
-            return 1
-        fi
-    done
-}

@@ -11,8 +11,6 @@ dev-image:
     image="pi-microsandbox-dev:local"
     docker build \
       --tag "${image}" \
-      --build-arg IMAGE_VARIANT=default \
-      --build-arg "TOOLCHAINS=node python rust go" \
       --build-arg IMAGE_VERSION=dev \
       --file default-image/Dockerfile \
       default-image

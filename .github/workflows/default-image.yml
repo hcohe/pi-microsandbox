@@ -70,8 +70,7 @@ jobs:
               exit 1
             fi
             version="${REF_NAME#image-v}"
-            # Materialize the complete cohort now so concrete cross-variant tag
-            # collisions fail before any matrix job can publish.
+            # Validate the single release reference before any job can publish.
             node scripts/image-variants.mjs refs release "$IMAGE_NAME" "$version" >/dev/null
             channel=release
             cache_suffix="$version"
@@ -117,8 +116,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: false
           build-args: |
-            IMAGE_VARIANT=${{ matrix.variant }}
-            TOOLCHAINS=${{ matrix.toolchains }}
             IMAGE_VERSION=${{ needs.variants.outputs.version }}
           labels: |
             org.opencontainers.image.variant=${{ matrix.variant }}
@@ -226,8 +223,6 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.build_tags }}
           build-args: |
-            IMAGE_VARIANT=${{ matrix.variant }}
-            TOOLCHAINS=${{ matrix.toolchains }}
             IMAGE_VERSION=${{ needs.variants.outputs.version }}
           labels: |
             org.opencontainers.image.variant=${{ matrix.variant }}

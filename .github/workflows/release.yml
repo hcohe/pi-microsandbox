@@ -307,7 +307,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Resolve and verify the public configured image cohort
+      - name: Resolve and verify the public configured image
         shell: bash
         env:
           EXPECTED_DEFAULT_REFERENCE: ${{ steps.image.outputs.tag_reference }}
@@ -328,7 +328,7 @@ jobs:
             if [[ "$variant" == "default" ]]; then
               saw_default=true
               if [[ "$image_reference" != "$EXPECTED_DEFAULT_REFERENCE" ]]; then
-                echo "Generated default cohort reference ${image_reference} does not match configured ${EXPECTED_DEFAULT_REFERENCE}." >&2
+                echo "Generated default image reference ${image_reference} does not match configured ${EXPECTED_DEFAULT_REFERENCE}." >&2
                 exit 1
               fi
             fi
@@ -366,7 +366,7 @@ jobs:
           done < "$refs"
 
           if [[ "$saw_default" != true || ! -s "$resolved" ]]; then
-            echo "The generated image cohort did not contain the configured default variant." >&2
+            echo "The generated image references did not contain the configured default image." >&2
             exit 1
           fi
 
@@ -377,7 +377,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Verify provenance for the immutable image cohort
+      - name: Verify provenance for the immutable image
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

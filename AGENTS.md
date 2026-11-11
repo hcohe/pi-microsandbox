@@ -53,6 +53,6 @@
 - Repository auto-merge and strict main CI are enabled with zero required reviews and admin/bot bypass disabled. Package tag creation ruleset `26100334` and update/delete ruleset `23345899` preserve the existing human exception; add the installed App only to creation (Always allow), never immutability or main. Leave image-tag rules unchanged.
 - The App-published release triggers `.github/workflows/release.yml`; preserve its safeguards that verify one assembled tarball and publish those exact bytes through OIDC automatically. Keep npm trusted publisher fields owner `hcohe`, repository `pi-microsandbox`, workflow filename `release.yml` (no path), environment `npm`. The environment permits only `v*` tags without required reviewers.
 - Manual Release Please dispatch is recovery-only on `main`. Unchanged existing PRs are not returned by the pinned action; if auto-merge was not enabled, verify that exact release PR and enable squash auto-merge in the UI without bypass. Do not add npm tokens, repack artifacts, or move tags. Rerun the existing failed npm workflow/jobs when safe; npm versions are immutable.
-- Container images are released independently with `image-vX.Y.Z` tags. Publish and verify an image cohort before updating the package's digest-pinned default image.
+- Container images are released independently with `image-vX.Y.Z` tags. Publish and verify an image before updating the package's digest-pinned default image.
 
 See `docs/development.md` for detailed development, packaging, test, and release procedures.
