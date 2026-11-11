@@ -26,7 +26,7 @@ test("Dockerfile source is atomic by scope and scalar provenance reflects the ge
   const f = await fixture(t);
   await f.write(f.global, "FROM scratch\n");
   let result = await resolveConfig({ ...f.input, env: { PI_MSB_IMAGE: "env-image" }, cliOverridesToml: 'image="cli-image"' });
-  assert.match(result.config.image, /^localhost\/pi-msb-build:unloaded$/);
+  assert.match(result.config.image, /^localhost\/pi-msb-selected:[a-f0-9]{64}$/);
   assert.equal(result.config.pullPolicy, "never");
   assert.equal(result.provenance.image, "host-default");
   assert.equal(result.provenance.pullPolicy, "host-default");
@@ -119,14 +119,14 @@ test("agent-dir symlink is supported but descendants, hardlinks, collisions and 
   const context = join(dirname(f.project), "build-context");
   await fs.mkdir(context);
   await fs.symlink(join(f.cwd, "secret"), join(context, "link"));
-  await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/);
+  await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image));
   await fs.unlink(join(context, "link"));
   await f.write(join(f.cwd, "secret"), "private");
   await fs.link(join(f.cwd, "secret"), join(context, "hardlink"));
-  await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/);
+  await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image));
   await fs.unlink(join(context, "hardlink"));
   await f.write(join(context, "Dockerfile"), "FROM bad");
-  await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/);
+  await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image));
   await fs.unlink(join(context, "Dockerfile"));
   await fs.rm(context, { recursive: true });
   await fs.symlink(f.cwd, context);
@@ -143,7 +143,7 @@ test("Dockerfile snapshot bounds and host exposure checks fail closed", async (t
   const context = join(dirname(f.global), "build-context");
   await f.write(join(context, "large"), "");
   await fs.truncate(join(context, "large"), BUILD_LIMITS.bytes + 1);
-  await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/);
+  await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image));
   await fs.unlink(join(context, "large"));
   await f.write(f.paths.global, `mounts=[{type="dir",host_path=${JSON.stringify(context)},guest_path="/context",readonly=true}]`);
   await assert.rejects(resolveConfig(f.input), /must not expose Dockerfile/);
@@ -157,7 +157,7 @@ test("settings inspections and unrelated saves preserve discovered source withou
   await f.write(f.paths.project, "cpus=2\n");
   const editor = new SettingsEditor(f.input, "source-test");
   const inspection = await editor.inspect();
-  assert.match(JSON.stringify(inspection), /localhost\/pi-msb-build/);
+  assert.match(JSON.stringify(inspection), /localhost\/pi-msb-selected/);
   assert.deepEqual(inspection.warnings, []);
   assert.match(JSON.stringify(inspection.origins), /"image":"host-project"/);
   const draft = await editor.open("project");
@@ -187,14 +187,14 @@ test("dedicated context rejects excessive depth/entries and non-regular socket f
   await f.write(f.project, "FROM scratch\n");
   const context = join(dirname(f.project), "build-context");
   await fs.mkdir(join(context, ...Array<string>(BUILD_LIMITS.depth + 1).fill("deep")), { recursive: true });
-  await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/);
+  await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image));
   await fs.rm(context, { recursive: true }); await fs.mkdir(context);
   await Promise.all(Array.from({ length: BUILD_LIMITS.entries }, (_, index) => fs.writeFile(join(context, String(index)), "")));
-  await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/);
+  await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image));
   await fs.rm(context, { recursive: true }); await fs.mkdir(context);
   const { createServer } = await import("node:net");
   const server = createServer();
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(join(context, "socket"), resolve); });
-  try { await assert.rejects(resolveConfig(f.input), /safely inspected|could not be safely verified/); }
+  try { await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image)); }
   finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });

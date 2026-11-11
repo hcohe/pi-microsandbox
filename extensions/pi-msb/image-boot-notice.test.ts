@@ -9,7 +9,7 @@ import type { DockerfileSource } from "./image-source.ts";
 
 const source: DockerfileSource = {
   dockerfile: "/dotfiles/agent/pi-microsandbox/projects/Code/kah-movil/Dockerfile",
-  agentRoot: "/dotfiles/agent", agentAlias: "/home/user/pi/agent", cacheDir: "/dotfiles/agent/pi-microsandbox/build-cache",
+  agentRoot: "/dotfiles/agent", agentAlias: "/home/user/pi/agent",
   scope: "host-project", identity: "loaded", platform: "linux/arm64",
 };
 
@@ -114,7 +114,7 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     await fs.writeFile(dockerfile,'FROM scratch\\n');
     await lifecycle('session_start'); // unloaded source fails closed before boot
     assert.equal(integration.control.getState().status,'unavailable'); assert.equal(custom().length,0);
-    const selected=(await resolveConfig(input)).imageBuild;
+    const selected=(await resolveConfig({...input,imageSdkLoader:async()=>sdk})).imageBuild;
     const snapshot=await snapshotDockerfile(selected,DEFAULT_CONFIG.image);
     const buildSource={...selected,identity:snapshot.identity};
     const built=await integration.control.buildDockerfile({source:buildSource});
@@ -143,7 +143,7 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     assert.equal(custom().length,4,'headless boot must not notify');
     ctx.mode='rpc'; ctx.hasUI=true;
     const imageGet=sdk.Image.get; sdk.Image.get=async()=>{throw Error('missing loaded image');};
-    await assert.rejects(integration.control.reload(),/activation failed/);
+    await assert.rejects(integration.control.reload(),/activation failed|could not be safely/);
     assert.equal(custom().length,4,'unverifiable loaded image must not announce boot');
     sdk.Image.get=imageGet;
     await integration.control.setEnabled(false); await integration.control.reload();

@@ -1,11 +1,10 @@
-import { scanContext } from "./build-context-storage.ts";
 import { readLoadedImage } from "./image-artifact.ts";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { nativeBuildPlatform, buildImageReference, discoverDockerfile, type DockerfileSource } from "./image-source.ts";
+import { nativeBuildPlatform, selectedImageReference, discoverDockerfile, type DockerfileSource } from "./image-source.ts";
 import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
 import { projectConfigPath } from "./project-storage-path.ts";
 import { repositoryMetadata, type RepositoryMetadata } from "./repository-catalog.ts";
@@ -120,6 +119,8 @@ export interface ResolveConfigInput {
   cliOverridesToml?: string;
   /** Memory-only, authoritative layer above host policy. */
   temporaryOverrides?: DeepPartial<Config>;
+  /** Opt-in execution-time native selection lookup; passive resolution never loads the SDK. */
+  imageSdkLoader?: import("./image-artifact.ts").ImageSdkLoader;
   readFile?: (path: string) => Promise<string | null>;
   exists?: (path: string) => Promise<boolean>;
   realpath?: (path: string) => Promise<string>;
@@ -901,7 +902,7 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   ];
   const hostLayers: ParsedConfigLayer[] = [];
   const presentHostPolicies = new Set<string>();
-  const buildSources = new Map<ConfigLayerName, Pick<DockerfileSource, "dockerfile" | "agentRoot" | "agentAlias" | "cacheDir" | "scope">>();
+  const buildSources = new Map<ConfigLayerName, Pick<DockerfileSource, "dockerfile" | "agentRoot" | "agentAlias" | "scope">>();
   const hostPolicyPaths: string[] = [];
   for (const [name, file, lexicalFile] of hostFiles) {
     // Protect even missing policy locations, including symlinked parents, so a
@@ -951,12 +952,11 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
     if (Object.hasOwn(policy.value, "image")) break;
     const dockerfile = join(dirname(file), "Dockerfile");
     try {
-      const source = { dockerfile, agentRoot: targets.canonicalAgentDir, agentAlias: targets.agentDir, cacheDir: join(targets.canonicalAgentDir, "pi-microsandbox", "build-cache"), scope: name };
+      const source = { dockerfile, agentRoot: targets.canonicalAgentDir, agentAlias: targets.agentDir, scope: name };
       const exists = await discoverDockerfile(targets.canonicalAgentDir, dockerfile);
       // A loaded selection survives missing editable source, never an unsafe source layout.
-      const loaded = await readLoadedImage({ ...source, platform: nativeBuildPlatform() });
+      const loaded = input.imageSdkLoader ? await readLoadedImage({ ...source, platform: nativeBuildPlatform() }, input.imageSdkLoader) : undefined;
       if (exists || loaded) {
-        await scanContext(join(dirname(dockerfile), "build-context"));
         policy.value.image = `pi-msb-discovered:${name}`;
         buildSources.set(name, source);
         break;
@@ -982,9 +982,9 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   if (selectedSource && merged.value.image === `pi-msb-discovered:${selectedSource.scope}`) {
     try {
       const platform = nativeBuildPlatform();
-      const loaded = await readLoadedImage({ ...selectedSource, platform });
-      imageBuild = { ...selectedSource, identity: loaded?.artifact.artifactId ?? "unloaded", platform, ...(loaded ? { loadedDigest: loaded.digest } : {}) };
-      merged.value.image = buildImageReference(imageBuild.identity);
+      const loaded = input.imageSdkLoader ? await readLoadedImage({ ...selectedSource, platform }, input.imageSdkLoader) : undefined;
+      imageBuild = { ...selectedSource, identity: "unloaded", platform, ...(loaded ? { loadedDigest: loaded.digest } : {}) };
+      merged.value.image = selectedImageReference(imageBuild);
       merged.value.pullPolicy = "never";
       merged.provenance.pullPolicy = selectedSource.scope;
     } catch { throw new ConfigError(["host-owned loaded Dockerfile selection could not be safely verified"]); }

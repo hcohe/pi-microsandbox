@@ -90,5 +90,10 @@ export function fakeSdk(calls: string[], initial?: { name: string; status: strin
     async get(name: string) { const handle = sandboxes.get(name); if (!handle) throw notFound(); return handle; },
     async listWith() { return { sandboxes: [], nextCursor: undefined }; },
   };
-  return { Sandbox };
+  return { Sandbox, defaultBackendKind: () => "local", Image: {
+    get: async () => { throw Object.assign(new Error("image missing"), { code: "imageNotFound" }); },
+    inspect: async () => { throw new Error("Unexpected image inspection"); },
+    load: async () => { throw new Error("Unexpected image import"); },
+    save: async () => { throw new Error("Unexpected image export"); },
+  } };
 }

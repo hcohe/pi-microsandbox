@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { fakeSdk } from "./fake-msb-sdk.ts";
@@ -64,14 +65,35 @@ export function buildSdk(calls: string[], hooks: {
     return { defaultEgress: "deny", defaultIngress: "allow", rules: [{ public: true }, { dns: true }] };
   } };
   sdk.Image = {
-    get: async (reference: string) => { calls.push(`image-get:${reference}`); if (!images.has(reference)) throw new Error("missing"); return images.get(reference); },
+    inspect: async (reference: string) => { const image = await sdk.Image!.get(reference); return { handle: image, config: { digest: images.get(reference).configDigest } as any, layers: [] }; },
+    save: async (reference, options) => {
+      calls.push(`image-save:${reference}`);
+      await sdk.Image!.get(String(reference));
+      // Native save legitimately rewrites config/rootfs bytes on export.
+      const config = JSON.stringify({ os: "linux", architecture: nativeBuildPlatform().split("/")[1], rootfs: { type: "layers", diff_ids: [] }, rewritten: true });
+      await fs.writeFile(options.outputPath, tarArchive({ "manifest.json": JSON.stringify([{ Config: "config.json", RepoTags: [reference], Layers: ["layer.tar"] }]), "config.json": config, "layer.tar": "layer bytes" }));
+    },
+    get: async (reference: string) => { calls.push(`image-get:${reference}`); if (!images.has(reference)) throw Object.assign(new Error("missing"), { code: "imageNotFound" }); return images.get(reference); },
     load: async (path: string, options?: { tag?: string }) => {
       calls.push(`image-load:${path}`);
       await hooks.import?.();
       if (hooks.failStep === "import") throw new Error("PRIVATE IMPORT OUTPUT");
-      const tag = options!.tag!;
-      images.set(tag, { reference: tag, architecture: nativeBuildPlatform().split("/")[1], os: "linux", manifestDigest: `sha256:${"a".repeat(64)}` });
-      return [images.get(tag)];
+      const archive = await fs.readFile(path);
+      // Read the same tiny Docker tar representation used by the builder fixture.
+      let position = 0; const files: Record<string, Buffer> = {};
+      while (position < archive.length && archive[position] !== 0) {
+        const header = archive.subarray(position, position + 512);
+        const name = header.subarray(0, 100).toString().replace(/\0.*$/s, "");
+        const size = parseInt(header.subarray(124, 136).toString().replace(/\0.*$/s, ""), 8);
+        files[name] = archive.subarray(position + 512, position + 512 + size);
+        position += 512 + Math.ceil(size / 512) * 512;
+      }
+      const manifest = JSON.parse(files["manifest.json"]!.toString())[0];
+      const config = files[manifest.Config]!;
+      const digest = `sha256:${createHash("sha256").update(config).digest("hex")}`;
+      const refs = [...manifest.RepoTags, ...(options?.tag ? [options.tag] : [])];
+      for (const tag of refs) images.set(tag, { reference: tag, architecture: nativeBuildPlatform().split("/")[1], os: "linux", manifestDigest: digest, configDigest: digest });
+      return refs.map((tag) => images.get(tag));
     },
   };
   sdk.Sandbox.builder = (name: string) => {

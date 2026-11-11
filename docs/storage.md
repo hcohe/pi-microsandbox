@@ -18,7 +18,9 @@ not its Git ancestors or sibling directories outside cwd.
 | Ordinary guest-local files | VM root filesystem | No |
 | Inner Docker images, containers, cache | Guest `/var/lib/docker` | No |
 | Session setting overrides | Extension memory | Yes within the same Pi session; cleared by reset, Pi `/reload`, session/workspace switch, or shutdown |
-| Project/Global settings | Host-owned agent directory | Yes |
+| Project/Global settings and authored Dockerfile/context | Host-owned agent directory | Yes |
+| Approved custom images and selected aliases | Microsandbox native image cache | Yes, until native prune/removal |
+| Pending build exports | Private OS temp + process memory | No restart recovery; cleaned on import/supersession/shutdown |
 
 Everything inside cwd stays visible: `.git`, `.env`, ignored files, and
 untracked files. Git ignore rules do not protect secrets. Sessions with

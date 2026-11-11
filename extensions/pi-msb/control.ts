@@ -1,3 +1,4 @@
+import { PendingArtifacts, selectionVersion } from "./image-artifact.ts";
 import { homedir } from "node:os";
 import type { DockerfileSource } from "./image-source.ts";
 import { openDockerfile } from "./dockerfile-storage.ts";
@@ -57,7 +58,7 @@ export interface MicrosandboxModule {
   Sandbox: AnyRecord;
   NetworkPolicy?: AnyRecord;
   Rule?: AnyRecord;
-  Image?: Pick<typeof import("microsandbox").Image, "get" | "load">;
+  Image?: Pick<typeof import("microsandbox").Image, "get" | "load" | "save" | "inspect">;
   defaultBackendKind?: () => "local" | "cloud";
 }
 
@@ -263,6 +264,13 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   const resolutionSanitizers = new WeakMap<ResolvedConfig, SettingsSanitizer>();
   const requestSanitizers = new WeakMap<Config, SettingsSanitizer>();
   let projectTrusted = true;
+  const artifacts = new PendingArtifacts();
+  const artifactOperations = new Set<Promise<unknown>>();
+  const withArtifactOperation = async <T>(operation: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    const pending = operation(AbortSignal.any([buildAbort.signal, ...(signal ? [signal] : [])]));
+    artifactOperations.add(pending);
+    try { return await pending; } finally { artifactOperations.delete(pending); }
+  };
   const settingsInput = () => ({ cwd, repoRoot: workspace?.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env });
   const settings = new SettingsEditor(settingsInput(), sessionId);
   // Diagnostics never resolve configuration or inspect settings. Only this small,
@@ -583,8 +591,15 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   let managerIdentity: SessionExecutionIdentity | undefined;
   const manager = createSandboxManager(deps);
+  const shutdown = manager.shutdown.bind(manager);
+  manager.shutdown = async () => {
+    invalidateActivation();
+    await Promise.allSettled([...artifactOperations]);
+    try { await shutdown(); } finally { await artifacts.dispose(); }
+  };
   let buildAbort = new AbortController();
   let activationGeneration = 0;
+  let bootedDockerfileDigest: string | undefined;
   const invalidateActivation = () => {
     capturingBootFailure = false;
     activationGeneration++;
@@ -611,6 +626,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     diagnosticFailure = "runtime_start_failed";
     capturingBootFailure = true;
     try {
+      if (source && manager.isActive() && source.loadedDigest !== bootedDockerfileDigest) request.forceRecreate = true;
       if (source) {
         request.blockHostFallback = true;
         try {
@@ -637,6 +653,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       if (approvalBound) await assertApproval();
       if (!current()) return visibleState();
       if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
+      if (result.status === "active") bootedDockerfileDigest = source?.loadedDigest;
       return result;
     } catch (error) {
       if (approvalBound && generation === activationGeneration && execution.context.current() === identity && !manager.isActive()) {
@@ -737,14 +754,17 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     requestSanitizers.set(snapshot, resolutionSanitizers.get(resolved) ?? createSettingsSanitizer([snapshot]));
     return snapshot;
   };
-  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false): Promise<ResolvedConfig> => {
+  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false, nativeImages = false): Promise<ResolvedConfig> => {
     hostExecutionToken = {};
     configReady = false;
     const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
     if (approvedSettingsReload) settings.assertSession(input, sessionId);
     else settings.configureSession(input, sessionId);
     let sanitize!: SettingsSanitizer;
-    const next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary() }, (captured) => { sanitize = captured; });
+    let next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary(), ...(nativeImages ? { imageSdkLoader: async () => loadSdk() } : {}) }, (captured) => { sanitize = captured; });
+    if (!nativeImages && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+      next = await resolveConfig({ ...input, temporaryOverrides: settings.temporary(), imageSdkLoader: async () => loadSdk() }, (captured) => { sanitize = captured; });
+    }
     // Shared diagnostic state is committed by callers only after their lifecycle
     // identity checks, never by a resolution that may have become obsolete.
     resolutionSanitizers.set(next, sanitize);
@@ -752,6 +772,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
 
   const configureSessionInternal = async (setup: SessionSetup, isCurrent: () => boolean): Promise<RuntimeState> => {
+    await artifacts.dispose();
+    if (!isCurrent()) return visibleState();
     sessionId = setup.sessionId;
     cwd = setup.cwd;
     configReady = false;
@@ -865,8 +887,10 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return openDockerfile(settingsInput(), selected.hostRoot, scope, check,
         [...configSnapshot().mounts, ...(currentAdoption()?.mounts ?? [])]);
     },
-    async buildDockerfile(options) { return buildDockerfileImage({ ...options, sdk: await sdk() }); },
-    async loadDockerfile(options) { return loadDockerfileImage({ ...options, sdk: await sdk() }); },
+    async readDockerfileArtifact(source, id) { return artifacts.read(source, id); },
+    async dockerfileSelectionVersion(source) { return selectionVersion(await sdk(), source); },
+    async buildDockerfile(options) { return withArtifactOperation(async (signal) => buildDockerfileImage({ ...options, signal, artifacts, sdk: await sdk() }), options.signal); },
+    async loadDockerfile(options) { return withArtifactOperation(async (signal) => loadDockerfileImage({ ...options, signal, artifacts, sdk: await sdk() }), options.signal); },
     async getDiagnostics() {
       const state = visibleState();
       const statuses = ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"];
@@ -938,7 +962,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
             settingsReady = true;
             cwd = workspace.cwd;
             activeProjectRoot = workspace.guestRoot;
-            const next = await resolveForWorkspace(workspace);
+            const next = await resolveForWorkspace(workspace, false, true);
             assertCurrent();
             resolved = next;
             cacheDiagnosticConfig(next.config);

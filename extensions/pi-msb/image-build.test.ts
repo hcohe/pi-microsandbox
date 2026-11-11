@@ -6,13 +6,13 @@ import { buildSdk, dockerArchive, tarArchive } from "../../test/image-build-fixt
 import { DEFAULT_CONFIG, hostConfigPaths, resolveConfig } from "./config.ts";
 import { createMsbIntegration } from "./control.ts";
 import { BUILD_FAILURE, buildDockerfileImage, loadDockerfileImage, ImagePhaseError } from "./image-build.ts";
-import { artifactPath, buildRecordPath, readArtifact, selectionPath } from "./image-artifact.ts";
+import { pendingArtifacts, readArtifact, readLoadedImage, PendingArtifacts } from "./image-artifact.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
-import { buildImageReference, nativeBuildPlatform, snapshotDockerfile } from "./image-source.ts";
+import { buildImageReference, selectedImageReference, nativeBuildPlatform, snapshotDockerfile } from "./image-source.ts";
 
 async function fixture(t: TestContext) {
   const root = await fs.mkdtemp("/tmp/pi-msb-builder-test-");
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(async () => { await pendingArtifacts.dispose(); await fs.rm(root, { recursive: true, force: true }); });
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
   await fs.mkdir(cwd); await fs.mkdir(agentDir);
@@ -37,7 +37,7 @@ async function assertClean(calls: string[]) { for (const path of temporaryPaths(
 test("builder exports a reusable verified artifact without import or runtime calls", async (t) => {
   const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
   sdk.Image!.load = async () => { assert.fail("build must not import"); };
-  sdk.Image!.get = async () => { assert.fail("build must not inspect loaded images"); };
+
   const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
   assert.equal(built.cacheHit, false);
   assert.ok(calls.includes("builder-cpus:2")); assert.ok(calls.includes("builder-memory:4096"));
@@ -81,9 +81,7 @@ test("changed content invalidates image identity; changed source after resolutio
   const aliased = await resolveConfig({ ...f.input, agentDir: alias });
   await fs.unlink(alias); await fs.symlink(f.input.cwd, alias);
   await assert.rejects(buildDockerfileImage({ sdk, source: { ...aliased.imageBuild!, identity: f.source.identity }, acquireLock }), ImagePhaseError);
-  await fs.rm(next.imageBuild!.cacheDir, { recursive: true });
-  await fs.symlink(f.input.cwd, next.imageBuild!.cacheDir);
-  await assert.rejects(buildDockerfileImage({ sdk, source: next.imageBuild!, acquireLock }), ImagePhaseError);
+
 });
 
 test("cross-process lock deduplicates concurrent content builds and validates cached digest/platform", async (t) => {
@@ -98,9 +96,9 @@ test("cross-process lock deduplicates concurrent content builds and validates ca
   gate.resolve();
   await Promise.all([first, second]);
   assert.equal(calls.filter((call) => call === "builder-create").length, 1);
-  const record = JSON.parse(await fs.readFile(buildRecordPath(f.source), "utf8"));
-  await fs.appendFile(artifactPath(f.source, record.artifactId), "tampered");
-  await assert.rejects(buildDockerfileImage({ sdk, source: f.source }), /content mismatch/);
+  const cached = await pendingArtifacts.current(f.source);
+  await fs.appendFile(cached!.path, "tampered");
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source }), /Approved artifact changed/);
   assert.equal(calls.filter((call) => call === "builder-create").length, 1);
   await assertClean(calls);
 });
@@ -114,7 +112,7 @@ for (const failStep of ["create", "build"]) test(`build ${failStep} failure is d
     assert.equal(calls.filter((call) => call.startsWith("builder-get:")).length, 1);
     assert.match(calls.find((call) => call.startsWith("builder-record-destroy:"))!, /:10000$/);
   }
-  assert.equal(await fs.stat(join(f.source.cacheDir, `${f.source.identity}.json`)).then(() => true, () => false), false);
+  assert.equal(await fs.stat(join(f.source.agentRoot, "pi-microsandbox", "build-cache")).then(() => true, () => false), false);
   await assertClean(calls);
 });
 
@@ -144,7 +142,7 @@ test("cancellation awaits late creation, kills execution streams and cleans the 
 
 test("archive preflight rejects extra image/tags, wrong platform, links, truncation and strips all ignored alias metadata", async (t) => {
   const f = await fixture(t);
-  const reference = buildImageReference(f.source.identity);
+  const reference = buildImageReference(f.source);
   const input = join(f.root, "input.tar"); const output = join(f.root, "validated.tar");
   const prepare = () => prepareBuildArchive(input, output, reference, nativeBuildPlatform());
   const config = JSON.stringify({ os: "linux", architecture: nativeBuildPlatform().split("/")[1] });
@@ -207,7 +205,7 @@ for (const failure of ["create", "prepare"]) test(`built-image runtime ${failure
   const sdk = buildSdk(calls);
   const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
   await loadDockerfileImage({ sdk, source: f.source, artifactId: built.artifact.artifactId, expectedSelectionVersion: "missing" });
-  f.resolved = await resolveConfig(f.input);
+  f.resolved = await resolveConfig({ ...f.input, imageSdkLoader: async () => sdk });
   const builder = sdk.Sandbox.builder;
   sdk.Sandbox.builder = (name: string) => {
     const value = builder(name);
@@ -261,7 +259,7 @@ test("delayed SDK acquisition cannot borrow a replacement activation source/cont
   assert.equal(calls.includes("builder-create"), false);
   assert.equal(calls.some((call) => call.startsWith("create:")), false);
   assert.equal(persisted.some((entry) => entry.enabled === true), false);
-  assert.equal(await fs.stat(f.source.cacheDir).then(() => true, () => false), false);
+  assert.equal(await fs.stat(join(f.source.agentRoot, "pi-microsandbox", "build-cache")).then(() => true, () => false), false);
 });
 
 test("builder canonicalizes both private staging binds through an aliased temporary root", async (t) => {
@@ -405,12 +403,13 @@ test("failed boot cleanup never sweeps previously registered builder names", asy
 for (const expectation of [undefined, "missing"]) test(`direct load cannot bypass approval-time selection expectation (${expectation ?? "omitted"})`, async (t) => {
   const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
   const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
-  const replacement = '{"foreign":"selection"}';
-  await fs.writeFile(selectionPath(f.source), replacement);
+  const replacement = `sha256:${"f".repeat(64)}`;
+  const get = sdk.Image!.get;
+  sdk.Image!.get = async (reference) => reference === selectedImageReference(f.source) ? { reference, manifestDigest: replacement, os: "linux", architecture: nativeBuildPlatform().split("/")[1] } as any : get(reference);
   await assert.rejects(loadDockerfileImage({ sdk, source: f.source, artifactId: built.artifact.artifactId,
     expectedSelectionVersion: expectation as string }), /expectation required|selection changed after approval/);
   assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
-  assert.equal(await fs.readFile(selectionPath(f.source), "utf8"), replacement);
+  assert.equal((await sdk.Image!.get(selectedImageReference(f.source))).manifestDigest, replacement);
 });
 
 
@@ -443,7 +442,7 @@ for (const mode of ["nonzero", "silentEOF", "partialEOF", "transport", "timeout"
     assert.doesNotMatch(JSON.stringify(error.diagnostics), /SECRET SDK MESSAGE/);
     return true;
   });
-  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  assert.equal(await pendingArtifacts.current(f.source), undefined);
   assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
   await assertClean(calls);
   // Failure is not cached; explicit retry builds and subsequent reuse is verified.
@@ -473,7 +472,7 @@ for (const source of ["user", "aggregateDeadline"] as const) test(`export cancel
     assert.equal(error.diagnostics?.observations?.builder.outcome, "skippedCancellation");
     return true;
   });
-  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  assert.equal(await pendingArtifacts.current(f.source), undefined);
   await assertClean(calls);
 });
 
@@ -498,7 +497,7 @@ for (const probe of ["reject", "pending", "replacement"] as const) test(`best-ef
     assert.doesNotMatch(JSON.stringify(error.diagnostics), /PRIVATE/);
     return true;
   });
-  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  assert.equal(await pendingArtifacts.current(f.source), undefined);
   // Fake VM only: prove uncertain destruction retains staging before test teardown.
   for (const path of temporaryPaths(calls)) assert.ok((await fs.stat(path)).isDirectory());
   for (const directory of new Set(temporaryPaths(calls).map(dirname))) await fs.rm(directory, { recursive: true, force: true });
@@ -534,6 +533,137 @@ test("cancellation interrupts pending diagnostic observation without waiting for
     return true;
   });
   gate.resolve();
-  await assert.rejects(fs.stat(buildRecordPath(f.source)), { code: "ENOENT" });
+  assert.equal(await pendingArtifacts.current(f.source), undefined);
   await assertClean(calls);
+});
+
+test("native reference keys bind canonical source path, full build identity and platform; selected alias survives edits", async (t) => {
+  const f = await fixture(t);
+  const other = { ...f.source, dockerfile: join(dirname(f.source.dockerfile), "other", "Dockerfile") };
+  assert.notEqual(buildImageReference(f.source), buildImageReference(other));
+  assert.notEqual(selectedImageReference(f.source), selectedImageReference(other));
+  const edited = { ...f.source, identity: "f".repeat(64) };
+  assert.notEqual(buildImageReference(f.source), buildImageReference(edited));
+  assert.equal(selectedImageReference(f.source), selectedImageReference(edited));
+  assert.notEqual(selectedImageReference(f.source), selectedImageReference({ ...f.source, platform: "linux/other" }));
+});
+
+test("approved native cache export can rewrite config/digest, requires new exact archive approval, and never writes policy sidecars", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  const before = await fs.readdir(join(f.source.agentRoot, "pi-microsandbox"), { recursive: true });
+  const first = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  const original = await loadDockerfileImage({ sdk, source: f.source, artifactId: first.artifact.artifactId, expectedSelectionVersion: "missing" });
+  await assert.rejects(readArtifact(f.source, first.artifact.artifactId), /unavailable/);
+  const imports = calls.filter((call) => call.startsWith("image-load:")).length;
+  const cached = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  assert.equal(cached.cacheHit, true);
+  assert.notEqual(cached.artifact.archiveDigest, first.artifact.archiveDigest);
+  assert.notEqual(cached.artifact.configDigest, first.artifact.configDigest);
+  assert.equal(calls.filter((call) => call.startsWith("image-load:")).length, imports, "export is never import authorization");
+  const next = await loadDockerfileImage({ sdk, source: f.source, artifactId: cached.artifact.artifactId, expectedSelectionVersion: original.digest });
+  assert.notEqual(next.digest, original.digest, "SDK save/reimport may legitimately change native manifest identity");
+  await next.assertSelected();
+  assert.equal(calls.filter((call) => call === "builder-create").length, 1);
+  assert.deepEqual(await fs.readdir(join(f.source.agentRoot, "pi-microsandbox"), { recursive: true }), before);
+});
+
+for (const failure of ["database", "metadata", "backend"] as const) test(`native cache ${failure} is not a cache miss or authorization to build`, async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  sdk.Image!.get = async (reference) => {
+    if (failure === "database") throw Object.assign(new Error("database unavailable"), { code: "database" });
+    if (failure === "backend") sdk.defaultBackendKind = () => "cloud";
+    return { reference, manifestDigest: "bad", os: "linux", architecture: "wrong" } as any;
+  };
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), /metadata mismatch|database unavailable/);
+  assert.equal(calls.includes("builder-create"), false);
+  assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
+});
+
+test("native build ref is digest-pinned before and after save; concurrent replacement fails closed", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  const first = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  await loadDockerfileImage({ sdk, source: f.source, artifactId: first.artifact.artifactId, expectedSelectionVersion: "missing" });
+  const save = sdk.Image!.save, get = sdk.Image!.get;
+  let saved = false;
+  sdk.Image!.save = async (...args) => { await save(...args); saved = true; };
+  sdk.Image!.get = async (ref) => saved && ref === buildImageReference(f.source) ? { ...await get(ref), manifestDigest: `sha256:${"f".repeat(64)}` } : get(ref);
+  await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), /changed during export/);
+  assert.equal(await pendingArtifacts.current(f.source), undefined);
+  assert.equal(calls.filter((call) => call === "builder-create").length, 1);
+});
+
+test("partial additive native import reports unknown durable effects and withholds selection proof", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  const load = sdk.Image!.load;
+  sdk.Image!.load = async (...args) => (await load(...args)).slice(0, 1);
+  let published = false;
+  await assert.rejects(loadDockerfileImage({ sdk, source: f.source, artifactId: built.artifact.artifactId, expectedSelectionVersion: "missing", onSelectionPublished: () => { published = true; } }), (error: unknown) => {
+    assert.ok(error instanceof ImagePhaseError);
+    assert.equal(error.imported, "unknown"); assert.equal(error.selected, "unknown");
+    assert.match(error.message, /partially changed/); return true;
+  });
+  assert.equal(published, false);
+  assert.ok(await sdk.Image!.get(selectedImageReference(f.source)), "native mutation cannot be rolled back or claimed absent");
+  assert.ok(await readArtifact(f.source, built.artifact.artifactId), "valid same-process pending artifact remains retryable");
+});
+
+test("already loaded exact artifact reuses both native refs without mutation", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  const candidate = await readArtifact(f.source, built.artifact.artifactId);
+  const saved = join(f.root, "original.tar"); await fs.copyFile(candidate.path, saved);
+  const first = await loadDockerfileImage({ sdk, source: f.source, artifactId: built.artifact.artifactId, expectedSelectionVersion: "missing" });
+  const pending = await pendingArtifacts.publish(f.source, saved, async () => undefined);
+  sdk.Image!.load = async () => { assert.fail("exact native artifact reuse must not mutate aliases"); };
+  const next = await loadDockerfileImage({ sdk, source: f.source, artifactId: pending.artifactId, expectedSelectionVersion: first.digest });
+  assert.equal(next.digest, first.digest); await next.assertSelected();
+});
+
+test("pending owner cleanup invalidates in-flight publication and does not recover exports across restart", async (t) => {
+  const f = await fixture(t); const calls: string[] = []; const sdk = buildSdk(calls);
+  const artifacts = new PendingArtifacts();
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock, artifacts });
+  const candidate = await artifacts.read(f.source, built.artifact.artifactId);
+  await artifacts.dispose();
+  await assert.rejects(fs.stat(candidate.path), { code: "ENOENT" });
+  await assert.rejects(new PendingArtifacts().read(f.source, built.artifact.artifactId), /unavailable/);
+  const second = await buildDockerfileImage({ sdk, source: f.source, acquireLock, artifacts });
+  const retained = await artifacts.read(f.source, second.artifact.artifactId);
+  const copy = join(f.root, "copy.tar"); await fs.copyFile(retained.path, copy);
+  await assert.rejects(artifacts.publish(f.source, copy, async () => artifacts.dispose()), /lifetime ended/);
+  assert.equal(await artifacts.current(f.source), undefined);
+});
+
+test("stale artifact validation cannot discard an identical replacement", async (t) => {
+  const f = await fixture(t); const artifacts = new PendingArtifacts();
+  t.after(() => artifacts.dispose());
+  const built = await buildDockerfileImage({ sdk: buildSdk([]), source: f.source, acquireLock, artifacts });
+  const previous = await artifacts.read(f.source, built.artifact.artifactId);
+  const saved = join(f.root, "replacement.tar"); await fs.copyFile(previous.path, saved);
+  await artifacts.discard(built.artifact.artifactId);
+  const replacement = await artifacts.publish(f.source, saved, async () => undefined);
+  assert.equal(replacement.artifactId, built.artifact.artifactId);
+  await assert.rejects(previous.assertUnchanged(), { code: "ENOENT" });
+  const current = await artifacts.read(f.source, replacement.artifactId);
+  assert.notEqual(current.path, previous.path);
+  await current.assertUnchanged();
+});
+
+test("pending successful-load discard and shutdown share one idempotent owned removal", async (t) => {
+  const f = await fixture(t); const sdk = buildSdk([]); const artifacts = new PendingArtifacts();
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock, artifacts });
+  const candidate = await artifacts.read(f.source, built.artifact.artifactId);
+  const entered = deferred(), release = deferred(); const rm = fs.rm.bind(fs);
+  let removals = 0;
+  t.mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+    if (String(args[0]) === dirname(candidate.path)) { removals++; entered.resolve(); await release.promise; }
+    return rm(...args);
+  });
+  const discard = artifacts.discard(built.artifact.artifactId);
+  await entered.promise;
+  const dispose = artifacts.dispose(); release.resolve();
+  await Promise.all([discard, dispose]);
+  assert.equal(removals, 1);
+  assert.equal(await artifacts.current(f.source), undefined);
 });
