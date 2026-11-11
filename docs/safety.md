@@ -29,6 +29,8 @@ exact command and execution cwd (the fixed session cwd by default). The Bash tim
 authorized request and is enforced, but has no separate approval-dialog row.
 The dialog warning is exactly:
 `Warning: this operation runs on the host and bypasses any isolation.`
+The inline TUI shows **No / Yes**, with No first and selected by default, an
+arrow marking the selection, and a blank line after the choices.
 Existing host permission is required;
 unresolved configuration/identity and booting/stopping remain blocked. Every call
 needs fresh approval; no grant or automatic host retry is created. Recovery binds

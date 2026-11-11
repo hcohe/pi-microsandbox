@@ -681,7 +681,7 @@ for (const action of ["initial-no", "yes", "escape", "ctrl-c", "abort", "source"
     let complete!: (value: boolean) => void;
     const answer = new Promise<boolean>((resolve) => { complete = resolve; });
     const view = factory({ terminal: { rows: 24, columns: 80 }, requestRender() {} }, { fg: (_role: string, text: string) => text }, new KeybindingsManager(TUI_KEYBINDINGS), complete);
-    assert.deepEqual(view.render(80), ["Do you approve loading local built image using custom Dockerfile?", "", "Scope: Project", "", "Yes", "No"]);
+    assert.deepEqual(view.render(80), ["Do you approve loading local built image using custom Dockerfile?", "", "Scope: Project", "", "→ No", "  Yes", ""]);
     if (action !== "initial-no") { view.handleInput("\x1b[A"); view.render(80); }
     if (action === "source") await fs.writeFile(f.dockerfile, from + "RUN echo changed\n");
     if (action === "selection") await fs.writeFile(selectionPath(f.integration.control.getEffectiveConfig().imageBuild!), '{"foreign":"selection"}');

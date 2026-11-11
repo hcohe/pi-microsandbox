@@ -64,10 +64,10 @@ for (const appearance of ["dark", "light"] as const) test(`host approval is foot
   assert.ok(plain.includes("Tool: bash")); assert.ok(plain.includes("Working directory: /work/repo"));
   assertGreenBaseWithLexerTokens(lines[plain.indexOf("msb --help")]!, "msb --help", theme);
   assert.equal(plain.find((line) => line.startsWith("Warning:")), "Warning: this operation runs on the host and bypasses any isolation.");
-  assert.deepEqual(lines.slice(-2), [theme.fg("accent", "→ ") + theme.fg("accent", "No"), `  ${theme.fg("text", "Yes")}`]);
+  assert.deepEqual(lines.slice(-3), [theme.fg("accent", "→ ") + theme.fg("accent", "No"), `  ${theme.fg("text", "Yes")}`, ""]);
   assert.doesNotMatch(plain.join("\n"), /Timeout|navigate|select|cancel|↑↓|Ctrl|\d+–\d+\/\d+/);
   f.view.handleInput!("\x1b[B");
-  assert.deepEqual(f.view.render(120).slice(-2), [`  ${theme.fg("text", "No")}`, theme.fg("accent", "→ ") + theme.fg("accent", "Yes")]);
+  assert.deepEqual(f.view.render(120).slice(-3), [`  ${theme.fg("text", "No")}`, theme.fg("accent", "→ ") + theme.fg("accent", "Yes"), ""]);
   f.view.handleInput!("\r"); f.view.handleInput!("\r"); assert.deepEqual(f.answers, ["Yes"]); f.view.dispose();
 });
 
@@ -94,9 +94,13 @@ for (const appearance of ["dark", "light"] as const) test(`host approval wraps e
   for (const width of [1, 2, 7, 20, 80]) {
     const lines = f.view.render(width); assert.ok(lines.length <= 18);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    assert.equal(lines.at(-1), "");
   }
   f.terminal.rows = 8;
-  f.view.handleInput!("\x1b[B"); f.view.render(1); f.view.handleInput!("\r");
+  f.view.handleInput!("\x1b[B");
+  const short = f.view.render(1);
+  assert.ok(short.length <= 3); assert.equal(short.at(-1), "");
+  f.view.handleInput!("\r");
   assert.deepEqual(f.answers, [], "hidden Yes cannot authorize");
   f.terminal.rows = 24;
   const seen = new Set<string>();
@@ -170,7 +174,7 @@ for (const Renderer of [TuiMainScreen, TuiAltScreen]) test(`footerless host appr
   try {
     tui.start(); await tick(); assert.equal(tui.hasOverlay(), false);
     assert.ok(root.render(70).some((line) => line.includes("Application footer")));
-    assert.ok(strip(view.render(70).join("\n")).endsWith("→ No\n  Yes"));
+    assert.ok(strip(view.render(70).join("\n")).endsWith("→ No\n  Yes\n"));
     input("\x1b[B"); await tick(); const start = view.render(70);
     input("\x0e"); await tick(); assert.notDeepEqual(view.render(70), start);
     input("\x10"); await tick(); assert.deepEqual(view.render(70), start);

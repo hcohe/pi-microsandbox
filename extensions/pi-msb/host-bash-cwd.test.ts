@@ -133,7 +133,7 @@ for (const appearance of ["dark", "light"] as const) test(`host Bash cwd uses th
     const lines = view.render(1000);
     assert.ok(lines.includes(theme.fg("muted", "Working directory:") + " " + theme.fg("error", f.escape)));
     assert.ok(lines.includes(theme.fg("muted", "Canonical directory (execution target):") + " " + theme.fg("error", f.outside)));
-    assert.ok(strip(lines.join("\n")).endsWith("→ No\n  Yes")); assert.doesNotMatch(strip(lines.join("\n")), /Timeout|navigate|details/);
+    assert.ok(strip(lines.join("\n")).endsWith("→ No\n  Yes\n")); assert.doesNotMatch(strip(lines.join("\n")), /Timeout|navigate|details/);
     view.handleInput("\r"); view.dispose();
   });
   assert.match((await f.request(f.event(f.input(f.escape)))).reason, /denied/);

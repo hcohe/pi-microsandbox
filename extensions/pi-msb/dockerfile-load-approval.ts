@@ -11,7 +11,7 @@ type ApprovalUi = { requestRender(): void; terminal: { rows: number; columns?: n
 
 export function createDockerfileLoadApproval(scope: DockerfileScope, tui: ApprovalUi, theme: Theme, keys: KeybindingsManager,
   done: (approved: boolean) => void, signal: AbortSignal): Component & { dispose(): void } {
-  let selected = 1, renderedSelection = -1, renderedRows = 0, renderedColumns: number | undefined, closed = false;
+  let selected = 0, renderedSelection = -1, renderedRows = 0, renderedColumns: number | undefined, closed = false;
   const height = () => Math.max(1, tui.terminal.rows - 5);
   const cleanup = () => signal.removeEventListener("abort", abort);
   const finish = (approved: boolean) => { if (closed) return; closed = true; cleanup(); done(approved); };
@@ -24,7 +24,8 @@ export function createDockerfileLoadApproval(scope: DockerfileScope, tui: Approv
       if (closed || signal.aborted) return [];
       const wrap = (text: string) => wrapTextWithAnsi(text, Math.max(1, width));
       const lines = [...wrap(theme.fg("accent", DOCKERFILE_LOAD_QUESTION)), "", ...wrap(scopeLine(scope, theme)), "",
-        ...["Yes", "No"].flatMap((choice, index) => wrap(theme.fg(index === selected ? "accent" : "text", choice)))];
+        ...["No", "Yes"].flatMap((choice, index) => wrap(index === selected
+          ? theme.fg("accent", "→ ") + theme.fg("accent", choice) : `  ${theme.fg("text", choice)}`)), ""];
       renderedRows = lines.length; renderedColumns = tui.terminal.columns;
       if (lines.length <= height()) renderedSelection = selected;
       return lines.slice(0, height());
@@ -33,7 +34,7 @@ export function createDockerfileLoadApproval(scope: DockerfileScope, tui: Approv
       if (closed) return;
       if (signal.aborted || keys.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) return finish(false);
       if (keys.matches(data, "tui.select.confirm")) {
-        if (selected === 1) return finish(false);
+        if (selected === 0) return finish(false);
         if (renderedSelection === selected && renderedRows <= height() && renderedColumns === tui.terminal.columns) finish(true);
       } else if (keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down")) {
         selected = 1 - selected; invalidate(); tui.requestRender();

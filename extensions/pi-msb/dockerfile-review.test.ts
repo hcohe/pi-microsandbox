@@ -180,11 +180,12 @@ test("createDockerfileReview width-safe wrapping, bounded scroll/resize and them
   f.view.invalidate(); f.view.render(30); assert.ok(f.renders() > 0); f.view.dispose();
 });
 
-test("Dockerfile review uses the freed footer rows for changed code and ends at Yes", () => {
+test("Dockerfile review uses the freed footer rows for changed code and leaves a blank line after Yes", () => {
   const f = component([candidate("Project", Array.from({ length: 40 }, (_, i) => `+RUN echo line-${i}`).join("\n"))]);
   const lines = f.view.render(90).map(strip);
   assert.equal(lines.length, 18);
-  assert.deepEqual(lines.slice(-4), ["", "─ Apply?", "→ No", "  Yes"]);
+  assert.deepEqual(lines.slice(-4), ["", "→ No", "  Yes", ""]);
+  assert.ok(!lines.some((line) => line.includes("Apply?")));
   assert.ok(lines.includes("+RUN echo line-10"), "removed footer rows are available to the preview");
   f.view.dispose();
 });
@@ -272,8 +273,8 @@ for (const appearance of ["dark", "light"] as const) for (const Renderer of [Tui
     assert.equal(tui.hasOverlay(), false);
     assert.match(strip(view.render(70).join("\n")), /→ No/);
     const layout = strip(root.render(70).join("\n"));
-    assert.ok(layout.indexOf("Chat transcript") < layout.indexOf("Apply?"));
-    assert.ok(layout.indexOf("Apply?") < layout.indexOf("Normal footer"));
+    assert.ok(layout.indexOf("Chat transcript") < layout.indexOf("→ No"));
+    assert.ok(layout.indexOf("→ No") < layout.indexOf("Normal footer"));
     assert.ok(view.render(70).length <= 18, "inline review leaves room for transcript and footer");
     input("\x0e"); await tick(); assert.match(strip(view.render(70).join("\n")), /→ No/);
     input("\x10"); await tick(); assert.match(strip(view.render(70).join("\n")), /→ No/);
@@ -417,17 +418,18 @@ test("dockerfileChangedRows retains all separated changes and header-like source
   assert.match(dockerfileChangedRows(diff("RUN old", "RUN new\r\n")).map((row) => row.text).join("\n"), /Line endings:[\s\S]*\\ No newline at end of file/);
 });
 
-test("inline dialog uses real theme colors and ends at the bottom actions in dark/light", () => {
+test("inline dialog uses real theme colors and pads the bottom actions in dark/light", () => {
   const outputs: string[] = [];
   for (const appearance of ["dark", "light"] as const) {
     initTheme(appearance, false);
     const palette = dialogTheme(appearance);
     const view = createDockerfileReview([candidate("This worktree — app"), candidate("All worktrees — repo")], { requestRender() {}, terminal: { rows: 24 } }, palette, keys, () => {}, new AbortController().signal);
     const lines = view.render(90), plain = lines.map(strip);
-    const code = plain.findIndex((line) => line.startsWith("+RUN")), heading = plain.findIndex((line) => line.includes("Apply?")), no = plain.indexOf("→ No"), lastAction = plain.indexOf("  All worktrees — repo");
-    assert.ok(code >= 0 && code < heading && heading < no && no < lastAction);
-    assert.equal(plain[heading - 1], ""); assert.equal(lastAction, plain.length - 1);
-    assert.equal(lines[heading], palette.fg("borderMuted", "─ ") + palette.fg("accent", "Apply?"));
+    const code = plain.findIndex((line) => line.startsWith("+RUN")), no = plain.indexOf("→ No"), lastAction = plain.indexOf("  All worktrees — repo");
+    assert.ok(code >= 0 && code < no && no < lastAction);
+    assert.equal(plain[no - 1], ""); assert.equal(lastAction, plain.length - 2);
+    assert.equal(plain.at(-1), "");
+    assert.ok(!plain.some((line) => line.includes("Apply?")));
     assert.equal(lines[no], palette.fg("accent", "→ ") + palette.fg("accent", "No"));
     assert.equal(lines[lastAction], `  ${palette.fg("text", "All worktrees — repo")}`);
     assert.match(lines[no]!, /\x1b\[/); outputs.push(lines[no]!);

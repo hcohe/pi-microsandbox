@@ -38,13 +38,13 @@ export function createHostApproval(message: (theme?: Theme) => string, tui: { re
       const w = Math.max(1, width), rows = Math.max(3, Math.min(18, tui.terminal.rows - 5));
       const choices = ["No", "Yes"].flatMap((label, index) => wrapHostApprovalLine(index === selected
         ? theme.fg("accent", "→ ") + theme.fg("accent", label) : `  ${theme.fg("text", label)}`, w));
-      const actionHeight = Math.min(choices.length, rows - 1);
-      const spacing = rows >= choices.length + 3 ? 1 : 0;
-      const height = rows - actionHeight - spacing;
+      const actionHeight = Math.min(choices.length, rows - 2);
+      const spacing = rows >= choices.length + 4 ? 1 : 0;
+      const height = rows - actionHeight - spacing - 1;
       const lines = scroll.render(w);
       scroll.updateLayout(lines.length, height, () => tui.requestRender());
       renderedSelection = choices.length <= actionHeight ? selected : -1;
-      return [...lines.slice(scroll.scrollTop, scroll.scrollTop + height), ...(spacing ? [""] : []), ...choices.slice(0, actionHeight)];
+      return [...lines.slice(scroll.scrollTop, scroll.scrollTop + height), ...(spacing ? [""] : []), ...choices.slice(0, actionHeight), ""];
     },
     handleInput(data) {
       if (closed) return;

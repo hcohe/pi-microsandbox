@@ -122,7 +122,8 @@ characters are escaped.
 The TUI review stays inline in the normal editor/approval area, never floating over chat.
 Themed syntax and added/removed colors remain visible, with hard wrapping and
 **Ctrl+N / Ctrl+P** scrolling (PgDown/PgUp also work where delivered).
-Below the code, a blank spacer separates colored **Apply?** choices.
+Below the code, a blank spacer separates the colored **No / Yes** choices;
+a trailing blank line separates them from the normal footer.
 No is the default; Escape/abort denies. There is no dialog footer or expandable
 view. Exact destination/provenance, warnings, paths and registration metadata
 remain in the getter and structured results, not in the dialog.
@@ -181,11 +182,12 @@ secrets** in Dockerfiles or context.
 
 Load's custom TUI approval shows only
 “Do you approve loading local built image using custom Dockerfile?”, a blank line,
-`Scope: Project` (or `Global`), another blank line, then **Yes / No**.
-**No is selected by default**; only an explicitly selected Yes from the current,
+`Scope: Project` (or `Global`), another blank line, then **No / Yes** and a
+trailing blank line. An arrow marks the selected choice, using the same colors
+as the write review. **No is first and selected by default**; only an explicitly selected Yes from the current,
 unclipped component render can approve. There is no diff, artifact ID, inventory, footer or details toggle
 in this prompt. RPC/select-only fallback uses the same plain question and Scope,
-with **No / Yes** to preserve default denial because native select has no initial-index option.
+with the same **No / Yes** order to preserve default denial.
 Write's detailed diff review is unchanged; build remains autonomous.
 
 Every tool returns readable text plus structured `success`, `code`, `phase` and

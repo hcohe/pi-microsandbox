@@ -197,22 +197,21 @@ export function createDockerfileReview(candidates: DockerfileReviewCandidate[], 
       const w = Math.max(1, width), rows = Math.max(3, Math.min(18, tui.terminal.rows - 5));
       // All long labels and code wrap; viewport slicing is scrollable, never content truncation.
       const wrap = (text: string) => wrapReviewText(text, w);
-      const heading = w >= 8 ? wrap(theme.fg("borderMuted", "─ ") + theme.fg("accent", "Apply?")) : [];
       const choiceRows = ["No", ...candidates.map((candidate) => (candidates.length === 1 ? "Yes" : candidate.label) + (candidate.available ? "" : " [unavailable]"))]
         .map((label, choice) => {
           // Match Pi’s native ExtensionSelectorComponent: accent selection, text otherwise.
           return wrap(choice === index ? theme.fg("accent", "→ ") + theme.fg("accent", label) : `  ${theme.fg("text", label)}`);
         });
-      const actions = [...heading, ...choiceRows.flat()];
-      const selectedActionEnd = heading.length + choiceRows.slice(0, index + 1).reduce((total, lines) => total + lines.length, 0);
-      const spacing = rows >= actions.length + 3 ? 1 : 0;
-      const actionHeight = Math.min(actions.length, Math.max(1, rows - 1));
-      const height = Math.max(1, rows - actionHeight - spacing);
+      const actions = choiceRows.flat();
+      const selectedActionEnd = choiceRows.slice(0, index + 1).reduce((total, lines) => total + lines.length, 0);
+      const spacing = rows >= actions.length + 4 ? 1 : 0;
+      const actionHeight = Math.min(actions.length, Math.max(1, rows - 2));
+      const height = Math.max(1, rows - actionHeight - spacing - 1);
       const lines = scroll.render(w);
       scroll.updateLayout(lines.length, height, () => tui.requestRender());
       // A rendered code preview is not approval evidence for a clipped destination label.
       renderedIndex = !index || selectedActionEnd <= actionHeight ? index : -1;
-      return [...lines.slice(scroll.scrollTop, scroll.scrollTop + height), ...(spacing ? [""] : []), ...actions.slice(0, actionHeight)].slice(0, rows);
+      return [...lines.slice(scroll.scrollTop, scroll.scrollTop + height), ...(spacing ? [""] : []), ...actions.slice(0, actionHeight), ""].slice(0, rows);
     },
     handleInput(data) {
       if (closed) return;

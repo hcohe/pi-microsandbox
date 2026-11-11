@@ -17,18 +17,19 @@ function fixture(scope: "project" | "global" = "project", rows = 24, keybindings
   return { view, answers, abort, tui, renders: () => renders };
 }
 
-for (const scope of ["project", "global"] as const) test(`load approval exact ${scope} content and semantic theme roles, Yes first and No selected`, () => {
+for (const scope of ["project", "global"] as const) test(`load approval exact ${scope} content and semantic theme roles, No first and selected with trailing padding`, () => {
   const calls: Array<[string, string]> = [];
   const selectedTheme = { fg: (role: string, text: string) => { calls.push([role, text]); return text; } } as Theme;
   const f = fixture(scope, 24, keys, selectedTheme);
   const label = scope === "project" ? "Project" : "Global";
   assert.equal(DOCKERFILE_LOAD_QUESTION, question);
-  assert.deepEqual(f.view.render(80), [question, "", `Scope: ${label}`, "", "Yes", "No"]);
-  assert.deepEqual(calls, [["accent", question], ["muted", "Scope: "], ["warning", label], ["text", "Yes"], ["accent", "No"]]);
+  assert.deepEqual(f.view.render(80), [question, "", `Scope: ${label}`, "", "→ No", "  Yes", ""]);
+  assert.deepEqual(calls, [["accent", question], ["muted", "Scope: "], ["warning", label], ["accent", "→ "], ["accent", "No"], ["text", "Yes"]]);
   assert.equal(f.view.render(80)[2], formatSettingsDiff([{ kind: "scope", label: "Scope", text: label }], selectedTheme)[0]);
   calls.length = 0;
-  f.view.handleInput!("\x1b[A"); f.view.render(80);
-  assert.deepEqual(calls.slice(-2), [["accent", "Yes"], ["text", "No"]]);
+  f.view.handleInput!("\x1b[A");
+  assert.deepEqual(f.view.render(80).slice(-3), ["  No", "→ Yes", ""]);
+  assert.deepEqual(calls.slice(-3), [["text", "No"], ["accent", "→ "], ["accent", "Yes"]]);
   f.view.dispose();
 });
 
@@ -76,7 +77,8 @@ test("load approval wraps safely and never authorizes clipped, invalidated or re
   for (const width of [1, 2, 10, 24, 80]) {
     const lines = f.view.render(width);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
-    assert.equal(lines.slice(-5).join("").replace(/\s/g, "").endsWith("YesNo"), true);
+    assert.equal(lines.join("").replace(/[\s→]/g, "").endsWith("NoYes"), true);
+    assert.equal(lines.at(-1), "");
   }
   f.view.handleInput!("\x1b[A"); f.tui.terminal.rows = 7;
   f.view.render(80); f.view.handleInput!("\r"); assert.deepEqual(f.answers, []);
@@ -104,7 +106,7 @@ for (const approve of [false, true]) test(`load TUI helper inline completion app
       assert.deepEqual(options, { overlay: false });
       return new Promise<boolean>((done) => {
         view = factory({ terminal: { rows: 24, columns: 80 }, requestRender() {} }, theme, keys, done);
-        assert.deepEqual(view!.render(80), [question, "", "Scope: Project", "", "Yes", "No"]);
+        assert.deepEqual(view!.render(80), [question, "", "Scope: Project", "", "→ No", "  Yes", ""]);
         if (approve) { view!.handleInput!("\x1b[A"); view!.render(80); }
         view!.handleInput!("\r");
       });
