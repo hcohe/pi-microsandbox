@@ -9,6 +9,48 @@ import { fileURLToPath } from "node:url";
 
 const common = fileURLToPath(new URL("../../default-image/install/_common.sh", import.meta.url));
 
+for (const entry of ["bootstrap", "installer"] as const) {
+  for (const [updateStatus, installStatus] of [[0, 0], [100, 0], [0, 100]]) {
+    test(`image apt ${entry} retries downloads and fails closed (update=${updateStatus}, install=${installStatus})`, () => {
+      const dockerfile = readFileSync(new URL("../../default-image/Dockerfile", import.meta.url), "utf8");
+      const bootstrap = dockerfile.match(/^RUN (apt-get update [\s\S]*?)\n\nCOPY install\//m)?.[1];
+      assert.ok(bootstrap, "Dockerfile bootstrap apt block must be exercised");
+      const result = spawnSync("bash", ["-c", `
+set -euo pipefail
+source "$1"
+# Offline apt transport; execute the actual bootstrap/helper control flow.
+apt-get() {
+    printf '%s\\n' "$*"
+    case "$1" in
+        update) return "$TEST_UPDATE_STATUS" ;;
+        install) return "$TEST_INSTALL_STATUS" ;;
+        *) return 99 ;;
+    esac
+}
+# Never let the Dockerfile cleanup touch the host.
+rm() { :; }
+if [[ "$3" == bootstrap ]]; then
+    eval "$2"
+else
+    apt_install ca-certificates curl file git ripgrep
+fi
+printf 'installation completed\\n'
+`, "image-apt-test", common, bootstrap, entry], {
+        encoding: "utf8",
+        env: { ...process.env, TEST_UPDATE_STATUS: String(updateStatus), TEST_INSTALL_STATUS: String(installStatus) },
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, updateStatus || installStatus, result.stderr);
+      const expected = ["update --error-on=any -o Acquire::Retries=3"];
+      if (updateStatus === 0) {
+        expected.push("install -y --no-install-recommends -o Acquire::Retries=3 ca-certificates curl file git ripgrep");
+        if (installStatus === 0) expected.push("installation completed");
+      }
+      assert.deepEqual(result.stdout.trim().split("\n"), expected);
+    });
+  }
+}
+
 // Published rustup 1.29.1 checksums, not the mutable rustup/dist artifacts.
 test("rustup uses an archived release matching both pinned platform checksums", () => {
   const installer = readFileSync(new URL("../../default-image/install/rust.sh", import.meta.url), "utf8");

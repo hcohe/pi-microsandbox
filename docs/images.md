@@ -467,8 +467,11 @@ installer, its functional checks, and every image that uses it aligned.
 
 Release builds pin the Ubuntu multi-platform image digest and a dated Ubuntu apt
 snapshot shared by every variant. The snapshot pin applies only while the image
-is assembled. Published images restore Ubuntu's normal apt sources so projects
-can install current packages at runtime.
+is assembled. Build-time apt downloads retry transient acquisition failures up to
+three times; index updates fail on any remaining error instead of continuing
+with incomplete indexes. There is no fallback to an unpinned archive or disabled
+TLS verification. Published images restore Ubuntu's normal apt sources so
+projects can install current packages at runtime.
 
 ## Build a custom image
 

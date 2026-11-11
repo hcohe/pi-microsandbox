@@ -976,12 +976,12 @@ test("nested secret hosts, network hosts and mount options explain one-item inpu
   await source.apply(); source.discard(); await f.action("Reload"); await f.choose("Confirm");
   const oneItem = (text: string, example: string) => {
     assert.match(text.replace(/\s+/g, " "), /Enter one .*not a comma-separated list/);
-    assert.match(text, new RegExp(`Example: ${example}`));
+    assert.ok(text.includes(`Example: ${example}`), text);
     assert.doesNotMatch(text, /Enter a comma-separated list|api\.typesafe|one-item-private/);
   };
   await f.list("Secrets", "Secrets:"); await f.expand("ONE_HOST:"); await f.expand("Allowed hosts:");
-  await f.key("a"); oneItem(f.text(), "\\*\\.googleapis\\.com"); assert.match(f.text().replace(/\s+/g, " "), /At least one allowed host must remain/); await f.key("\x1b");
-  await f.seek("first.example"); await f.key("e"); oneItem(f.text(), "\\*\\.googleapis\\.com"); await f.key("\x1b");
+  await f.key("a"); oneItem(f.text(), "*.googleapis.com"); assert.match(f.text().replace(/\s+/g, " "), /At least one allowed host must remain/); await f.key("\x1b");
+  await f.seek("first.example"); await f.key("e"); oneItem(f.text(), "*.googleapis.com"); await f.key("\x1b");
   await f.list("Network", "Allowed hosts:"); await f.key("a"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
   await f.seek("network.example"); await f.key("e"); oneItem(f.text(), "api.example.com"); await f.key("\x1b");
   await f.list("Mounts", "Mounts:"); await f.expand("/mnt/help:"); await f.expand("Options:");

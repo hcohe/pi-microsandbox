@@ -67,8 +67,8 @@ RUN set -eux; \
 
 # Ubuntu already supplies bash and coreutils. Keep the base contract deliberately
 # small; language-specific build dependencies belong to their installers.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get update --error-on=any -o Acquire::Retries=3 \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
         ca-certificates \
         curl \
         file \
