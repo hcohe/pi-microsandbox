@@ -59,7 +59,7 @@ try {
     const terminal = {
       columns: 80, rows: 24, kittyProtocolActive: false,
       start(onInput) { input = onInput; }, stop() {}, drainInput: async () => {},
-      write(data) { output += data; }, hideCursor() {}, showCursor() {}, moveBy() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
+      write(data) { output += data; }, hideCursor() {}, showCursor() {}, moveBy() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
     };
     const ui = new Renderer(terminal, false, root);
     const editor = { focused: false, getText: () => "", setText() {}, render: () => Array.from({ length: terminal.rows }, () => "UNDERLYING CHAT"), invalidate() {}, handleInput() { baseKeys++; } };
@@ -71,7 +71,7 @@ try {
     const showOverlay = ui.showOverlay.bind(ui);
     ui.showOverlay = (component, options) => { panel = component; return showOverlay(component, options); };
     const mode = Object.create(InteractiveMode.prototype);
-    Object.assign(mode, { ui, editor, editorContainer, extensionDialogs: [], keybindings: tui.getKeybindings(), programStatus: { setBlocked() {} } });
+    Object.assign(mode, { ui, editor, editorContainer, extensionDialogs: [], extensionOverlays: new Map(), keybindings: tui.getKeybindings(), programStatus: { setBlocked() {} } });
     const context = mode.createExtensionUIContext();
     context.notify = (message) => notices.push(message);
     const nativeSelect = context.select.bind(context);

@@ -235,7 +235,7 @@ the old native digest; the build ref is digest-checked before and after save.
 
 Microsandbox's cache is a **same-user trusted store**, not an adversarial registry
 or provenance boundary. Do not retag/replace generated references concurrently.
-SDK 0.6.16 has no native tag transaction or compare-and-swap: `Image.load` adds
+SDK 0.7.14 has no native tag transaction or compare-and-swap: `Image.load` adds
 both the sanitized archive tag and the selected alias sequentially. Failure can
 leave either/both durably changed, even when activation is withheld. Checks detect
 observed changes, not same-digest ABA, and cannot promise rollback or protect a
@@ -280,7 +280,7 @@ Build inputs/output are transcript-visible: never include secrets.
 In particular, **“Execution stream ended without an exit event”** originates in
 our SDK transport adapter: the async iterator reached EOF without an integer
 `exited` event (and without cancellation/disposal taking precedence). In pinned
-`microsandbox@0.6.16`, the JS iterator ends when native `recv()` returns `null`.
+`microsandbox@0.7.14`, the JS iterator ends when native `recv()` returns `null`.
 This is missing completion evidence, **not** proof that `docker save` completed,
 that a timeout fired, or that the VM ran out of memory. Successful retry does not
 identify the original cause. No automatic retry, salvage, import or activation
@@ -310,15 +310,19 @@ Deadlines are distinct:
   separately reported as `transportCode=TIMEOUT`; EOF alone is never a timeout.
 - The attached builder separately requests **`maxDuration=1200` seconds**. Its
   enforcement timing or termination reason is not established by the command
-  stream. Builder idle timeout is now **omitted**: pinned SDK/runtime zero means
+  stream. Builder idle timeout remains **omitted**: pinned SDK/runtime zero means
   immediate idle eligibility, not “disable idle timeout”. This fixes a builder-only
   configuration mismatch, **not a proven cause of the historical incident**.
   Ordinary runtime idle policy is unchanged.
 - `requestedTimeoutMs` records the SDK exec request (17 seconds for Docker
-  startup; 20 minutes each for build/save). **Pinned streaming exec ignores this
-  argument**, hence `sdkStreamingTimeoutEnforced=false`; these are not independently
-  enforced command deadlines. The guest startup helper has its own 15-second
-  budget. Aggregate cancellation is not a hard return deadline: creation and
+  startup; 20 minutes each for build/save). **Pinned SDK 0.7.14 implements streaming
+  timeout enforcement**, hence `sdkStreamingTimeoutEnforced=true` (a source-verified
+  implementation fact, not a live test result). Unlike 0.6.16, its deadline monitor
+  requests SIGKILL after execution starts. Raw `recv()` reports the actual exit event;
+  only SDK `wait()`/`collect()` translate an expired deadline into `ExecTimeout`.
+  This adapter consumes raw events, so neither a nonzero exit nor EOF alone proves
+  a timeout. Termination delivery can fail; no hard return deadline is implied.
+  The guest startup helper has its own 15-second budget. Aggregate cancellation is not a hard return deadline: creation and
   pending stream acquisition/receive can still need SDK convergence. Stream
   failure cleanup bounds kill and iterator-return separately to one second;
   ownership-checked builder destruction requests ten seconds.
@@ -351,11 +355,11 @@ separate load approval. New diagnostics cannot reconstruct the historical
 attempt's missing stream events, archive state, VM termination cause or first
 `docker save` completion.
 
-Pinned-source references: [SDK async iteration](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/sdk/node-ts/src/internal/async-iter.ts),
-[streaming exec and shared event receiver](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/sdk/rust/lib/sandbox/exec.rs)
-(`exec_stream` timeout ignored; `wait` consumes the same receiver, not an
-independent cached status), [idle option storage](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/sdk/rust/lib/sandbox/builder.rs),
-and [runtime lifetime/idle handling](https://github.com/superradcompany/microsandbox/blob/93c14431b387d4666c7c9ca6599bb2fafdc01782/crates/runtime/lib/vm.rs).
+Pinned-source references: [SDK async iteration](https://github.com/superradcompany/microsandbox/blob/60fc5071b34e6cc2671c84c8dc07709795d45d27/sdk/node-ts/src/internal/async-iter.ts),
+[streaming exec and shared event receiver](https://github.com/superradcompany/microsandbox/blob/60fc5071b34e6cc2671c84c8dc07709795d45d27/sdk/rust/lib/sandbox/exec/session.rs)
+(`exec_stream` enforces its deadline; raw `recv` retains actual exit events;
+`wait` consumes the same receiver, not an independent cached status), [idle option storage](https://github.com/superradcompany/microsandbox/blob/60fc5071b34e6cc2671c84c8dc07709795d45d27/sdk/rust/lib/sandbox/builder.rs),
+and [runtime lifetime/idle handling](https://github.com/superradcompany/microsandbox/blob/60fc5071b34e6cc2671c84c8dc07709795d45d27/crates/runtime/lib/runner/vm.rs).
 
 Mutable `FROM` tags and external downloads are not refreshed on native cache hits.
 Prefer pinned dependencies; change the pin/input and explicitly build/load when

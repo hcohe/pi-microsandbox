@@ -9,6 +9,7 @@ import { Type } from "typebox";
 import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { highlightCode, initTheme } from "@earendil-works/pi-coding-agent";
+import { createSandboxGrepExecute } from "./operations-exec.ts";
 import { systemPromptNote } from "./command.ts";
 import {
   hostApprovalMessage,
@@ -24,6 +25,7 @@ import type {
   HostReadAccess,
   RuntimeExecution,
   RuntimeState,
+  SandboxTransport,
   SessionExecutionContext,
   ToolOpsProvider,
 } from "./types.ts";
@@ -131,6 +133,7 @@ function createHarness(options: {
   hostReads?: HostReadAccess;
   createHostReads?: () => HostReadAccess;
   grepResult?: unknown;
+  grepTransport?: SandboxTransport;
   select?: () => Promise<string | undefined>;
   operations?: RuntimeExecution["operations"];
   promptNote?: (state: RuntimeState) => string;
@@ -158,10 +161,10 @@ function createHarness(options: {
     getState: () => current,
     ...(options.omitHostExecutionToken ? {} : { hostExecutionToken: () => ready ? token : undefined }),
     ...(options.omitRootProof ? {} : { validateHostRecoveryRoot: async () => options.validateRoot?.() }),
-    withRuntime: async (callback) => callback({ transport: {} as any, operations: options.operations ?? operations() }),
+    withRuntime: async (callback) => callback({ transport: options.grepTransport ?? {} as any, operations: options.operations ?? operations() }),
   };
   const ctx = {
-    cwd,
+    get cwd() { return provider.execution?.current().cwd ?? cwd; },
     mode: options.mode ?? "rpc",
     hasUI: options.hasUI ?? true,
     sessionManager: { getSessionId: () => "host-recovery-test", getSessionFile: () => undefined },
@@ -194,10 +197,12 @@ function createHarness(options: {
     hostReads,
     createHostReads: options.createHostReads,
     ownedConfigToolEntry: fileURLToPath(new URL("./index.ts", import.meta.url)),
-    createGrepExecute: ({ cwd }) => async () => {
-      grepCwds.push(cwd);
-      return options.grepResult ?? { content: [{ type: "text", text: "sandbox" }] };
-    },
+    createGrepExecute: ({ cwd, provider, grepHelpers }) => options.grepTransport
+      ? createSandboxGrepExecute({ provider, cwd, helpers: grepHelpers })
+      : async () => {
+        grepCwds.push(cwd);
+        return options.grepResult ?? { content: [{ type: "text", text: "sandbox" }] };
+      },
     grepHelpers: {
       DEFAULT_MAX_BYTES: 1000,
       DEFAULT_MAX_LINES: 100,
@@ -872,4 +877,55 @@ for (const status of ["active", "unavailable", "disabled"] as const) test(`${sta
     assert.match(prompt.systemPrompt, /host-execution permission.*fresh No-first human approval/);
   }
   assert.equal(h.confirmations.length, 0, "instructions and blocked recovery do not run host commands");
+});
+
+test("routed grep context, glob and limit use only guest transport with current Pi", async () => {
+  const cwd = "/pi-msb-guest-only";
+  const calls: unknown[] = [];
+  const h = createHarness({ execution: readyExecution(cwd).context, grepTransport: {
+    stat: async (path) => { assert.equal(path, cwd); return { kind: "directory", size: 0, mode: 0o755, readonly: false, modifiedAt: null }; },
+    writeFile: async () => { throw new Error("unexpected guest write"); },
+    exists: async () => { throw new Error("unexpected guest exists"); },
+    list: async () => { throw new Error("unexpected guest list"); },
+    exec: async () => { throw new Error("unexpected guest non-streaming exec"); },
+    dispose: async () => {},
+    readFile: async (path) => {
+      calls.push(["read", path]);
+      return Buffer.from("GUEST_BEFORE\nneedle\nGUEST_AFTER\n");
+    },
+    execStream: async (command, args, options) => {
+      calls.push([command, args, options?.cwd]);
+      options?.onStdout?.(Buffer.from(JSON.stringify({ type: "match", data: {
+        path: { text: "file.txt" }, line_number: 2, lines: { text: "needle\n" },
+      } }) + "\n"));
+      assert.equal(options?.signal?.aborted, true);
+      throw Object.assign(new Error("limit reached"), { code: "ABORTED" });
+    },
+  } });
+  const result = await h.tools.get("grep").execute("grep", { pattern: "needle", context: 1, glob: "*.txt", limit: 1 }, undefined, undefined, h.ctx);
+  assert.match(result.content[0].text, /file.txt-1- GUEST_BEFORE\nfile.txt:2: needle\nfile.txt-3- GUEST_AFTER/);
+  assert.equal(result.details.matchLimitReached, 1);
+  assert.deepEqual(calls, [
+    ["rg", ["--json", "--line-number", "--color=never", "--hidden", "--glob", "*.txt", "--", "needle", cwd], cwd],
+    ["read", `${cwd}/file.txt`],
+  ]);
+});
+
+
+test("sandbox built-ins preserve original execution context and nested-tool capabilities", async () => {
+  const ops = operations();
+  ops.read = { access: async () => {}, readFile: async () => Buffer.from("guest-only"), detectImageMimeType: async () => null };
+  const h = createHarness({ operations: ops });
+  const tools = Object.freeze([]);
+  const executeTool = async () => { throw new Error("unexpected nested call"); };
+  Object.assign(h.ctx, { tools, executeTool });
+  let contextReads = 0;
+  Object.defineProperty(h.ctx, "model", { get() {
+    assert.equal(this, h.ctx);
+    assert.equal(Reflect.get(this, "tools"), tools); assert.equal(Reflect.get(this, "executeTool"), executeTool);
+    contextReads++; return undefined;
+  } });
+  const result = await h.tools.get("read").execute("read", { path: "guest-only.txt" }, undefined, undefined, h.ctx);
+  assert.equal(result.content[0].text, "guest-only");
+  assert.ok(contextReads > 0);
 });

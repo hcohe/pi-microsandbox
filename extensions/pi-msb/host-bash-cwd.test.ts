@@ -300,3 +300,27 @@ test("host cwd rejects an otherwise safe alias whose canonical target contains d
 test("host cwd never resolves against ambient process cwd when the session root is not absolute", async () => {
   await assert.rejects(discoverHostBashCwd("relative-session", "child", () => {}), /cwd/);
 });
+
+test("approved host Bash pins spawn cwd without replacing execution context or capabilities", async (t) => {
+  const f = await fixture(t);
+  const tools = Object.freeze([]);
+  const executeTool = async () => { throw new Error("nested calls must not be fabricated or invoked"); };
+  Object.assign(f.ctx, { tools, executeTool });
+  let contextReads = 0;
+  Object.defineProperty(f.ctx, "model", { get() {
+    assert.equal(this, f.ctx, "Pi must receive the original execute context");
+    assert.equal(this.tools, tools); assert.equal(this.executeTool, executeTool);
+    contextReads++; return undefined;
+  } });
+  const input = f.input("inside");
+  assert.equal(await f.request(f.event(input)), undefined);
+  const controller = new AbortController();
+  const updates: unknown[] = [];
+  const result = await f.tools.get("bash").execute("cwd-call", input, controller.signal, (update: unknown) => updates.push(update), f.ctx);
+  assert.equal(result.content[0].text.trim(), f.inside);
+  assert.ok(contextReads > 0);
+  assert.ok(updates.length > 0);
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(f.ctx.cwd, f.cwd, "caller cwd must not be mutated");
+  assert.equal(f.ctx.tools, tools); assert.equal(f.ctx.executeTool, executeTool);
+});

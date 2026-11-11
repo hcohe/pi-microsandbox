@@ -6,6 +6,7 @@ import type {
   BashOperations,
   ExtensionAPI,
   ExtensionContext,
+  ExtensionToolContext,
   ToolDefinition,
   Theme,
   UserBashEventResult,
@@ -353,7 +354,7 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
     input: ToolParams,
     signal: AbortSignal | undefined,
     onUpdate: any,
-    ctx: ExtensionContext,
+    ctx: ExtensionToolContext,
     approvalRequired: boolean,
     identity: SessionExecutionIdentity,
   ): Promise<any> => {
@@ -385,9 +386,16 @@ export function registerSandboxTools(pi: ExtensionAPI, deps: RegisterToolsDeps):
       if (approved.cwd) {
         await assertHostBashCwdCurrent(approved.cwd, assertApprovedCurrent);
         assertApprovedCurrent();
-        // A per-call native tool pins the actual canonical cwd; never prefix a shell cd.
+        // Pi may prefer ctx.cwd over the factory cwd; pin only the approved spawn.
         const { cwd: _requestedCwd, ...params } = withoutExecutionTarget(input);
-        return createHostDefinition("bash", approved.cwd.target.canonicalPath).execute(id, params, signal, onUpdate, ctx);
+        const canonicalCwd = approved.cwd.target.canonicalPath;
+        const definition: AnyToolDefinition = createBashToolDefinition(canonicalCwd, {
+          spawnHook: (spawn) => {
+            assertApprovedCurrent();
+            return { ...spawn, cwd: canonicalCwd };
+          },
+        });
+        return definition.execute(id, params, signal, onUpdate, ctx);
       }
     } else clearApproval(id);
     return definition.execute(id, withoutExecutionTarget(input), signal, onUpdate, ctx);

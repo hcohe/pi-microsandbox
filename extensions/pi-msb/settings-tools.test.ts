@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { DEFAULT_CONFIG, hostConfigPaths, parseTomlConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
 import { openControlPanel } from "./control-panel.ts";
@@ -41,7 +41,7 @@ async function fixture(t: TestContext, missing = false) {
   let select: (title: string, options: string[], signal?: AbortSignal) => Promise<string | undefined> = async () => "Yes";
   const ctx = { hasUI: true, mode: "rpc", cwd, sessionManager: { getSessionId: () => id }, ui: { select: async (title: string, options: string[], opts: { signal?: AbortSignal }) => {
     reviews.push(title); assert.deepEqual(options, ["No", "Yes"]); return select(title, options, opts.signal);
-  } } } as unknown as ExtensionContext;
+  } } } as unknown as ExtensionToolContext;
   const resultTexts: string[] = [];
   const call = async (params: unknown, signal?: AbortSignal) => {
     const tool = tools.get("msb_config_set")!;

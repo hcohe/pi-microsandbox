@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, write
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { hostConfigPaths, hostConfigTargets, readRawConfig, resolveConfig, type ResolveConfigInput } from "./config.ts";
 import { SettingsEditor, SettingsConflictError } from "./settings.ts";
 import { approveProjectSettings, prepareProjectSettings, projectSettingsLabels, discardProjectCandidates } from "./settings-project.ts";
@@ -162,7 +162,7 @@ for (const mode of ["tui", "rpc"]) test(`settings Project ${mode} exact No-first
     theme: { fg: (_role: string, text: string) => text, bold: (text: string) => text },
     select: async (question: string, choices: string[], options: any) => {
       calls++; assert.deepEqual(choices, labels); assert.ok(options.signal); assert.match(question, /Settings file:.*projects/); assert.doesNotMatch(question, /Only for .*worktree/); return answer;
-    } } } as unknown as ExtensionContext;
+    } } } as unknown as ExtensionToolContext;
   const call = () => tools.get("msb_config_set")!.execute("id", { scope: "project", path: "cpus", operation: "set", value: 4 }, undefined, undefined, ctx) as Promise<any>;
   for (answer of [undefined, "No", "Yes", "unexpected", "Yes (Only for remove-in-repo-config worktree)", "Yes (For pi-microsandbox and all its worktrees)"]) {
     assert.equal((await call()).details.outcome, "cancelled"); assert.equal(reloads, 0);
@@ -183,7 +183,7 @@ test("settings Project approval safe labels, private host command appendix, no U
   let calls = 0; const abort = new AbortController();
   const ctx = { hasUI: true, mode: "rpc", ui: { select: async (question: string, choices: string[]) => {
     calls++; assert.match(question, /PRIVATE_COMMAND/); assert.match(question, /HOST secret commands/); abort.abort(); return choices[1];
-  } } } as unknown as ExtensionContext;
+  } } } as unknown as ExtensionToolContext;
   assert.equal(await approveProjectSettings({ ...ctx, hasUI: false }, candidates, abort.signal), undefined);
   assert.equal(await approveProjectSettings({ ...ctx, mode: "json" as any }, candidates, abort.signal), undefined);
   assert.equal(await approveProjectSettings(ctx, candidates, abort.signal), undefined); assert.equal(calls, 1);

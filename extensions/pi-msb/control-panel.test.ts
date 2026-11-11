@@ -296,7 +296,7 @@ test("native regular/viewport renderers cover viewport and restore input focus",
   const { TuiMainScreen, TuiAltScreen } = await import("@earendil-works/pi-tui");
   for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
     const f = await fixture(t); let output = ""; let input: ((data: string) => void) | undefined;
-    const terminal = { rows: 10, columns: 32, kittyProtocolActive: false, start(onInput: (data: string) => void) { input = onInput; }, stop() {}, drainInput: async () => {}, write(data: string) { output += data; }, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {} };
+    const terminal = { rows: 10, columns: 32, kittyProtocolActive: false, start(onInput: (data: string) => void) { input = onInput; }, stop() {}, drainInput: async () => {}, write(data: string) { output += data; }, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {} };
     const tui = new Renderer(terminal, false, "/tmp"); let baseKeys = 0;
     const base = { focused: false, render: () => Array.from({ length: 10 }, () => "UNDERLYING CHAT/FOOTER"), invalidate() {}, handleInput() { baseKeys++; } };
     tui.addChild(base); if (tui instanceof TuiAltScreen) tui.setLayoutRoot(base); tui.setFocus(base); tui.start();

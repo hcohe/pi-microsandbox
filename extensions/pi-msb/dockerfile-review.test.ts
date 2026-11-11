@@ -251,7 +251,7 @@ for (const appearance of ["dark", "light"] as const) for (const Renderer of [Tui
   const terminal = {
     columns: 70, rows: 24, kittyProtocolActive: false,
     start(onInput, onResize) { input = onInput; resize = onResize; }, stop() {}, async drainInput() {},
-    write(data) { writes.push(data); }, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
+    write(data) { writes.push(data); }, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
   } satisfies Terminal;
   const tui = new Renderer(terminal, false, "/tmp");
   const answers: Array<number | undefined> = [];

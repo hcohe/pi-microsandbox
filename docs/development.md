@@ -2,7 +2,32 @@
 
 [Back to README](../README.md)
 
-This release requires Node.js 22.19.0 or newer. The development toolchain pins Pi 0.84.4, and the runtime dependency is pinned exactly to `microsandbox` 0.6.16.
+This release requires Node.js 22.19.0 or newer. The development toolchain pins Pi and TUI 1.5.2, and the runtime dependency is pinned exactly to `microsandbox` 0.7.14.
+
+Dependabot groups the Pi packages (including major updates) because coding-agent
+and TUI share public types. Keep their development fixtures coordinated. Pi-provided
+packages remain wildcard peers, as required by Pi package loading; the update
+retains older public operations and spawn-hook APIs rather than changing peer policy.
+Node declarations stay on major 22 (`@types/node` major updates are ignored) so
+Node 25-only APIs do not accidentally raise the runtime floor. `node-gyp` stays on
+Node-22-compatible 12.4.0; refresh compatible transitive packages without overrides
+and run the full `npm audit`, not only the production audit.
+
+Pi 1.5.2 tool execution receives `ExtensionToolContext`; routed tools forward that
+original context, including `tools` and `executeTool`, without fabricating nested
+execution capabilities. Pi now prefers `ctx.cwd` to factory cwd. Approved host Bash
+uses the public spawn hook to pin the physically validated canonical directory,
+without changing the command, environment or caller context. Sandbox grep continues
+to override `execute` completely: Pi's deprecated `GrepOperations.readFile` cannot
+provide remote context and its built-in grep always launches local ripgrep.
+Sandbox context reads and ripgrep execution remain guest-transport operations.
+
+SDK 0.7.14 retains the mount, network, lifecycle and image APIs used here. The
+non-VM `microsandbox-sdk.test.ts` inspects real native builder serialization for
+mount flags, deny/allowlist policies and builder limits. This is not VM/network
+validation. The SDK update changes the Dockerfile build cache key and diagnostic
+version; prior cache entries are not reused. See [Images](images.md#export-failures-and-diagnostic-limits)
+for the source-verified streaming timeout change and remaining live-validation limits.
 
 ## Local development
 
@@ -17,6 +42,7 @@ npm run typecheck
 npm test
 npm run smoke       # extension-load smoke; no sandbox starts
 npm run check       # all three commands above
+npm audit
 npm audit --omit=dev
 ```
 
@@ -171,7 +197,7 @@ not promote partial certainty. Keep this conservative until the SDK proves actua
 instance/config identity; never infer it from name/session/image labels.
 Native `ctx.ui.custom` with a 100%-width/height overlay covers and pads the whole
 terminal viewport, including regular and alternate-screen renderers. This uses
-public APIs compatible with Pi 0.84.4 and 1.4.0, not a second TUI, private layoutRoot access, render patches,
+public APIs retained from Pi 0.84.4 and 1.4.0 and exercised with pinned Pi 1.5.2, not a second TUI, private layoutRoot access, render patches,
 or manually emitted screen-switch escapes. Pi owns overlay focus/restoration.
 Opening is exclusive; cancel, errors and shutdown dispose drafts and entry buffers.
 
@@ -187,8 +213,8 @@ actual Pi extension loader, command context, `ui.custom`, theme and both native
 renderers. It covers a symlinked agent root, all apply scopes, masked input,
 responsive overlay composition, close/reopen and focus restoration without a VM.
 It drives tree keys rather than section menus, including all scoped actions
-(fake SDK, no live VM) and literal command letters in inputs. It always tests the declared Pi 0.84.4 runtime;
-include an installed Pi 1.4.0 runtime with:
+(fake SDK, no live VM) and literal command letters in inputs. It always tests the declared Pi 1.5.2 runtime;
+include an older installed Pi runtime with:
 
 ```sh
 PI_MSB_TEST_PI_PACKAGE=/path/to/pi-coding-agent \

@@ -431,6 +431,8 @@ for (const mode of ["nonzero", "silentEOF", "partialEOF", "transport", "timeout"
     if (mode !== "nonzero") {
       assert.equal(log.diagnostics?.transportCode, mode === "transport" ? "SANDBOX_DOWN" : mode === "timeout" ? "TIMEOUT" : "INVALID");
       assert.equal(log.diagnostics?.requestedTimeoutMs, 1_200_000);
+      assert.equal(log.diagnostics?.sdkStreamingTimeoutEnforced, true);
+      assert.equal(error.diagnostics?.sdk, "microsandbox@0.7.14");
       assert.equal(log.diagnostics?.stderrBytes, mode === "silentEOF" ? 0 : Buffer.byteLength(log.stderr));
       assert.ok(log.diagnostics!.elapsedMs >= 0);
       assert.equal(log.diagnostics?.cleanup.length, 2);

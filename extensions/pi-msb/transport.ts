@@ -16,7 +16,7 @@ export interface StreamDiagnostics {
   transportCode: TransportErrorCode;
   elapsedMs: number;
   requestedTimeoutMs?: number;
-  sdkStreamingTimeoutEnforced: false;
+  sdkStreamingTimeoutEnforced: true;
   events: number;
   stdoutBytes: number;
   stderrBytes: number;
@@ -416,7 +416,7 @@ export function createSdkTransport(sandbox: unknown): SandboxTransport {
       const mapped = mapSdkError(error, "execStream");
       mapped.diagnostics = {
         failureKind: options?.signal?.aborted ? "cancelled" : disposed ? "disposed" : mapped.code === "TIMEOUT" ? "timeout" : missingExit ? "streamEndedWithoutExit" : "transport",
-        transportCode: mapped.code, elapsedMs: Math.round(performance.now() - started), requestedTimeoutMs: options?.timeoutMs, sdkStreamingTimeoutEnforced: false,
+        transportCode: mapped.code, elapsedMs: Math.round(performance.now() - started), requestedTimeoutMs: options?.timeoutMs, sdkStreamingTimeoutEnforced: true,
         events, stdoutBytes, stderrBytes, lastOutputElapsedMs, observedExitCode,
         aborted: options?.signal?.aborted === true, disposed, causes: causalErrorDetails(mapped), cleanup,
       };

@@ -162,7 +162,7 @@ for (const Renderer of [TuiMainScreen, TuiAltScreen]) test(`footerless host appr
   let input!: (data: string) => void, resize!: () => void;
   const terminal = { columns: 70, rows: 24, kittyProtocolActive: false,
     start(onInput, onResize) { input = onInput; resize = onResize; }, stop() {}, async drainInput() {},
-    write() {}, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
+    write() {}, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
   } satisfies Terminal;
   const tui = new Renderer(terminal, false, "/tmp"), editor = new Container(), answers: Array<string | undefined> = [];
   const transcript = new ScrollView(new Text("Transcript", 0, 0), { primary: true });

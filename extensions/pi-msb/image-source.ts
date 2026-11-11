@@ -13,7 +13,7 @@ export interface DockerfileSource {
 }
 export interface BuildEntry { path: string; data?: Buffer; mode: number }
 export const BUILD_LIMITS = { bytes: 32 * 1024 * 1024, entries: 2048, depth: 16 } as const;
-export const BUILD_VERSION = "pi-msb-dockerfile-v1-sdk-0.6.16-public-egress-deny-ingress";
+export const BUILD_VERSION = "pi-msb-dockerfile-v1-sdk-0.7.14-public-egress-deny-ingress";
 // VFS needs a second copy of the bundled base for even a single RUN step.
 export const BUILD_ROOT_DISK_MIB = 8192;
 

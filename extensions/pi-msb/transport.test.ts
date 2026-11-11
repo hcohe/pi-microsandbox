@@ -577,6 +577,7 @@ test("stream diagnostics retain raw output counts, real observed exit and typed 
     assert.equal(diagnostics.stdoutBytes, 3);
     assert.equal(diagnostics.stderrBytes, 14);
     assert.equal(diagnostics.requestedTimeoutMs, 123);
+    assert.equal(diagnostics.sdkStreamingTimeoutEnforced, true);
     assert.ok(diagnostics.elapsedMs >= diagnostics.lastOutputElapsedMs!);
     assert.deepEqual(diagnostics.cleanup, [{ operation: "kill", outcome: "failed", code: "IO" }, { operation: "iteratorReturn", outcome: "failed", code: "UNKNOWN" }]);
     assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE|connection detail/);
@@ -587,7 +588,6 @@ test("stream diagnostics retain raw output counts, real observed exit and typed 
   assert.equal(Buffer.concat(stderr).toString(), "partial stderr");
   await transport.dispose();
 });
-
 
 test("causal diagnostics bound depth, cycles and typed tokens without reading messages", () => {
   const error: any = new Error("PRIVATE MESSAGE"); error.code = "IO";
@@ -600,4 +600,19 @@ test("causal diagnostics bound depth, cycles and typed tokens without reading me
   assert.equal(causalErrorDetails(chain).length, 4);
   const hostile = Object.defineProperty({}, "cause", { get() { throw new Error("private getter"); } });
   assert.deepEqual(causalErrorDetails(hostile), [{ name: "Error" }]);
+});
+
+test("pinned SDK streaming timeout errors retain typed failure and cleanup without inferring EOF timeouts", async () => {
+  const wrapped = await sdkHandle([new ExecTimeoutError("PRIVATE timeout")]);
+  const transport = createSdkTransport(basicSandbox({ execStreamWith: async () => wrapped.handle }));
+  await assert.rejects(transport.execStream("sleep", ["10"], { timeoutMs: 1 }), (error: unknown) => {
+    assert.ok(error instanceof SandboxTransportError);
+    assert.equal(error.code, "TIMEOUT");
+    assert.equal(error.diagnostics?.failureKind, "timeout");
+    assert.equal(error.diagnostics?.sdkStreamingTimeoutEnforced, true);
+    assert.deepEqual(error.diagnostics?.cleanup.map((item) => item.operation), ["kill", "iteratorReturn"]);
+    assert.doesNotMatch(JSON.stringify(error.diagnostics), /PRIVATE/);
+    return true;
+  });
+  await transport.dispose();
 });
