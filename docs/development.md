@@ -2,7 +2,32 @@
 
 [Back to README](../README.md)
 
-This release requires Node.js 22.19.0 or newer. The development toolchain pins Pi 0.84.4, and the runtime dependency is pinned exactly to `microsandbox` 0.6.16.
+This release requires Node.js 22.19.0 or newer. The development toolchain pins Pi and TUI 1.5.2, and the runtime dependency is pinned exactly to `microsandbox` 0.7.14.
+
+Dependabot groups the Pi packages (including major updates) because coding-agent
+and TUI share public types. Keep their development fixtures coordinated. Pi-provided
+packages remain wildcard peers, as required by Pi package loading; the update
+retains older public operations and spawn-hook APIs rather than changing peer policy.
+Node declarations stay on major 22 (`@types/node` major updates are ignored) so
+Node 25-only APIs do not accidentally raise the runtime floor. `node-gyp` stays on
+Node-22-compatible 12.4.0; refresh compatible transitive packages without overrides
+and run the full `npm audit`, not only the production audit.
+
+Pi 1.5.2 tool execution receives `ExtensionToolContext`; routed tools forward that
+original context, including `tools` and `executeTool`, without fabricating nested
+execution capabilities. Pi now prefers `ctx.cwd` to factory cwd. Approved host Bash
+uses the public spawn hook to pin the physically validated canonical directory,
+without changing the command, environment or caller context. Sandbox grep continues
+to override `execute` completely: Pi's deprecated `GrepOperations.readFile` cannot
+provide remote context and its built-in grep always launches local ripgrep.
+Sandbox context reads and ripgrep execution remain guest-transport operations.
+
+SDK 0.7.14 retains the mount, network, lifecycle and image APIs used here. The
+non-VM `microsandbox-sdk.test.ts` inspects real native builder serialization for
+mount flags, deny/allowlist policies and builder limits. This is not VM/network
+validation. The SDK update changes the Dockerfile build cache key and diagnostic
+version; prior cache entries are not reused. See [Images](images.md#export-failures-and-diagnostic-limits)
+for the source-verified streaming timeout change and remaining live-validation limits.
 
 ## Local development
 
@@ -17,6 +42,7 @@ npm run typecheck
 npm test
 npm run smoke       # extension-load smoke; no sandbox starts
 npm run check       # all three commands above
+npm audit
 npm audit --omit=dev
 ```
 
@@ -30,10 +56,13 @@ just dev
 ```
 
 `dev-flock` builds and smoke-tests the native owner-lock addon for the current
-host. `dev-image` builds the current `default` variant as
+host. `dev-image` builds the current default image as
 `pi-microsandbox-dev:local` and imports it into Microsandbox's separate image
 cache. `dev` runs both prerequisites, then starts Pi with this checkout's
-extension explicitly loaded alongside your normal discovered extensions. It
+extension explicitly loaded alongside your normal discovered extensions. `pi` is
+resolved from `PATH` (not necessarily the devDependency version). `--extension .`
+uses this package's `pi.extensions` manifest, and Pi's loader supplies its own
+framework/TUI imports rather than this checkout's devDependency copies. It
 forces the local image with `pull_policy = "never"`, requires Docker, and uses
 4 CPUs and 8192 MiB. Docker caching keeps repeat builds short
 when image inputs have not changed. Pass Pi arguments directly, for example:
@@ -43,7 +72,165 @@ just dev --continue
 just dev "Run docker info and report the storage driver"
 ```
 
+To test only the extension without building or importing a Docker image, run
+`just dev-extension-only` (Pi arguments are forwarded as with `dev`). This still
+builds and smoke-tests the native addon, but uses your normal sandbox
+configuration instead of forcing the local image, Docker mode, or resource
+settings.
+
 Run `just dev-image` by itself when you only need to refresh the local image.
+
+### Internal module boundaries
+
+Keep the runtime ports (`SandboxManager`, `SandboxTransport`, and tool operations)
+independent of the settings editor and presentation code. The integration owns
+session identity/readiness; the manager owns serialized runtime acquisition and
+retirement, while admitted tool callbacks may run concurrently. The same execution
+identity scopes host grants and cached adoption/diagnostic state: obsolete async
+operations must not publish into a replacement session lifetime.
+
+Workspace resolution has no Git discovery: canonical `realpath(cwd)` is the
+host bind source, while the lexically resolved cwd is guest root and command
+cwd. Git main, linked and nested cwd share the main/root host-owned Project
+record; non-Git/unsupported layouts stay local. Canonical current cwd determines
+the session boundary independently; Global is unchanged. Cwd replacement invalidates prior host
+approvals and read grants. Git metadata within cwd does not select the bind,
+and external linked-worktree/submodule metadata is not separately mounted.
+Explicit mounts and user-approved host controls remain separate access paths.
+
+Settings have separate seams for static metadata, pure live/restart classification,
+guarded file storage, private draft intent, and sanitized presentation. The editor
+remains the shared backend for the panel and configuration tools. Preserve their
+intentional approval differences and the distinction between saving settings and
+activating them; do not replace security checks with schema discovery alone.
+Module-boundary tests prevent lightweight discovery and runtime policy from
+pulling in the editor or full control panel.
+
+### Configuration-tool integration and testing
+
+`settings-tools.ts` registers `msb_config_get` and `msb_config_set`; the latter
+revalidates runtime arguments inside execute and always requests explicit
+approval. Single operations and ordered same-scope batches share one draft,
+combined approval, atomic commit and at most one reload. `settings-schema.ts`
+provides static leaf schemas/capabilities and safe desired/adopted network policy
+summaries; `network-domains.ts` centralizes exact DNS names, secret-only leading
+`*.` wildcard scopes, and network-only IP/CIDR rules. `settings-json.ts` is the strict JSON/redaction boundary, and
+`settings-approval.ts` uses the public `ctx.ui.select(question, ["No", "Yes"], {signal})`
+API in TUI and RPC, like HOST-command approval. It passes the complete masked diff
+and nonwarning context, filtering only semantic `kind === "warning"` lines, using
+public `ctx.ui.theme` in TUI and plain text in RPC. Scope names retain the theme's
+warning color with a muted `Scope:` label; color is not the warning filter.
+There is no extension overlay, pagination or read-to-end gate; Pi owns native
+layout, which does not guarantee all long-question lines are visible. `settings-diff.ts`
+shares semantic added/removed/context/warning lines across TUI, plain-text RPC,
+and setter results. Generation and review metadata retain all warnings. Model-facing
+setter text includes them for applied/no-op and saved-but-reload-failed outcomes;
+the latter retains the approved sanitized review and clearly denies full activation.
+The tool description asks the agent to explain relevant returned warnings after
+completion. Human setter result renderers filter warning kinds too. Build display
+data only from the sanitized approval-bound review: private comparisons in
+SettingsDraft emit changed-field metadata before credential masking, not raw arguments or literal credential text. The setter's
+public tool renderers never echo arguments or dump review JSON.
+`settings-inspection.ts` validates section/path filters inside execute, filters
+only agent-safe projections, keeps selected structured JSON and produces bounded
+readable text (optional indented JSON). Schema caching is caller-controlled via
+`knownSchemaVersion`; update the discovery version when its contract changes.
+`settings-validation.ts` maps only known error prefixes to static schemas and
+zero-based operation indices; never forward ConfigError messages or inputs.
+`settings-safety.ts` shares Session-reset, reconnection and DNS/IP guidance across
+reports, approval and the panel; shutdown warnings must not prevent cleanup. Print/JSON/no-UI modes cannot mutate. The panel and tool share one editor modal lease. Tools use
+the same SettingsDraft CRUD, validation, atomic persistence and controller reload
+rather than their own writer. Read/proposal construction must never bootstrap.
+
+`settings-tools.test.ts`, `settings-diff.test.ts`, `settings-approval.test.ts` and
+`settings.test.ts` cover all layers/inventory/origins, headless reads, serialized redaction, sparse/entry
+isolation, approval cancellation/concurrency/races, hidden owned credentials,
+mount guards and truthful save/reload failure. `tools.test.ts` checks exact-name
+routing exemptions. The gate requires both an exact tool name and public
+`sourceInfo.path` canonically matching the entry path pinned by `index.ts`;
+missing/mismatched metadata fails closed, with no basename/directory fallback.
+Real-loader tests include a symlinked package entry and duplicate-winning foreign
+registrations under both selected runtimes. `control-panel-runtime.test.ts` also executes both actual
+loaded config tools using the native context and both terminal renderers,
+including actual theme diff colors, compact masked secret edits/rotations,
+quiet setter call/result rendering, complete warning-free native-selector diff payloads,
+plain agent-text warnings (including no-op and saved-but-reload-failed outcomes),
+No default, Escape, abort, immediate long-review approval, native layout on resize,
+live/restart fake-SDK reconciliation and
+focus restoration. SDK/terminals are
+doubled; none of these tests executes a live VM. Set `PI_PACKAGE_DIR` to this
+checkout's pinned coding-agent package when running direct Node tests so an
+inherited installed-package theme override cannot contaminate them. Add
+`PI_MSB_TEST_PI_PACKAGE` to run the loader fixture against another installed Pi;
+report that actual package version (do not infer 1.4.0 compatibility from 1.5.0).
+
+### Control-panel integration and testing
+
+`/msb` is the only command surface. `control-panel.ts` owns collapsed Resources,
+Network, Secrets, Variables, Mounts, Tools, Image, Sources, Actions, Status, General
+and Advanced trees directly below MICROSANDBOX, initially focused on Resources.
+Settings edit desired policy; only inner read-only Status metadata is labeled `[runtime]`. Node identities
+and expansion stay stable across compact transient forms. The
+single-line footer stays at the bottom with accented keys and muted action labels;
+narrow terminals use compact hints. Normal keys are
+j/k move, h/l fold/parent/child, e/a/d edit/add/entry-delete-or-scalar-inherit,
+q close; input dispatch precedes all command bindings. Each operation creates
+an isolated private SettingsDraft and exposes themed scope action rows. Apply
+transfers only that intent, persists and automatically reloads; Cancel discards
+it before returning to committed settings. Forms expose scope actions directly.
+Session uses authoritative session memory and is unavailable without an
+active sandbox. Project/Global defaults never broadcast to unrelated instances.
+`settings-fields.ts` is the complete grouped inventory, `settings-input.ts`
+retains native Kitty/key handling and sanitizes chunked paste, and `masked-input.ts`
+never renders plaintext or uses an Input undo/kill ring. The settings backend
+keeps literal credentials private while exposing host source metadata to agent
+tools; do not stringify effective Config.
+The manager's successful boot/live-adoption observer captures a redacted runtime
+policy and frozen provenance, separate from resolved desired config/configRef.
+The UI uses this snapshot for Status/adoption metadata and pending comparisons,
+not a second policy tree. Failed/canceled/pending changes must never appear as
+adopted policy; inactive snapshots are last-known, and session teardown clears them. Successful
+fresh creation verifies all fields. Revalidation of an existing guest or transport replacement
+have no trustworthy instance ID or verified actual image metadata, so snapshots
+include only live extension-policy fields; image and all other VM fields are unknown. Live/no-op adoption must
+not promote partial certainty. Keep this conservative until the SDK proves actual
+instance/config identity; never infer it from name/session/image labels.
+Native `ctx.ui.custom` with a 100%-width/height overlay covers and pads the whole
+terminal viewport, including regular and alternate-screen renderers. This uses
+public APIs retained from Pi 0.84.4 and 1.4.0 and exercised with pinned Pi 1.5.2, not a second TUI, private layoutRoot access, render patches,
+or manually emitted screen-switch escapes. Pi owns overlay focus/restoration.
+Opening is exclusive; cancel, errors and shutdown dispose drafts and entry buffers.
+
+`control-panel.test.ts` exercises keyboard-only CRUD/apply/cancel, exact widths
+24/32/40/80/120 and heights 1/2/3/4/6/16/24/40, and actual native renderer composition
+with terminal doubles (including an installed viewport layout root). Runtime tests
+use an injected SDK to verify live adoption versus guarded resource recreation.
+Regressions also drive the panel through the native integration with the shared
+`test/fake-msb-sdk.ts` fixture: startup-preference safety, isolated proposal
+cancellation/retry and saved/runtime failure recovery, short-height feedback, repeated secret editing and removal reconciliation.
+`control-panel-runtime.test.ts` additionally launches a process fixture with the
+actual Pi extension loader, command context, `ui.custom`, theme and both native
+renderers. It covers a symlinked agent root, all apply scopes, masked input,
+responsive overlay composition, close/reopen and focus restoration without a VM.
+It drives tree keys rather than section menus, including all scoped actions
+(fake SDK, no live VM) and literal command letters in inputs. It always tests the declared Pi 1.5.2 runtime;
+include an older installed Pi runtime with:
+
+```sh
+PI_MSB_TEST_PI_PACKAGE=/path/to/pi-coding-agent \
+  node --experimental-strip-types --import ./test/setup.ts --test extensions/pi-msb/control-panel-runtime.test.ts
+```
+
+The fixture overrides `PI_PACKAGE_DIR` to match the selected runtime: an inherited
+override for a different version can otherwise load incompatible theme assets.
+These are not live-VM or human-terminal tests. Before release, manually verify
+both native modes, themes, IME, bracketed paste, rapid resizing, and session
+switch/shutdown. Do not enable terminal input recording when entering secrets.
+
+Changed saves preserve sparse parsed raw data, not TOML comments/layout. Ordinary
+external edits and unsafe paths fail validation; portable Node APIs cannot provide
+an atomic compare-and-swap rename against a malicious host process. Keep policy
+outside every writable workspace/mount. See [backend contract](settings-backend.md).
 
 ### Bundled flock addon
 
@@ -108,7 +295,8 @@ pruning, and sets `bootstrap_tools = false` so the result measures repeat boot
 and readiness rather than an image pull or package install.
 The p95 must be at most 2,000 ms. Every sandbox is shut down and removed. If
 lifecycle cleanup fails, the test fails and retains its reported `.tmp` directory
-for recovery instead of claiming success.
+for recovery instead of claiming success. Cleanup diagnostics use the observed
+runtime name, not a name derived from the session ID.
 
 Run the tool directly to change the image, sample count, warm-ups, or limit:
 
@@ -135,6 +323,10 @@ reviewing the script:
 PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh
 ```
 
+The CI cleanup guard tracks actual sandbox name/session pairs and rechecks
+managed/session labels before stopping or removing a resource; random names
+are never treated as proof of ownership.
+
 Without that variable the script prints a `SKIP` line for every scenario and
 exits successfully; this skip path does not validate virtualization. If
 virtualization is unavailable, it prints the reason and skips the matrix rather
@@ -143,16 +335,24 @@ test image; the default is `ghcr.io/hcohe/pi-microsandbox:latest`. The main
 scenarios use `pull_policy = "always"` by default. To test an image already
 imported with `msb load`, set `PI_MSB_LIVE_PULL_POLICY=never`; do not use that
 override as evidence for a published image.
-The prepared-image scenario boots all six latest variant tags under
+The prepared-image scenario boots the default latest tag under
 `network.mode = "deny"` with bootstrap disabled. Set
-`PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated image cohort, or use the
+`PI_MSB_LIVE_PREPARED_IMAGES` to a comma-separated custom image list, or use the
 legacy singular `PI_MSB_LIVE_PREPARED_IMAGE` to test one image. The live matrix
 uses `pull_policy = "always"` intentionally so mutable development tags cannot
 remain stale on the self-hosted runner. Review the output to confirm that every scenario reports `PASS`, not `SKIP`.
-The workspace scenarios must show that a Git subdirectory mounts the whole
-worktree, a non-Git cwd mounts itself, and routed writes appear immediately on
-the host. They also cover off/on and reload, stale-sandbox pruning, fail-closed
-boot errors, and approved host execution. Docker release validation must cover
+The workspace scenarios must show that only canonical `realpath(cwd)` is
+bound read/write, with the lexically resolved cwd as guest root and command cwd,
+for both Git and non-Git directories. A Git subdirectory must not automatically
+expose Git ancestors or siblings outside cwd; routed writes must appear
+immediately on the host. Git metadata inside cwd must not select the bind, and
+external linked-worktree/submodule metadata must not be separately mounted.
+Validate shared main-root Git Project config and Dockerfile/context read/write
+from main, linked and nested cwd; unchanged non-Git/unsupported fallback and Global;
+readable canonical path keys, bounded no-follow catalog traversal and reserved-artifact
+collisions; nearest Git discovery boundaries; per-current-cwd
+session isolation and approval invalidation on cwd replacement. They also cover off/on and
+reload, stale-sandbox pruning, fail-closed boot errors, and approved host execution. Docker release validation must cover
 daemon readiness, bridge DNS and HTTPS, user-defined networking, Buildx,
 Compose, idle wake, double port publishing, nested-container access to the
 workspace, and network enforcement for deny and allowlist policies. A skipped
@@ -160,16 +360,19 @@ scenario is not release evidence.
 
 ## Image development
 
-The image workflow derives the `base`, `node`, `python`, `rust`, `go`, and
-`default` build matrix from `default-image/variants.json`. Pull requests build
-and verify all six variants for AMD64 and ARM64. Main-branch builds publish each
-variant's mutable latest tag and a commit-specific tag. Release builds pin the
-Ubuntu image digest and one dated apt snapshot for all variants, while published
-images restore normal apt sources for project use. See [Images](images.md#add-a-language-variant)
-for the modular installer and verifier architecture, contribution rules, and
-local validation commands. Docker changes must also pass:
+The image workflow derives a single-default build matrix from
+`default-image/variants.json`. Validation rejects extra images or any change to
+the fixed Node.js, Python, Rust, and Go runtime set. Pull requests build and
+verify the complete image for AMD64 and ARM64. Main-branch builds publish
+`latest` and `sha-COMMIT` tags. The Ubuntu base image remains digest-pinned;
+assembly and runtime use Ubuntu's normal signed apt repositories, with strict
+index updates and bounded acquisition retries. Apt package versions can change
+between builds. See [Images](images.md#maintain-the-default-image) for the modular
+installer and verifier architecture and local validation commands. Docker changes
+must also pass:
 
 ```sh
+node scripts/image-variants.mjs self-test
 node scripts/image-variants.mjs matrix
 shellcheck -e SC1091 default-image/install/*.sh default-image/verify/*.sh
 ```
@@ -411,17 +614,16 @@ temporary staging tree, records each binary's SHA-256, smoke-tests the exact
 tarball on every supported target, and packs only once. The publish job downloads
 and publishes those verified bytes without repacking.
 
-The sandbox image workflow publishes all six AMD64 and ARM64 variants to
+The sandbox image workflow publishes one AMD64 and ARM64 default image to
 `ghcr.io/hcohe/pi-microsandbox`. An `image-vX.Y.Z` Git tag publishes the
-write-once image cohort: `base-X.Y.Z`, `node-X.Y.Z`, `python-X.Y.Z`,
-`rust-X.Y.Z`, `go-X.Y.Z`, and `X.Y.Z` for the default variant. Package tags
+write-once `X.Y.Z` image tag. Package tags
 remain `vX.Y.Z` and never start image builds. Manual image workflow runs validate
 only. The workflow refuses to overwrite an existing version tag.
 
-Image and package releases are independent. Publish and verify an image cohort
+Image and package releases are independent. Publish and verify an image
 before changing the extension default to its `VERSION@sha256:DIGEST` reference.
 The npm workflow requires that digest-qualified reference, checks it against the
-public default tag, checks every variant and both platforms against the image
+public default tag, checks the default image on both platforms against the image
 tag commit, and verifies image provenance before publishing. A package
 administrator must make the GHCR package public before the package release so
 both release verification and Microsandbox can pull it without registry

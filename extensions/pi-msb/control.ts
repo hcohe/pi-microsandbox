@@ -1,28 +1,38 @@
+import { configurationFailureSnapshot, formatConfigurationFailure, type ConfigurationFailureSnapshot } from "./configuration-failure.ts";
+import { formatImagePreparationFailure, imagePreparationFailureSnapshot, type ImagePreparationFailureSnapshot } from "./image-boot-notice.ts";
+import { PendingArtifacts, selectionVersion } from "./image-artifact.ts";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import type { DockerfileSource } from "./image-source.ts";
+import { openDockerfile } from "./dockerfile-storage.ts";
+import { BUILD_FAILURE, buildDockerfileImage, ensureDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
+import { isIP } from "node:net";
+import { join, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  applyOverride,
   DEFAULT_CONFIG,
   isDisabledByEnv,
-  overridesToToml,
   resolveConfig,
   resolveSecretValue,
-  removeOverride,
   toEffectiveToml,
 } from "./config.ts";
+import { boundDiagnosticsReport, type DiagnosticFailureCode } from "./diagnostics-tools.ts";
+import { projectSettingsJson } from "./settings-json.ts";
+import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
+import { classifySettingsEffect, LIVE_SETTINGS_KEYS } from "./settings-effect.ts";
+import { SettingsEditor } from "./settings.ts";
 import { buildSandboxLabels, decodeSessionState, normalizeSandboxRecord, encodeSessionState } from "./labels.ts";
 import { acquireOwnerLock, createLocksPort } from "./locks.ts";
 import { createBashOps, createFindOps, createGrepOps } from "./operations-exec.ts";
 import { createEditOps, createLsOps, createReadOps, createWriteOps } from "./operations.ts";
 import { pruneStale, type PrunePort } from "./prune.ts";
 import { createSdkTransport } from "./transport.ts";
-import { discoverWorkspace } from "./workspace.ts";
+import { assertWorkspaceRootCurrent, discoverWorkspace } from "./workspace.ts";
 import { createSandboxManager, type InspectedSandbox, type SandboxManagerDeps } from "./sandbox-manager.ts";
 import {
   LOCKFILE_VERSION,
-  sandboxNameFor,
+  createSessionExecution,
+  type AgentRuntimePolicySnapshot,
   type BootRequest,
   type Config,
   type LockInfo,
@@ -33,14 +43,15 @@ import {
   type RuntimeExecution,
   type RuntimePreparation,
   type RuntimeState,
+  type ImagePreparationPhase,
+  type RuntimePolicySnapshot,
+  type SessionExecutionIdentity,
   type ToolOperations,
   type ToolOpsProvider,
   type Workspace,
-  type DeepPartial,
 } from "./types.ts";
 
 const STATE_ENTRY = "pi-msb.state";
-const OVERRIDE_ENTRY = "pi-msb.override";
 const REQUIRED_GUEST_COMMANDS = ["bash", "rg", "file", "cat", "mkdir", "rm"] as const;
 
 type AnyRecord = Record<string, any>;
@@ -50,6 +61,8 @@ export interface MicrosandboxModule {
   Sandbox: AnyRecord;
   NetworkPolicy?: AnyRecord;
   Rule?: AnyRecord;
+  Image?: Pick<typeof import("microsandbox").Image, "get" | "load" | "save" | "inspect">;
+  defaultBackendKind?: () => "local" | "cloud";
 }
 
 export interface SessionSetup {
@@ -73,6 +86,10 @@ export interface MsbControlOptions {
   entries?: () => readonly unknown[];
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
   onState?: (state: RuntimeState) => void;
+  onImagePreparation?: (phase: ImagePreparationPhase) => void;
+  onImagePreparationFailure?: (message: string) => void;
+  onConfigurationFailure?: (failure: ConfigurationFailureSnapshot) => void;
+  onCustomImageBoot?: (source: DockerfileSource) => void;
 }
 
 export interface MsbIntegration {
@@ -81,15 +98,31 @@ export interface MsbIntegration {
   provider: ToolOpsProvider;
   configRef: { value: Config };
   configureSession(setup: SessionSetup): Promise<RuntimeState>;
+  /** Lifecycle owner must call this on shutdown; does not stop the manager. */
+  endSession(): void;
 }
 
 function errorText(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
 }
 
-function redactedError(error: unknown, config: Config): Error {
-  let message = errorText(error);
-  for (const secret of config.secrets) if (secret.value) message = message.split(secret.value).join("[REDACTED]");
+function secretDescriptors(config: Config): string[] {
+  return config.secrets.flatMap((secret) => [secret.textValue, secret.hostEnv, secret.hostCmd]).filter((value): value is string => typeof value === "string" && !!value);
+}
+
+function redactSecretText(text: string, values: Iterable<string>): string {
+  const variants = new Set<string>();
+  for (const value of values) if (value) {
+    variants.add(value);
+    variants.add(JSON.stringify(value).slice(1, -1));
+  }
+  // Longest first prevents overlapping credentials leaving a suffix visible.
+  for (const value of [...variants].sort((a, b) => b.length - a.length)) text = text.split(value).join("[REDACTED]");
+  return text;
+}
+
+function redactedError(error: unknown, config: Config, resolvedValues: Iterable<string> = []): Error {
+  const message = redactSecretText(errorText(error), [...secretDescriptors(config), ...resolvedValues]);
   return new Error(message || "microsandbox operation failed");
 }
 
@@ -190,7 +223,8 @@ function applyNetwork(builder: AnyRecord, config: Config, sdk: MicrosandboxModul
       const policy = policyApi.builder().defaultDeny().defaultIngress("deny");
       for (const host of network.allowHosts) {
         policy.egress((rule: AnyRecord) => rule.allow((destination: AnyRecord) => {
-          if (host.includes("/") || /^\d+(?:\.\d+){3}$/.test(host)) return destination.cidr(host);
+          if (host.includes("/")) return destination.cidr(host);
+          if (isIP(host)) return destination.ip(host);
           return destination.domain(host);
         }));
       }
@@ -205,11 +239,11 @@ function applyNetwork(builder: AnyRecord, config: Config, sdk: MicrosandboxModul
   }
 }
 
-function lockInfoFor(request: BootRequest): LockInfo {
+function lockInfoFor(request: BootRequest, name: string): LockInfo {
   return {
     version: LOCKFILE_VERSION,
     sessionId: request.sessionId,
-    sandboxName: request.config.sandboxName ?? sandboxNameFor(request.sessionId),
+    sandboxName: name,
     cwd: request.cwd,
     root: request.workspace.hostRoot,
     pid: process.pid,
@@ -227,31 +261,106 @@ function persistenceState(entries: readonly unknown[], sessionId: string): Persi
   return null;
 }
 
-function sanitizeOverride(key: string, value: unknown): unknown {
-  if (/secret|password|token|credential|\.value/i.test(key)) return "[REDACTED]";
-  return structuredClone(value);
-}
-
 export function createMsbIntegration(options: MsbControlOptions): MsbIntegration {
   const configRef = { value: { ...DEFAULT_CONFIG, network: { ...DEFAULT_CONFIG.network }, docker: { ...DEFAULT_CONFIG.docker } } as Config };
   let sessionId = options.sessionId;
   let cwd = options.cwd;
   let workspace: Workspace | null = null;
   let resolved: ResolvedConfig = { config: configRef.value, provenance: {}, warnings: [] };
-  let overrides: DeepPartial<Config> = {};
+  const resolutionSanitizers = new WeakMap<ResolvedConfig, SettingsSanitizer>();
+  const requestSanitizers = new WeakMap<Config, SettingsSanitizer>();
   let projectTrusted = true;
+  const artifacts = new PendingArtifacts();
+  const artifactOperations = new Set<Promise<unknown>>();
+  const withArtifactOperation = async <T>(operation: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    const pending = operation(AbortSignal.any([buildAbort.signal, ...(signal ? [signal] : [])]));
+    artifactOperations.add(pending);
+    try { return await pending; } finally { artifactOperations.delete(pending); }
+  };
+  const settingsInput = () => ({ cwd, repoRoot: workspace?.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env });
+  const settings = new SettingsEditor(settingsInput(), sessionId);
+  // Diagnostics never resolve configuration or inspect settings. Configuration
+  // keeps only safe static projections; image failures separately retain bounded,
+  // failure-time sanitized snapshots. Raw parser/SDK errors are withheld:
+  // even a known sanitizer cannot
+  // prove coverage for rejected syntax or unobserved reconnect credentials.
+  let diagnosticConfigurationFailure: ConfigurationFailureSnapshot | undefined;
+  let configurationFailureAttempt: object = {};
+  let diagnosticDesired: Record<string, unknown> | undefined;
+  let diagnosticFailure: DiagnosticFailureCode = "unknown";
+  let diagnosticImageFailure: { identity: SessionExecutionIdentity; snapshot: ImagePreparationFailureSnapshot } | undefined;
+  let imageFailureAttempt: object = {};
+  const beginImageFailureAttempt = () => {
+    diagnosticImageFailure = undefined;
+    return imageFailureAttempt = {};
+  };
+  const safeImageFailure = (error: unknown, resolution: ResolvedConfig, config: Config,
+    operation: ImagePreparationFailureSnapshot["operation"],
+    sanitize = resolutionSanitizers.get(resolution) ?? createSettingsSanitizer([config])) => {
+    const sensitive = new Set(logSecretRedactions);
+    let unavailableTokens = config.secrets.some((secret) => secret.hostCmd !== undefined && !resolvedCommandSources.has(secret.hostCmd));
+    try {
+      for (const secret of config.secrets) if (secret.hostEnv) {
+        const value = (options.env ?? process.env)[secret.hostEnv];
+        if (value) sensitive.add(value);
+        else unavailableTokens = true;
+      }
+    } catch { unavailableTokens = true; }
+    return imagePreparationFailureSnapshot(error, (text) => unavailableTokens
+      ? "Diagnostic detail withheld: startup secret tokens unavailable for redaction."
+      : sanitize(redactedError(text, config, sensitive).message), operation, {
+        allowUpstreamTruncatedOutput: !unavailableTokens && sanitize.hasPrivateLiterals === false
+          && config.secrets.length === 0 && sensitive.size === 0,
+      });
+  };
+  let capturingBootFailure = false;
+  const cacheDiagnosticConfig = (config: Config): void => {
+    diagnosticDesired = {
+      autoStart: config.autoStart, allowHostExecution: config.allowHostExecution,
+      bootstrapTools: config.bootstrapTools, blockThirdParty: config.blockThirdParty,
+      secretCount: config.secrets.length, mountCount: config.mounts.length,
+      networkMode: config.network.mode, dockerMode: config.docker.mode,
+      fallbackMode: config.fallbackMode,
+    };
+  };
+  let hostExecutionToken: object = {};
+  const pendingHostChanges = new Map<symbol, SessionExecutionIdentity>();
   let configReady = false;
+  let settingsReady = false;
+  let pendingRestart = false;
+  const logSecretRedactions = new Set<string>();
+  let endingSession = false;
+  const resolvedCommandSources = new Set<string>();
   let explicitOff = isDisabledByEnv(options.env ?? process.env);
-  let failureState: RuntimeState | null = explicitOff ? { status: "off", info: null } : { status: "unavailable", info: null, reason: "session has not started" };
+  let failureState: RuntimeState | null = { status: "unavailable", info: null, reason: "session has not started" };
   let sdkPromise: Promise<MicrosandboxModule> | null = null;
   let activeProjectRoot = cwd;
 
+  const redactDiagnostic = async (text: string): Promise<string> => {
+    try {
+      const sensitive = new Set(logSecretRedactions);
+      for (const value of secretDescriptors(configRef.value)) sensitive.add(value);
+      for (const secret of configRef.value.secrets) {
+        // A fresh reconnect cannot recover the token used by an existing VM.
+        // Never execute a command for diagnostics or expose potentially unmasked logs.
+        if (secret.hostCmd !== undefined && !resolvedCommandSources.has(secret.hostCmd)) return "Diagnostic unavailable: startup secret tokens are unavailable for redaction.";
+        if (secret.hostEnv !== undefined) sensitive.add(await resolveSecretValue(secret, options.env ?? process.env));
+      }
+      return redactSecretText(text, sensitive);
+    } catch { return "Diagnostic unavailable: a secret source could not be read for redaction."; }
+  };
   const loadSdk = async (): Promise<MicrosandboxModule> => {
     if (!sdkPromise) sdkPromise = (options.sdkLoader ?? (async () => await import("microsandbox")))();
     return sdkPromise;
   };
   const lockPort = () => options.locksPort ?? createLocksPort({ lockDir: expandHome(configRef.value.lockDir) });
-  const sdk = async () => loadSdk();
+  const sdk = async () => {
+    try { return await loadSdk(); }
+    catch (error) {
+      if (capturingBootFailure && diagnosticFailure === "runtime_start_failed") diagnosticFailure = "native_sdk_unavailable";
+      throw error;
+    }
+  };
 
   const listSandboxPage = async (input: { labels: Record<string, string>; cursor?: string }) => {
     const msb = await sdk();
@@ -287,9 +396,15 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
 
   const deps: SandboxManagerDeps = {
-    acquireOwnerLock: async (request) => options.acquireOwnerLock
-      ? options.acquireOwnerLock(request)
-      : acquireOwnerLock({ lockDir: expandHome(request.config.lockDir) }, lockInfoFor(request)),
+    redactError: (message) => redactedError(message, configRef.value, logSecretRedactions).message,
+    disposed: () => {
+      if (endingSession) {
+        logSecretRedactions.clear(); resolvedCommandSources.clear(); endingSession = false;
+      }
+    },
+    acquireOwnerLock: async (request, name) => options.acquireOwnerLock
+      ? options.acquireOwnerLock(request, name)
+      : acquireOwnerLock({ lockDir: expandHome(request.config.lockDir) }, lockInfoFor(request, name)),
     pruneOthers: async (currentSessionId) => pruneStale({ port: prunePort, locks: lockPort(), currentSessionId, stopTimeoutMs: configRef.value.stopTimeoutMs }),
     inspectSandbox: async (name) => {
       const msb = await sdk();
@@ -303,9 +418,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     connectSandbox: async (value) => objectConfig(value)._handle.connect(),
     startSandbox: async (value) => objectConfig(value)._handle.startDetached(),
-    createSandbox: async (request) => {
+    createSandbox: async (request, name, activationGuard) => {
       const msb = await sdk();
-      const name = request.config.sandboxName ?? sandboxNameFor(request.sessionId);
       const labels = buildSandboxLabels({ sessionId: request.sessionId, cwd: request.cwd, root: request.workspace.hostRoot, guestRoot: request.workspace.guestRoot, pid: process.pid, image: request.config.image });
       let builder = msb.Sandbox.builder(name).image(request.config.image).pullPolicy(request.config.pullPolicy).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeout(request.config.idleTimeoutSec).detached(request.config.detached).workdir(request.workspace.cwd).labels(labels);
       builder.volume(request.workspace.guestRoot, (m: AnyRecord) => m.bind(request.workspace.hostRoot));
@@ -321,22 +435,30 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const resolvedSecrets: string[] = [];
       try {
         for (const secret of request.config.secrets) {
-          const value = await resolveSecretValue(secret.value, options.env ?? process.env);
+          await activationGuard?.();
+          let value: string;
+          try { value = await resolveSecretValue(secret, options.env ?? process.env); }
+          catch (error) {
+            diagnosticFailure = secret.hostCmd !== undefined ? "host_secret_command_failed"
+              : secret.hostEnv !== undefined ? "host_secret_environment_unavailable" : "unknown";
+            throw error;
+          }
           resolvedSecrets.push(value);
+          if (value) logSecretRedactions.add(value);
+          if (secret.hostCmd !== undefined) resolvedCommandSources.add(secret.hostCmd);
           builder.secret((entry: AnyRecord) => {
             entry.env(secret.env).value(value).requireTlsIdentity(true);
             for (const host of secret.allowHosts) {
-              if (host.includes("*") || host.includes("?")) entry.allowHostPattern(host);
+              if (host.startsWith("*.")) entry.allowHostPattern(host);
               else entry.allowHost(host);
             }
             return entry;
           });
         }
+        await activationGuard?.();
         return await builder.create();
       } catch (error) {
-        let message = errorText(error);
-        for (const value of resolvedSecrets) if (value) message = message.split(value).join("[REDACTED]");
-        throw new Error(message || "sandbox creation failed");
+        throw redactedError(error, request.config, resolvedSecrets);
       }
     },
     stopAndRemove: async (name, timeout) => {
@@ -364,6 +486,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       } as ToolOperations;
     },
     prepareRuntime: async (runtime, config): Promise<RuntimePreparation> => {
+      try {
       const commandsMissing = async (commandNames: readonly string[]) => {
         const result = await Promise.all(commandNames.map(async (command) => ({
           command,
@@ -457,86 +580,504 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         return { docker: { mode, readiness: "unavailable", reason } };
       }
       return { docker: { mode, readiness: "ready", version, storageDriver } };
+      } catch (error) {
+        diagnosticFailure = "runtime_preparation_failed";
+        throw error;
+      }
     },
     persist: (state) => options.appendEntry?.(STATE_ENTRY, encodeSessionState(state)),
   };
 
+  const execution = createSessionExecution(options.sessionId, options.cwd);
+  // Manager preflights reuse the boot request. Retain its originating lifecycle
+  // identity so late boot/reconnect callbacks cannot publish obsolete metadata.
+  const requestExecutions = new WeakMap<BootRequest, SessionExecutionIdentity>();
+  const requestBootNotices = new WeakMap<BootRequest, () => void>();
+  deps.bootInitiated = (request) => requestBootNotices.get(request)?.();
+  let adopted: { identity: SessionExecutionIdentity; policy: RuntimePolicySnapshot; agentPolicy: AgentRuntimePolicySnapshot; mounts: Config["mounts"] } | undefined;
+  const currentAdoption = () => adopted?.identity === execution.context.current() ? adopted : undefined;
+  deps.adopted = (request, verification) => {
+    const identity = requestExecutions.get(request);
+    if (!identity || identity !== execution.context.current()) return;
+    diagnosticFailure = "unknown";
+    const sameRuntime = adopted?.identity === identity;
+    const knownFields = verification === "created" ? Object.keys(request.config) as Array<keyof Config>
+      : verification === "live" && sameRuntime ? adopted!.policy.knownFields : [...LIVE_SETTINGS_KEYS];
+    const safeConfig = Object.fromEntries(knownFields.map((key) => [key, key === "secrets"
+      ? request.config.secrets.map((secret) => ({ env: secret.env, allowHosts: [...secret.allowHosts],
+        ...Object.fromEntries(["textValue", "hostEnv", "hostCmd"].filter((source) => Object.hasOwn(secret, source)).map((source) => [source, "<redacted>"])),
+      }))
+      : request.config[key]])) as unknown as Config;
+    const provenance: Record<string, string> = Object.fromEntries(Object.entries(resolved.provenance).filter(([key]) => knownFields.some((field) => key === field || key.startsWith(`${field}.`) || key.startsWith(`${field}[`))));
+    const effectiveToml = toEffectiveToml({ ...resolved, config: safeConfig });
+    if (verification === "reconnected" && sameRuntime && adopted!.policy.verification === "reconnected" && adopted!.policy.effectiveToml === effectiveToml) return;
+    const policy: RuntimePolicySnapshot = {
+      effectiveToml, provenance, automaticSandboxName: knownFields.includes("sandboxName") && request.config.sandboxName === null,
+      knownFields: [...knownFields], verification: verification === "created" || verification === "live" && sameRuntime && adopted!.policy.verification === "created" ? "created" : "reconnected", adoptedAt: Date.now(),
+    };
+    const sanitize = requestSanitizers.get(request.config) ?? createSettingsSanitizer([request.config]);
+    const agentPolicy = sanitize({
+      // Human TOML stays source-masked, but agents can inspect known host source descriptors.
+      settings: projectSettingsJson(Object.fromEntries(knownFields.map((key) => [key, request.config[key]]))), knownFields: policy.knownFields,
+      provenance: policy.provenance, verification: policy.verification, adoptedAt: policy.adoptedAt,
+    }, [request.config]);
+    adopted = { identity, policy, agentPolicy, mounts: structuredClone(request.config.mounts) };
+  };
+  let managerIdentity: SessionExecutionIdentity | undefined;
   const manager = createSandboxManager(deps);
-  const notifyState = (state: RuntimeState) => options.onState?.(state);
-  const visibleState = (): RuntimeState => {
-    const state = failureState ?? manager.getState();
-    if (explicitOff && (state.status === "disabled" || state.status === "off")) return { status: "off", info: null };
+  const shutdown = manager.shutdown.bind(manager);
+  manager.shutdown = async () => {
+    invalidateActivation();
+    await Promise.allSettled([...artifactOperations]);
+    try { await shutdown(); } finally { await artifacts.dispose(); }
+  };
+  let buildAbort = new AbortController();
+  let activationGeneration = 0;
+  let imagePreparation: { generation: number; identity: SessionExecutionIdentity; phase: ImagePreparationPhase } | undefined;
+  let bootedDockerfileDigest: string | undefined;
+  let bootedDockerfileIdentity: string | undefined;
+  const invalidateActivation = () => {
+    capturingBootFailure = false;
+    activationGeneration++;
+    imagePreparation = undefined;
+    buildAbort.abort();
+    buildAbort = new AbortController();
+  };
+  const boot = async (request: Parameters<typeof manager.boot>[0], approval?: { guard?: () => Promise<void>; signal?: AbortSignal }) => {
+    invalidateActivation();
+    const generation = activationGeneration;
+    const identity = execution.context.current();
+    const resolution = resolved;
+    const source = resolution.imageBuild;
+    let failureAttempt = imageFailureAttempt;
+    const selectedWorkspace = workspace;
+    const signal = AbortSignal.any([buildAbort.signal, ...(approval?.signal ? [approval.signal] : [])]);
+    const current = () => generation === activationGeneration && execution.context.current() === identity && !signal.aborted;
+    const progress = (phase: ImagePreparationPhase) => {
+      if (!current() || imagePreparation?.phase === phase && imagePreparation.generation === generation) return;
+      imagePreparation = { generation, identity, phase };
+      notifyState(visibleState());
+      options.onImagePreparation?.(phase);
+    };
+    const clearPreparation = () => {
+      if (imagePreparation?.generation !== generation) return;
+      imagePreparation = undefined;
+      if (execution.context.current() === identity) notifyState(visibleState());
+    };
+    const cancelled = () => {
+      if (generation === activationGeneration && execution.context.current() === identity) {
+        failureState = { status: "unavailable", info: null, reason: "Custom image activation cancelled; no host fallback was attempted." };
+        for (const [token, owner] of displayActivities) if (owner === identity) displayActivities.delete(token);
+        clearPreparation();
+      }
+    };
+    signal.addEventListener("abort", cancelled, { once: true });
+    const approvalBound = !!(approval?.guard || approval?.signal);
+    const assertApproval = async () => {
+      approval?.signal?.throwIfAborted();
+      if (approvalBound && !current()) throw new Error("Runtime activation superseded");
+      await approval?.guard?.();
+      approval?.signal?.throwIfAborted();
+      if (approvalBound && !current()) throw new Error("Runtime activation superseded");
+    };
+    const assertActivation = async () => {
+      await assertApproval();
+      if (!current() || resolved !== resolution || workspace !== selectedWorkspace) throw new Error("Runtime activation superseded");
+      await assertWorkspaceRootCurrent(request.workspace);
+      if (!current() || resolved !== resolution || workspace !== selectedWorkspace) throw new Error("Runtime activation superseded");
+    };
+    let assertImage: (() => Promise<void>) | undefined;
+    const assertRuntime = async () => { await assertActivation(); await assertImage?.(); await assertActivation(); };
+    managerIdentity = identity;
+    requestExecutions.set(request, managerIdentity);
+    diagnosticFailure = "runtime_start_failed";
+    capturingBootFailure = true;
+    try {
+      if (source && manager.isActive() && source.loadedDigest !== bootedDockerfileDigest) request.forceRecreate = true;
+      // Live verification/handoff is not a new preparation attempt and must retain
+      // completed explicit failures. Actual preparation starts its own diagnostic epoch.
+      if (source && (!manager.isActive() || request.forceRecreate)) failureAttempt = beginImageFailureAttempt();
+      if (source) {
+        request.blockHostFallback = true;
+        try {
+          if (request.config.image !== resolved.config.image || request.config.pullPolicy !== "never") throw new Error(BUILD_FAILURE);
+          const msb = await sdk();
+          if (!current()) return visibleState();
+          if (!manager.isActive() || request.forceRecreate) {
+            const prepared = await withArtifactOperation((operationSignal) => ensureDockerfileImage({ sdk: msb, artifacts, source, signal: operationSignal, guard: assertActivation, onProgress: progress, previousSourceIdentity: bootedDockerfileIdentity }), signal);
+            await assertActivation();
+            Object.assign(source, prepared.source);
+            assertImage = prepared.assertCurrent;
+            // Stable aliases do not prove the image of a previously persisted VM.
+            // Only this integration's successful boot establishes runtime digest identity.
+            if (!bootedDockerfileDigest || source.loadedDigest !== bootedDockerfileDigest) request.forceRecreate = true;
+          } else {
+            assertImage = () => verifyDockerfileImage({ sdk: msb, source, signal });
+          }
+          await assertRuntime();
+        } catch (error) {
+          await assertApproval();
+          if (!current()) return visibleState();
+          const snapshot = safeImageFailure(error, resolution, request.config, "activation");
+          if (current() && imageFailureAttempt === failureAttempt && snapshot.failureKind !== "cancelled") {
+            beginImageFailureAttempt();
+            diagnosticImageFailure = { identity, snapshot };
+            options.onImagePreparationFailure?.(formatImagePreparationFailure(snapshot));
+          }
+          // This path deliberately bypasses manager fallback, even if host fallback was configured.
+          return { status: "unavailable", info: null, reason: BUILD_FAILURE } as RuntimeState;
+        }
+      }
+      // Image verification awaits do not retain approval; revalidate before runtime handoff.
+      await assertApproval();
+      if (!current()) return visibleState();
+      // Keep recovery's reviewed runtime status stable until approval is revalidated.
+      failureState = null;
+      if (source) requestBootNotices.set(request, () => {
+        if (current()) {
+          progress("booting");
+          options.onCustomImageBoot?.(source);
+        }
+      });
+      const result = await manager.boot(request, source ? assertRuntime : approvalBound ? assertApproval : undefined);
+      if (approvalBound) await assertApproval();
+      if (!current()) return visibleState();
+      if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
+      if (result.status === "active") {
+        bootedDockerfileDigest = source?.loadedDigest;
+        bootedDockerfileIdentity = source?.identity;
+      }
+      return result;
+    } catch (error) {
+      if (approvalBound && generation === activationGeneration && execution.context.current() === identity && !manager.isActive()) {
+        failureState = { status: "unavailable", info: null, reason: "Approved runtime activation was cancelled or superseded; no host fallback was attempted." };
+      }
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", cancelled);
+      clearPreparation();
+      if (generation === activationGeneration) capturingBootFailure = false;
+    }
+  };
+  const displayActivities = new Map<symbol, SessionExecutionIdentity>();
+  const displayState = (state = visibleState()): RuntimeState => {
+    if (imagePreparation?.identity === execution.context.current() && imagePreparation.generation === activationGeneration) {
+      return { status: "booting", info: null, pendingName: state.pendingName, imagePreparation: imagePreparation.phase };
+    }
+    if ([...displayActivities.values()].includes(execution.context.current())) {
+      return { status: "booting", info: null, ...(state.status === "booting" && state.pendingName ? { pendingName: state.pendingName } : {}) };
+    }
     return state;
   };
+  const notifyState = (state: RuntimeState) => options.onState?.(displayState(state));
+  const beginHostExecutionChange = (): (() => void) => {
+    const change = Symbol();
+    hostExecutionToken = {};
+    pendingHostChanges.set(change, execution.context.current());
+    return () => {
+      pendingHostChanges.delete(change);
+      hostExecutionToken = {};
+    };
+  };
+  const beginDisplayActivity = (): (() => void) => {
+    // A newly approved enable/reload supersedes any in-flight image preparation.
+    if (imagePreparation) invalidateActivation();
+    hostExecutionToken = {};
+    const token = Symbol();
+    const identity = execution.context.current();
+    displayActivities.set(token, identity);
+    notifyState(visibleState());
+    return () => {
+      displayActivities.delete(token);
+      hostExecutionToken = {};
+      if (execution.context.current() === identity) notifyState(visibleState());
+    };
+  };
+  const visibleState = (): RuntimeState => {
+    if (!execution.context.isReady()) {
+      if (failureState?.status === "unavailable") return failureState;
+      const booting = managerIdentity === execution.context.current() ? manager.getState() : undefined;
+      return { status: "booting", info: null, ...(booting?.status === "booting" && booting.pendingName ? { pendingName: booting.pendingName } : {}) };
+    }
+    const state = failureState ?? manager.getState();
+    if (explicitOff && (state.status === "disabled" || state.status === "off")) return { ...state, status: "off", info: null };
+    return state.status === "active" && !configReady ? { ...state, observation: "unknown" } : state;
+  };
+  deps.onState = () => {
+    hostExecutionToken = {};
+    if (managerIdentity !== execution.context.current()) return;
+    const state = visibleState();
+    if (execution.context.isReady() || state.status === "booting" && state.pendingName) notifyState(state);
+  };
   const provider: ToolOpsProvider = {
-    isActive: () => manager.isActive(),
-    getState: visibleState,
-    withRuntime: (callback) => manager.withRuntime(callback),
+    execution: execution.context,
+    isActive: () => execution.context.isReady() && visibleState().status === "active" && manager.isActive(),
+    getState: () => imagePreparation?.identity === execution.context.current() ? displayState() : visibleState(),
+    hostExecutionToken: () => execution.context.isReady() && settingsReady && configReady && workspace
+      && ![...displayActivities.values(), ...pendingHostChanges.values()].includes(execution.context.current()) ? hostExecutionToken : undefined,
+    validateHostRecoveryRoot: async (identity, token) => {
+      const selected = workspace;
+      const assertReady = () => {
+        execution.context.assertCurrent(identity);
+        if (!token || !selected || workspace !== selected || resolve(identity.cwd) !== selected.cwd || provider.hostExecutionToken!() !== token) {
+          throw new Error("Host recovery workspace/configuration changed");
+        }
+      };
+      try {
+        assertReady();
+        await assertWorkspaceRootCurrent(selected!);
+        assertReady();
+      } catch {
+        // Withdraw every outstanding approval on an unprovable/replaced root, even if restored later.
+        hostExecutionToken = {};
+        throw new Error("Host recovery canonical cwd or physical directory identity could not be verified; rediscover the workspace before retrying.");
+      }
+    },
+    refreshState: async () => {
+      const identity = execution.context.current();
+      if (execution.context.isReady() && configReady && !failureState && !explicitOff) await manager.refreshState?.();
+      return execution.context.current() === identity ? displayState() : { status: "booting", info: null };
+    },
+    withRuntime: async (callback) => {
+      const identity = execution.context.current();
+      execution.context.assertCurrent(identity);
+      if (visibleState().status !== "active") throw new Error("Sandbox is not available; tool execution is blocked.");
+      return manager.withRuntime((runtime) => {
+        // Acquisitions can queue behind boot/preflight. Recheck at callback entry,
+        // not exit: callbacks already using the old transport must drain normally.
+        execution.context.assertCurrent(identity);
+        return callback(runtime);
+      });
+    },
   };
   const effective = (): ResolvedConfig => resolved;
-  const configSnapshot = (): Config => structuredClone(configRef.value);
-  const overrideEntries = (entries: readonly unknown[]): DeepPartial<Config> => {
-    let result: DeepPartial<Config> = {};
-    for (const entry of entries) {
-      const value = objectConfig(entry);
-      if (value.type !== "custom" || value.customType !== OVERRIDE_ENTRY) continue;
-      if (value.data?.reset === true) { result = {}; continue; }
-      if (typeof value.data?.key !== "string") continue;
-      if (value.data?.unset === true) result = removeOverride(result, value.data.key);
-      else if (value.data?.value !== "[REDACTED]") result = applyOverride(result, value.data.key, value.data.value);
-    }
-    return result;
+  const configSnapshot = (): Config => {
+    const snapshot = structuredClone(configRef.value);
+    requestSanitizers.set(snapshot, resolutionSanitizers.get(resolved) ?? createSettingsSanitizer([snapshot]));
+    return snapshot;
   };
-  const resolveForSession = async (setup: SessionSetup, selected: Workspace): Promise<ResolvedConfig> => {
-    if (setup.config) return setup.config;
-    return resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted: setup.projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false, nativeImages = false, signal?: AbortSignal): Promise<ResolvedConfig> => {
+    hostExecutionToken = {};
+    configReady = false;
+    const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
+    const identity = execution.context.current();
+    const attempt = configurationFailureAttempt = {};
+    try {
+      if (approvedSettingsReload) settings.assertSession(input, sessionId);
+      else settings.configureSession(input, sessionId);
+      let sanitize!: SettingsSanitizer;
+      let next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary(), ...(nativeImages ? { imageSdkLoader: async () => loadSdk() } : {}) }, (captured) => { sanitize = captured; });
+      if (!nativeImages && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+        next = await resolveConfig({ ...input, temporaryOverrides: settings.temporary(), imageSdkLoader: async () => loadSdk() }, (captured) => { sanitize = captured; });
+      }
+      // Resolution evidence is published only for the current session and attempt.
+      resolutionSanitizers.set(next, sanitize);
+      if (execution.context.current() === identity && configurationFailureAttempt === attempt && !signal?.aborted) diagnosticConfigurationFailure = undefined;
+      return next;
+    } catch (error) {
+      const snapshot = configurationFailureSnapshot(error);
+      if (execution.context.current() === identity && configurationFailureAttempt === attempt && !signal?.aborted) {
+        const changed = JSON.stringify(diagnosticConfigurationFailure) !== JSON.stringify(snapshot);
+        diagnosticConfigurationFailure = snapshot;
+        // Resolution events only: passive diagnostics, polling and state churn never notify.
+        if (changed) {
+          try { options.onConfigurationFailure?.(snapshot); } catch { /* UI must not affect fail-closed resolution. */ }
+        }
+      }
+      // Rejected sources may contain secrets absent from the prior valid config.
+      throw new Error(formatConfigurationFailure(snapshot));
+    }
   };
 
-  const configureSession = async (setup: SessionSetup): Promise<RuntimeState> => {
+  const configureSessionInternal = async (setup: SessionSetup, isCurrent: () => boolean): Promise<RuntimeState> => {
+    await artifacts.dispose();
+    if (!isCurrent()) return visibleState();
     sessionId = setup.sessionId;
     cwd = setup.cwd;
     configReady = false;
+    settingsReady = false;
+    workspace = null;
+    diagnosticDesired = undefined;
+    diagnosticFailure = "unknown";
     projectTrusted = setup.projectTrusted;
+    settings.beginSession({ ...settingsInput(), cwd: setup.cwd, repoRoot: undefined }, setup.sessionId);
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     if (explicitOff) {
-      failureState = { status: "off", info: null };
-      notifyState(failureState);
+      try {
+        const selected = await discoverWorkspace(cwd);
+        if (!isCurrent()) return visibleState();
+        workspace = selected;
+        cwd = workspace.cwd;
+        activeProjectRoot = workspace.guestRoot;
+        settings.configureSession(settingsInput(), sessionId);
+        settingsReady = true;
+        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
+      } catch {
+        if (!isCurrent()) return visibleState();
+        failureState = { status: "unavailable", info: null, reason: "PI_MSB_DISABLE is set; workspace discovery failed. Settings editing is blocked. Fix the working directory and restart Pi." };
+      }
       return visibleState();
     }
     let next: ResolvedConfig;
     try {
-      overrides = overrideEntries(options.entries?.() ?? []);
-      workspace = await discoverWorkspace(cwd);
+      const selected = await discoverWorkspace(cwd);
+      if (!isCurrent()) return visibleState();
+      workspace = selected;
       cwd = workspace.cwd;
       activeProjectRoot = workspace.guestRoot;
-      next = await resolveForSession(setup, workspace);
+      settings.configureSession(settingsInput(), sessionId);
+      settingsReady = true;
+      next = setup.config ?? await resolveForWorkspace(workspace);
+      if (!isCurrent()) return visibleState();
     } catch (error) {
-      failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
-      notifyState(failureState);
+      if (!isCurrent()) return visibleState();
+      failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
       return visibleState();
     }
     resolved = next;
+    cacheDiagnosticConfig(next.config);
     configReady = true;
     Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
     const state = setup.restored ?? persistenceState(options.entries?.() ?? [], sessionId);
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     failureState = explicitOff ? { status: "off", info: null } : null;
     if (explicitOff || !configRef.value.autoStart) {
-      if (!explicitOff) { await manager.setEnabled(false); failureState = { status: "off", info: null }; }
+      if (!explicitOff) {
+        await manager.setEnabled(false);
+        if (!isCurrent()) return visibleState();
+        failureState = { status: "off", info: null };
+      }
       return visibleState();
     }
-    const result = await manager.boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: state });
+    const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: state });
+    if (!isCurrent()) return visibleState();
     if (result.status === "unavailable") failureState = result;
-    notifyState(visibleState());
     return visibleState();
   };
 
+  // Supersede synchronously, then serialize setup so an obsolete discovery or
+  // boot cannot overwrite the replacement's shared config/settings/runtime.
+  let sessionSetup: Promise<unknown> = Promise.resolve();
+  const configureSession = (setup: SessionSetup): Promise<RuntimeState> => {
+    const previous = execution.context.current();
+    invalidateActivation();
+    const identity = execution.begin(setup.sessionId, setup.cwd);
+    beginImageFailureAttempt();
+    configurationFailureAttempt = {};
+    diagnosticConfigurationFailure = undefined;
+    displayActivities.clear();
+    failureState = { status: "booting", info: null };
+    if (previous.sessionId !== setup.sessionId || previous.cwd !== setup.cwd) settings.endSession();
+    settingsReady = false;
+    configReady = false;
+    const isCurrent = () => execution.context.current() === identity;
+    const result = sessionSetup.then(async () => {
+      if (!isCurrent()) return visibleState();
+      try {
+        await configureSessionInternal(setup, isCurrent);
+      } catch (error) {
+        if (isCurrent()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+      }
+      if (isCurrent()) {
+        execution.finish(identity);
+        notifyState(visibleState());
+      }
+      return visibleState();
+    });
+    sessionSetup = result.catch(() => undefined);
+    return result;
+  };
+
+  const captureImageOperation = async <T>(operation: "build" | "load", signal: AbortSignal | undefined,
+    run: (signal: AbortSignal, sdk: MicrosandboxModule) => Promise<T>): Promise<T> => {
+    const identity = execution.context.current();
+    const attempt = beginImageFailureAttempt();
+    const resolution = resolved, config = configSnapshot();
+    const sanitize = requestSanitizers.get(config)!;
+    return withArtifactOperation(async (operationSignal) => {
+      try { return await run(operationSignal, await sdk()); }
+      catch (error) {
+        if (identity === execution.context.current() && attempt === imageFailureAttempt && !operationSignal.aborted) {
+          const snapshot = safeImageFailure(error, resolution, config, operation, sanitize);
+          if (snapshot.failureKind !== "cancelled") diagnosticImageFailure = { identity, snapshot };
+        }
+        throw error;
+      }
+    }, signal);
+  };
+
   const control: MsbControl = {
+    get settings() {
+      if (!settingsReady) throw new Error("Settings unavailable until canonical workspace discovery succeeds. Fix the working directory and restart Pi.");
+      return settings;
+    },
     getState: visibleState,
+    async openDockerfile(scope, ...retiredDestinations) {
+      if (retiredDestinations.length) throw new Error("Retired Dockerfile destinations are not supported");
+      const selected = workspace;
+      const identity = execution.context.current();
+      if (!selected || !settingsReady) return undefined;
+      const revision = settings.contextRevision;
+      const temporary = JSON.stringify(settings.temporary());
+      const check = () => {
+        if (execution.context.current() !== identity || settings.contextRevision !== revision
+          || JSON.stringify(settings.temporary()) !== temporary) throw new Error("Workspace/session/settings changed");
+      };
+      return openDockerfile(settingsInput(), selected.hostRoot, scope, check,
+        [...configSnapshot().mounts, ...(currentAdoption()?.mounts ?? [])]);
+    },
+    async readDockerfileArtifact(source, id) { return artifacts.read(source, id); },
+    async dockerfileSelectionVersion(source) { return selectionVersion(await sdk(), source); },
+    async buildDockerfile(options) {
+      return captureImageOperation("build", options.signal, (signal, sdk) => buildDockerfileImage({ ...options, signal, artifacts, sdk }));
+    },
+    async loadDockerfile(options) {
+      return captureImageOperation("load", options.signal, (signal, sdk) => loadDockerfileImage({ ...options, signal, artifacts, sdk }));
+    },
+    async getDiagnostics() {
+      const state = visibleState();
+      const statuses = ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"];
+      const status = statuses.includes(state.status) ? state.status : "unknown";
+      const failed = status === "unavailable" || status === "host-fallback";
+      const phase = !settingsReady ? "workspace_or_session_not_ready"
+        : !configReady ? "configuration_not_ready"
+        : failed ? "runtime_failure" : "none";
+      const code: DiagnosticFailureCode = !failed ? "none" : !settingsReady ? "workspace_unavailable"
+        : !configReady ? "invalid_configuration" : diagnosticFailure;
+      return boundDiagnosticsReport({
+        outcome: "diagnosed", readOnly: true, evidence: "cached; last-known, not live-probed",
+        runtime: { status, execution: status === "active" ? "sandbox" : status === "off" ? "explicit-host" : status === "host-fallback" ? "fallback-host" : "blocked" },
+        readiness: { workspaceReady: workspace !== null && settingsReady, settingsReady, configReady },
+        host: { platform: process.platform, arch: process.arch, node: process.version },
+        failure: { phase, code },
+        ...(diagnosticConfigurationFailure ? { configurationFailure: diagnosticConfigurationFailure } : {}),
+        ...(diagnosticImageFailure?.identity === execution.context.current() ? { imagePreparationFailure: diagnosticImageFailure.snapshot } : {}),
+        desired: { evidence: "last-known resolution; not live", validForSession: configReady,
+          ...(configReady && diagnosticDesired ? { settings: { ...diagnosticDesired } } : {}) },
+        adoption: { evidence: "last-known; not live", known: currentAdoption() !== undefined,
+          verification: currentAdoption()?.policy.verification ?? "unknown" },
+        recovery: !settingsReady
+          ? "Fix working-directory identity on the host and restart Pi; settings editing is blocked until canonical workspace discovery succeeds."
+          : "Use msb_config_get to inspect recovery constraints, then msb_config_set to propose a supported repair. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Never disable protection or use host fallback as an automatic repair.",
+        notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "live log/stdout reads", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
+      });
+    },
+    getAgentRuntimePolicy: () => {
+      const current = currentAdoption();
+      return current ? structuredClone(current.agentPolicy) : undefined;
+    },
+    getRuntimePolicy: () => {
+      const current = currentAdoption();
+      return current ? structuredClone(current.policy) : undefined;
+    },
     async setEnabled(enabled) {
+      const identity = execution.context.current();
+      const assertCurrent = () => execution.context.assertCurrent(identity);
+      assertCurrent();
+      if (!enabled) invalidateActivation();
       if (enabled && isDisabledByEnv(options.env ?? process.env)) {
         explicitOff = true;
-        failureState = { status: "off", info: null };
+        failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
         notifyState(failureState);
         return;
       }
@@ -547,90 +1088,165 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         }
         return;
       }
-      explicitOff = !enabled;
-      failureState = null;
-      if (!enabled) {
-        await manager.setEnabled(false);
-        failureState = { status: "off", info: null };
-      } else {
+      const endHostExecutionChange = beginHostExecutionChange();
+      const endDisplayActivity = enabled ? beginDisplayActivity() : () => undefined;
+      try {
+        explicitOff = !enabled;
+        failureState = null;
+        if (!enabled) {
+          await manager.setEnabled(false);
+          assertCurrent();
+          failureState = { status: "off", info: null };
+        } else {
+          try {
+            workspace = null;
+            settingsReady = false;
+            const selected = await discoverWorkspace(cwd);
+            assertCurrent();
+            workspace = selected;
+            settingsReady = true;
+            cwd = workspace.cwd;
+            activeProjectRoot = workspace.guestRoot;
+            const next = await resolveForWorkspace(workspace, false, true);
+            assertCurrent();
+            resolved = next;
+            cacheDiagnosticConfig(next.config);
+            configReady = true;
+            Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+            const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate: pendingRestart, restored: persistenceState(options.entries?.() ?? [], sessionId) });
+            assertCurrent();
+            if (result.status === "active") pendingRestart = false;
+            if (result.status === "unavailable") failureState = result;
+          } catch (error) {
+            assertCurrent();
+            configReady = false;
+            failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+          }
+        }
+        notifyState(visibleState());
+      } finally { endDisplayActivity(); endHostExecutionChange(); }
+    },
+    previewSettings: (draft) => draft.preview(configSnapshot()),
+    async reload(reloadOptions) {
+      const identity = execution.context.current();
+      const assertCurrent = () => { execution.context.assertCurrent(identity); reloadOptions?.signal?.throwIfAborted(); };
+      assertCurrent();
+      // The approval guard itself can yield before display/runtime activity begins.
+      const endHostExecutionChange = beginHostExecutionChange();
+      try {
+        await reloadOptions?.guard?.();
+        assertCurrent();
+        if (isDisabledByEnv(options.env ?? process.env)) {
+          explicitOff = true;
+          failureState = { status: "off", info: null, reason: "PI_MSB_DISABLE is set. Remove it and restart Pi to enable the sandbox." };
+          notifyState(failureState);
+          if (reloadOptions?.guard) throw new Error("Runtime reload disabled by environment");
+          return;
+        }
+        const endDisplayActivity = beginDisplayActivity();
         try {
-          workspace = await discoverWorkspace(cwd);
-          cwd = workspace.cwd;
-          activeProjectRoot = workspace.guestRoot;
-          const next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
+          let next: ResolvedConfig;
+          try {
+            workspace = null;
+            settingsReady = false;
+            const selected = await discoverWorkspace(cwd);
+            assertCurrent();
+            workspace = selected;
+            settingsReady = true;
+            cwd = workspace.cwd;
+            activeProjectRoot = workspace.guestRoot;
+            next = await resolveForWorkspace(workspace, !!reloadOptions?.guard, false, reloadOptions?.signal);
+            assertCurrent();
+          } catch (error) {
+            assertCurrent();
+            configReady = false;
+            if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
+            notifyState(visibleState());
+            throw error;
+          }
+          await reloadOptions?.guard?.();
+          assertCurrent();
+          pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
+          const imageRestart = next.imageBuild && manager.isActive() && next.imageBuild.loadedDigest !== bootedDockerfileDigest;
+          if ((pendingRestart || imageRestart) && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+            throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
+          }
+          const forceRecreate = pendingRestart;
           resolved = next;
+          cacheDiagnosticConfig(next.config);
           configReady = true;
           Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-          const result = await manager.boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: persistenceState(options.entries?.() ?? [], sessionId) });
-          if (result.status === "unavailable") failureState = result;
-        } catch (error) {
-          failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
-        }
-      }
-      notifyState(visibleState());
-    },
-    async reload() {
-      if (isDisabledByEnv(options.env ?? process.env)) {
-        explicitOff = true;
-        failureState = { status: "off", info: null };
-        notifyState(failureState);
-        return;
-      }
-      let next: ResolvedConfig;
-      try {
-        workspace = await discoverWorkspace(cwd);
-        cwd = workspace.cwd;
-        activeProjectRoot = workspace.guestRoot;
-        next = await resolveConfig({ cwd, repoRoot: workspace.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, cliOverridesToml: overridesToToml(overrides) });
-      } catch (error) {
-        configReady = false;
-        if (!manager.isActive()) failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value).message };
-        notifyState(visibleState());
-        throw error;
-      }
-      resolved = next;
-      configReady = true;
-      Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
-      failureState = null;
-      if (!explicitOff && configRef.value.autoStart && workspace) {
-        const result = await manager.boot({ sessionId, cwd, workspace, config: configSnapshot(), restored: persistenceState(options.entries?.() ?? [], sessionId) });
-        if (result.status === "unavailable") failureState = result;
-      }
-      notifyState(visibleState());
+          if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
+            const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) }, reloadOptions);
+            assertCurrent();
+            if (result.status === "unavailable" || result.status === "host-fallback") failureState = result;
+            else if (result.status === "active") pendingRestart = false;
+          } else failureState = null;
+          notifyState(visibleState());
+          if (["unavailable", "host-fallback"].includes(visibleState().status)) throw new Error("Settings saved, but sandbox activation failed. Inspect Overview; routed tools remain subject to configured safety policy.");
+        } finally { endDisplayActivity(); }
+      } finally { endHostExecutionChange(); }
     },
     async pruneNow() {
       const report = await pruneStale({ port: prunePort, locks: lockPort(), currentSessionId: sessionId, stopTimeoutMs: configRef.value.stopTimeoutMs });
+      for (const key of ["errors", "removed", "kept"] as const) report[key] = await Promise.all(report[key].map(redactDiagnostic));
       notifyState(visibleState());
       return report;
     },
     async getLogs(tailLines) {
       const name = visibleState().info?.name;
       if (!name) return "";
-      const msb = await sdk();
-      const handle = await msb.Sandbox.get(name);
-      const rows = await handle.logs(tailLines === undefined ? undefined : { tail: tailLines });
-      return rows.map((row: AnyRecord) => typeof row.text === "function" ? row.text() : Buffer.from(row.data ?? []).toString("utf8")).join("");
+      try {
+        const msb = await sdk();
+        const handle = await msb.Sandbox.get(name);
+        const rows = await handle.logs(tailLines === undefined ? undefined : { tail: tailLines });
+        const text = rows.map((row: AnyRecord) => typeof row.text === "function" ? row.text() : Buffer.from(row.data ?? []).toString("utf8")).join("");
+        return await redactDiagnostic(text);
+      } catch (error) {
+        throw new Error(await redactDiagnostic(errorText(error)));
+      }
     },
     getEffectiveConfig: effective,
     getEffectiveConfigToml: () => toEffectiveToml(effective()),
     async setOverride(key, value) {
-      overrides = applyOverride(overrides, key, value);
-      options.appendEntry?.(OVERRIDE_ENTRY, { key, value: sanitizeOverride(key, value) });
+      const draft = await settings.open("temporary");
+      draft.set(key, value);
+      await draft.apply();
       await control.reload();
     },
     async unsetOverride(key) {
-      overrides = removeOverride(overrides, key);
-      options.appendEntry?.(OVERRIDE_ENTRY, { key, unset: true });
+      const draft = await settings.open("temporary");
+      draft.inherit(key);
+      await draft.apply();
       await control.reload();
     },
     async resetOverrides() {
-      overrides = {};
-      options.appendEntry?.(OVERRIDE_ENTRY, { reset: true });
+      settings.endSession();
       await control.reload();
     },
   };
 
-  return { control, manager, provider, configRef, configureSession };
+  return {
+    control, manager, provider, configRef, configureSession,
+    endSession: () => {
+      invalidateActivation();
+      const identity = execution.context.current();
+      execution.begin(identity.sessionId, identity.cwd);
+      displayActivities.clear();
+      failureState = { status: "unavailable", info: null, reason: "session has ended" };
+      settings.endSession();
+      settingsReady = false;
+      configReady = false;
+      workspace = null;
+      diagnosticDesired = undefined;
+      configurationFailureAttempt = {};
+      diagnosticConfigurationFailure = undefined;
+      beginImageFailureAttempt();
+      diagnosticFailure = "unknown";
+      adopted = undefined;
+      endingSession = true;
+    },
+  };
 }
 
 export const createControl = createMsbIntegration;

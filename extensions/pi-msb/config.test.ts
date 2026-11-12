@@ -15,10 +15,12 @@ import {
   toEffectiveToml,
   validateConfig,
 } from "./config.ts";
+import type { SecretConfig } from "./types.ts";
 
+const secret = (source: Partial<SecretConfig>): SecretConfig => ({ env: "TOKEN", allowHosts: ["api.example"], ...source });
 const layer = (name: "global" | "project" | "env" | "cli", value: any) => ({ name, value, warnings: [] });
 
-test("defaults and precedence are deterministic", async () => {
+test("defaults and precedence are deterministic and ignore worktree config", async () => {
   assert.equal("mode" in DEFAULT_CONFIG, false);
   assert.equal(
     DEFAULT_CONFIG.image,
@@ -37,15 +39,16 @@ test("defaults and precedence are deterministic", async () => {
   const result = await resolveConfig({
     cwd: "/repo/src", repoRoot: "/repo", projectTrusted: true, configDirName: "pi",
     xdgConfigHome: "/cfg", env: { PI_MSB_MEMORY_MIB: "3072" },
+    realpath: async (path) => path,
     readFile: async (path) => files.get(path) ?? null,
     exists: async (path) => files.has(path),
   });
   assert.equal(result.config.memoryMiB, 3072);
-  assert.equal(result.config.network.mode, "deny");
+  assert.equal(result.config.network.mode, "default");
   assert.deepEqual(result.config.routeTools, DEFAULT_CONFIG.routeTools);
   assert.equal(result.provenance.memoryMiB, "env");
   assert.equal("volumeQuotaMiB" in result.config, false);
-  assert.deepEqual(result.config.passThroughTools, ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"]);
+  assert.deepEqual(result.config.passThroughTools, ["web_search", "source_check", "fetch_content"]);
 });
 
 test("all removed workspace keys are rejected at TOML, environment, and direct override ingress", () => {
@@ -103,28 +106,30 @@ test("default configuration is deeply immutable", () => {
   assert.equal(DEFAULT_CONFIG.routeTools.includes("malicious-tool"), false);
 });
 
-test("untrusted project configuration is skipped", async () => {
-  const result = await resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? "memory_mib = 9999" : null,
-  });
-  assert.equal(result.config.memoryMiB, DEFAULT_CONFIG.memoryMiB);
-  assert.match(result.warnings.join("\n"), /not trusted/);
-});
-
-test("removed workspace settings in untrusted project config still fail closed", async () => {
-  await assert.rejects(resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? '"\\u006dode" = "git"' : null,
-  }), /mode was removed.*bind-mounts.*read\/write/);
+test("worktree config is never probed or read regardless of trust, syntax, or removed selectors", async () => {
+  for (const projectTrusted of [false, true]) {
+    for (const text of ['memory_mib = 9999', '"\\u006dode" = "git"', '[[malformed', '__proto__.unsafe = true']) {
+      const files = new Map([
+        ["/repo/.pi-msb.toml", text], ["/repo/pi/msb.toml", text],
+        ["/repo/packages/app/.pi-msb.toml", text], ["/repo/packages/app/pi/msb.toml", text],
+        ["/.pi-msb.toml", text], ["/pi/msb.toml", text],
+      ]);
+      const result = await resolveConfig({
+        cwd: "/repo/packages/app", repoRoot: "/repo", projectTrusted, configDirName: "pi", env: {},
+        exists: async () => { assert.fail("worktree discovery must not run"); },
+        readFile: async (path) => { assert.equal(files.has(path), false, `must not read ${path}`); return null; },
+        realpath: async (path) => path,
+      });
+      assert.equal(result.config.memoryMiB, DEFAULT_CONFIG.memoryMiB);
+      assert.deepEqual(result.warnings, []);
+    }
+  }
 });
 
 test("identity arrays replace and remove safely", () => {
   const value = mergeConfigLayers([
     { name: "defaults", value: DEFAULT_CONFIG, warnings: [] },
-    layer("global", { secrets: [{ env: "TOKEN", value: "$ENV:A", allowHosts: ["a"] }], mounts: [{ type: "dir", hostPath: "/a", guestPath: "/mnt/data", readonly: true, options: [] }] }),
+    layer("global", { secrets: [{ env: "TOKEN", hostEnv: "A", allowHosts: ["a"] }], mounts: [{ type: "dir", hostPath: "/a", guestPath: "/mnt/data", readonly: true, options: [] }] }),
     layer("cli", { removeSecrets: ["TOKEN"], mounts: [{ type: "dir", hostPath: "/b", guestPath: "/mnt/data", readonly: false, options: [] }] }),
   ]);
   assert.deepEqual(value.value.secrets, []);
@@ -233,29 +238,43 @@ test("mount defaults and canonical guest identity are stable", () => {
   assert.deepEqual(defaults, { type: "dir", hostPath: "/repo/data", guestPath: "/repo/data", readonly: true, options: [] });
 });
 
-test("route fields reject unknown tools and the legacy host path env alias is accepted", async () => {
+test("route fields reject unknown tools", () => {
   assert.throws(() => validateConfig({ routeTools: ["read", "not-a-tool"] as any }), /routeTools/);
-  const parsed = parseEnvConfig({ PI_MSB_HOST_RO_PATHS: "/repo/one,/repo/two" });
-  assert.deepEqual(parsed.value.hostRoAllowlist, ["/repo/one", "/repo/two"]);
-  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env: { PI_MSB_HOST_RO_PATHS: "/outside/one" }, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
-  assert.equal(resolved.config.mounts[0]?.readonly, true);
-  assert.equal(resolved.config.mounts[0]?.guestPath, "/outside/one");
 });
 
-test("trusted project mounts use realpaths for repository containment", async () => {
-  const rejected = resolveConfig({
+for (const key of ["host_ro_allowlist", "hostRoAllowlist"]) test(`removed host read-only TOML option is unknown and cannot create mounts: ${key}`, async () => {
+  const text = `${key} = ["/outside/one"]\nremove_host_ro_allowlist = ["/outside/two"]\n`;
+  const parsed = parseTomlConfig(text, "global");
+  assert.match(parsed.warnings.join("\n"), /unknown config key hostRoAllowlist/);
+  assert.match(parsed.warnings.join("\n"), /unknown config key removeHostRoAllowlist/);
+  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env: {}, cliOverridesToml: text, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
+  assert.deepEqual(resolved.config.mounts, []);
+  assert.match(resolved.warnings.join("\n"), /unknown config key hostRoAllowlist/);
+});
+
+for (const name of ["PI_MSB_HOST_RO_PATHS", "PI_MSB_HOST_RO_ALLOWLIST"]) test(`removed host read-only environment option is unknown and cannot create mounts: ${name}`, async () => {
+  const env = { [name]: "/outside/one,/outside/two" };
+  const unknownKey = name === "PI_MSB_HOST_RO_PATHS" ? "hostRoPaths" : "hostRoAllowlist";
+  const parsed = parseEnvConfig(env);
+  assert.ok(parsed.warnings.some((warning) => warning.includes(`unknown config key ${unknownKey}`)));
+  const resolved = await resolveConfig({ cwd: "/repo", projectTrusted: true, configDirName: "pi", env, readFile: async () => null, exists: async () => false, realpath: async (path) => path, stat: async () => ({ isSocket: () => false }) });
+  assert.deepEqual(resolved.config.mounts, []);
+  assert.ok(resolved.warnings.some((warning) => warning.includes(`unknown config key ${unknownKey}`)));
+});
+
+test("host-side session mounts canonicalize sources and fail closed on missing sources", async () => {
+  const input = {
     cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? 'mounts = [{ host_path = "/repo/link", guest_path = "/outside/mount", readonly = false }]' : null,
-    realpath: async (path) => path === "/repo/link" ? "/outside/secret" : path,
-  });
-  await assert.rejects(rejected, (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("outside the repository")));
-  await assert.rejects(resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? 'mounts = [{ host_path = "/repo/link", guest_path = "/outside/mount" }]' : null,
-    realpath: async () => { throw new Error("cannot resolve"); },
-  }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("canonicalized")));
+    cliOverridesToml: 'mounts = [{ host_path = "/repo/link", guest_path = "/outside/mount", readonly = false }]',
+    readFile: async () => null,
+    realpath: async (path: string) => path === "/repo/link" ? "/outside/secret" : path,
+    stat: async () => ({ isSocket: () => false }),
+  };
+  assert.equal((await resolveConfig(input)).config.mounts[0]?.hostPath, "/outside/secret");
+  await assert.rejects(resolveConfig({ ...input, realpath: async (path) => {
+    if (path === "/repo/link") throw new Error("missing mount source");
+    return path;
+  } }), /canonicalized/);
 });
 
 test("mounts cannot shadow reserved tmp, Docker runtime, or the project mount", async () => {
@@ -284,7 +303,7 @@ test("process-control environment cannot be forwarded or injected as a secret", 
   for (const env of ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "PATH", "BASH_ENV", "LD_PRELOAD"]) {
     assert.throws(() => validateConfig({ hostEnv: [env] }), new RegExp(`must not forward protected process environment variable ${env}`));
     assert.throws(
-      () => validateConfig({ secrets: [{ env, value: "unsafe", allowHosts: ["docker.example"] }] }),
+      () => validateConfig({ secrets: [{ env, textValue: "unsafe", allowHosts: ["docker.example"] }] }),
       new RegExp(`must not set protected process environment variable ${env}`),
     );
   }
@@ -380,12 +399,14 @@ test("environment JSON, nesting, POSIX arrays, and controls", () => {
   assert.equal(isDisabledByEnv({ PI_MSB_DISABLE: "0" }), false);
 });
 
-test("effective TOML redacts literal secret values", () => {
-  const config = validateConfig({ secrets: [{ env: "TOKEN", value: "do-not-print", allowHosts: ["api.example"] }] });
-  const output = toEffectiveToml({ config, provenance: {}, warnings: [] });
-  assert.doesNotMatch(output, /do-not-print/);
-  assert.match(output, /<redacted>/);
-  assert.match(toEffectiveToml({ config: validateConfig({ secrets: [{ env: "TOKEN", value: "$ENV:TOKEN", allowHosts: ["api.example"] }] }), provenance: {}, warnings: [] }), /\$ENV:TOKEN/);
+test("effective TOML masks every secret source including literal reference-like strings", () => {
+  for (const source of [{ textValue: "do-not-print" }, { textValue: "$ENV:PRIVATE" }, { textValue: "$FILE:private" }, { hostEnv: "PRIVATE_HOST_ENV" }, { hostCmd: "printf PRIVATE_HOST_COMMAND" }]) {
+    const config = validateConfig({ secrets: [secret(source)] });
+    const output = toEffectiveToml({ config, provenance: {}, warnings: [] });
+    assert.doesNotMatch(output, /do-not-print|PRIVATE|private|\$ENV:|\$FILE:/);
+    assert.match(output, /<redacted>/);
+    assert.deepEqual(config.secrets[0], secret(source), "redaction must not mutate the original source");
+  }
 });
 
 test("table-array overrides round trip with valid TOML headers", () => {
@@ -394,7 +415,7 @@ test("table-array overrides round trip with valid TOML headers", () => {
     { type: "file", hostPath: "/host/two", guestPath: "/mnt/two", readonly: true, options: ["noexec"] },
   ]);
   overrides = applyOverride(overrides, "remove_mounts", [{ guestPath: "/mnt/old" }]);
-  overrides = applyOverride(overrides, "secrets", [{ env: "TOKEN", value: "$ENV:TOKEN", allowHosts: ["api.example"] }]);
+  overrides = applyOverride(overrides, "secrets", [{ env: "TOKEN", hostEnv: "TOKEN", allowHosts: ["api.example"] }]);
 
   const toml = overridesToToml(overrides);
   assert.equal(toml.match(/^\[\[mounts\]\]$/gm)?.length, 2);
@@ -408,46 +429,170 @@ test("overrides round trip and secret references never leak on errors", async ()
   assert.deepEqual((base.network as any).publishPorts, ["8080"]);
   assert.deepEqual(removeOverride(base, "network.publish_ports"), { network: {} });
   assert.deepEqual(parseTomlConfig(overridesToToml(base), "cli").value, base);
-  await assert.rejects(() => resolveSecretValue("$ENV:MISSING", {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("MISSING"));
+  await assert.rejects(() => resolveSecretValue(secret({ hostEnv: "MISSING" }), {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("MISSING"));
 });
 
-test("project-relative secret files use the canonical path approved by policy", async () => {
-  const projectConfig = "/repo/packages/app/.pi-msb.toml";
-  const referencedPath = "/repo/packages/app/secrets/token";
-  const canonicalPath = "/repo/private/token";
+test("explicit legacy global files remain supported only outside the workspace", async () => {
+  for (const file of ["/repo/.pi-msb.toml", "pi/msb.toml", "/host/link.toml"]) {
+    await assert.rejects(resolveConfig({
+      cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi",
+      env: { PI_MSB_CONFIG_FILE: file },
+      readFile: async (path) => path.endsWith("config.toml") ? null : '[[malformed',
+      realpath: async (path) => path === "/host/link.toml" ? "/repo/policy.toml" : path,
+    }), /global configuration must be outside.*migrate/);
+  }
   const result = await resolveConfig({
-    cwd: "/repo/packages/app/src", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    homedir: "/home/test", xdgConfigHome: "/cfg",
-    exists: async (path) => path === projectConfig,
-    readFile: async (path) => path === projectConfig
-      ? '[[secrets]]\nenv="TOKEN"\nvalue="$FILE:secrets/token"\nallow_hosts=["api.example"]'
-      : null,
-    realpath: async (path) => path === referencedPath ? canonicalPath : path,
+    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi",
+    env: { PI_MSB_CONFIG_FILE: "/host/policy.toml", PI_MSB_CPUS: "3" },
+    readFile: async (path) => path === "/host/policy.toml" ? 'cpus = 2\nmemory_mib = 2048' : null,
+    realpath: async (path) => path,
   });
-
-  assert.equal(result.config.secrets[0]?.value, `$FILE:${canonicalPath}`);
-  let readPath = "";
-  assert.equal(await resolveSecretValue(result.config.secrets[0]!.value, {}, async (path) => {
-    readPath = path;
-    return "secret-value";
-  }), "secret-value");
-  assert.equal(readPath, canonicalPath);
-});
-
-test("trusted project literal secrets warn without leaking their value", async () => {
-  const result = await resolveConfig({
-    cwd: "/repo", repoRoot: "/repo", projectTrusted: true, configDirName: "pi", env: {},
-    exists: async (path) => path === "/repo/.pi-msb.toml",
-    readFile: async (path) => path === "/repo/.pi-msb.toml" ? '[[secrets]]\nenv="TOKEN"\nvalue="super-secret-literal"\nallow_hosts=["api.example"]' : null,
-  });
-  assert.ok(result.warnings.some((warning) => /literal secret/i.test(warning)));
-  assert.doesNotMatch(result.warnings.join("\\n"), /super-secret-literal/);
+  assert.equal(result.config.cpus, 3);
+  assert.equal(result.config.memoryMiB, 2048);
+  await assert.rejects(resolveConfig({
+    cwd: "/repo", repoRoot: "/repo", projectTrusted: false, configDirName: "pi", env: {},
+    xdgConfigHome: "/repo/config", readFile: async () => 'cpus = 0', realpath: async (path) => path,
+  }), /global configuration must be outside.*migrate/);
 });
 
 test("open mode warning and empty secret host hard fail", async () => {
   await assert.rejects(() => resolveConfig({
-    cwd: "/tmp", projectTrusted: true, configDirName: "pi", env: { PI_MSB_NETWORK__MODE: "open" },
-    cliOverridesToml: '[[secrets]]\nenv="TOKEN"\nvalue="$ENV:TOKEN"\nallow_hosts=[]',
-    readFile: async () => null, exists: async () => false,
+    cwd: "/repo", agentDir: "/host/agent", projectTrusted: true, configDirName: "pi", env: { PI_MSB_NETWORK__MODE: "open" },
+    cliOverridesToml: '[[secrets]]\nenv="TOKEN"\nhost_env="TOKEN"\nallow_hosts=[]',
+    readFile: async () => null, realpath: async (path) => path,
   }), (error: unknown) => error instanceof ConfigError && error.issues.some((issue) => issue.includes("allowHosts")));
+});
+
+test("secret configs require exactly one typed source without exposing its contents", async () => {
+  const sources = [{ textValue: "PRIVATE_VALUE" }, { hostEnv: "PRIVATE_ENV" }, { hostCmd: "printf PRIVATE_COMMAND" }];
+  for (let mask = 0; mask < 8; mask++) {
+    const source = Object.assign({}, ...sources.filter((_, index) => mask & (1 << index)));
+    if ([1, 2, 4].includes(mask)) {
+      assert.deepEqual(validateConfig({ secrets: [secret(source)] }).secrets, [secret(source)]);
+    } else {
+      assert.throws(() => validateConfig({ secrets: [secret(source)] }), /exactly one/);
+      await assert.rejects(resolveSecretValue(secret(source), {}), /exactly one/);
+    }
+  }
+  for (const source of [{ textValue: undefined }, { textValue: 7 }, { hostEnv: null }, { hostEnv: "" }, { hostEnv: "PRIVATE-NAME" }, { hostEnv: "$ENV:PRIVATE_NAME" }, { hostCmd: 3 }, { hostCmd: " \t\n" }, { textValue: "PRIVATE_VALUE", hostEnv: undefined }]) {
+    const invalid = secret(source as any);
+    assert.throws(() => validateConfig({ secrets: [invalid] }), (error: unknown) => error instanceof ConfigError && !/PRIVATE/.test(error.message));
+    await assert.rejects(resolveSecretValue(invalid, {}), (error: unknown) => error instanceof ConfigError && !/PRIVATE/.test(error.message));
+  }
+  assert.equal(validateConfig({ secrets: [secret({ textValue: "" })] }).secrets[0]!.textValue, "");
+});
+
+test("deprecated secret value is rejected with static actionable errors even alongside new sources", async () => {
+  const messages = new Map<string, string>();
+  const rejectsRemoved = (ingress: string) => (error: unknown): boolean => {
+    assert.ok(error instanceof ConfigError);
+    assert.match(error.message, /\bvalue\b.*removed/);
+    assert.match(error.message, /use textValue.*hostEnv/);
+    assert.doesNotMatch(JSON.stringify(error), /PRIVATE/);
+    if (messages.has(ingress)) assert.equal(error.message, messages.get(ingress));
+    else messages.set(ingress, error.message);
+    return true;
+  };
+  for (const value of [undefined, "PRIVATE_LEGACY_LITERAL", "$ENV:PRIVATE_LEGACY_ENV", "$FILE:/PRIVATE_LEGACY_FILE", 7]) {
+    for (const replacement of [{}, { textValue: "PRIVATE_NEW_LITERAL" }, { text_value: "PRIVATE_NEW_SNAKE" }, { hostEnv: "PRIVATE_HOST_ENV" }, { hostCmd: "printf PRIVATE_COMMAND" }]) {
+      const entry = { env: "TOKEN", value, ...replacement, allowHosts: ["api.example"] };
+      const config = { secrets: [entry] };
+      assert.throws(() => validateConfig(config), rejectsRemoved("validate"));
+      assert.throws(() => mergeConfigLayers([layer("global", config)]), rejectsRemoved("merge"));
+      assert.throws(() => validateConfig(applyOverride({}, "secrets", [entry])), rejectsRemoved("override"));
+      assert.throws(() => overridesToToml(config as any), rejectsRemoved("serialize"));
+      await assert.rejects(resolveSecretValue(entry as any, {}), rejectsRemoved("resolve"));
+      if (value !== undefined) {
+        assert.throws(() => parseEnvConfig({ PI_MSB_SECRETS: JSON.stringify([entry]) }), rejectsRemoved("env"));
+        const fields = Object.entries(entry).map(([key, field]) => `${key} = ${JSON.stringify(field)}`).join(", ");
+        assert.throws(() => parseTomlConfig(`secrets = [{ ${fields} }]`, "global"), rejectsRemoved("toml"));
+      }
+    }
+  }
+});
+
+test("secret sources parse and serialize explicit snake_case TOML and environment JSON", () => {
+  const secrets = [secret({ textValue: "$FILE:literal" }), secret({ env: "ENV_LITERAL", textValue: "$ENV:HOST_TOKEN" }), secret({ env: "ENV_TOKEN", hostEnv: "HOST_TOKEN" }), secret({ env: "CMD_TOKEN", hostCmd: "printf token" })];
+  const toml = overridesToToml({ secrets });
+  assert.match(toml, /text_value = "\$FILE:literal"/);
+  assert.match(toml, /text_value = "\$ENV:HOST_TOKEN"/);
+  assert.doesNotMatch(toml, /^value\s*=/m);
+  assert.match(toml, /host_env = "HOST_TOKEN"/);
+  assert.match(toml, /host_cmd = "printf token"/);
+  const parsed = parseTomlConfig(toml, "global");
+  assert.deepEqual(parsed.value.secrets, secrets);
+  assert.deepEqual(parsed.warnings, []);
+  const environment = parseEnvConfig({ PI_MSB_SECRETS: JSON.stringify([
+    { env: "TOKEN", text_value: "$FILE:literal", allow_hosts: ["api.example"] },
+    { env: "ENV_LITERAL", text_value: "$ENV:HOST_TOKEN", allow_hosts: ["api.example"] },
+    { env: "ENV_TOKEN", host_env: "HOST_TOKEN", allow_hosts: ["api.example"] },
+    { env: "CMD_TOKEN", host_cmd: "printf token", allow_hosts: ["api.example"] },
+  ]) });
+  assert.deepEqual(environment.value.secrets, secrets);
+  assert.deepEqual(environment.warnings, []);
+  assert.deepEqual(parseTomlConfig(overridesToToml(environment.value), "cli").value.secrets, secrets);
+});
+
+test("literal secret values never expand environment or file prefixes", async () => {
+  for (const value of ["", "literal\n", "$ENV:HOST_TOKEN", "$FILE:/does/not/exist", "$FILE:../../token"]) {
+    assert.equal(await resolveSecretValue(secret({ textValue: value }), { HOST_TOKEN: "EXPANDED" }, async () => { throw new Error("must not run"); }), value);
+  }
+});
+
+test("host environment secret sources resolve privately and preserve their bytes", async () => {
+  assert.equal(await resolveSecretValue(secret({ hostEnv: "HOST_TOKEN" }), { HOST_TOKEN: " token\n" }), " token\n");
+  assert.equal(await resolveSecretValue(secret({ hostEnv: "HOST_TOKEN" }), { HOST_TOKEN: "" }), "");
+  await assert.rejects(resolveSecretValue(secret({ hostEnv: "PRIVATE_MISSING" }), {}), (error: unknown) => error instanceof ConfigError && !error.message.includes("PRIVATE"));
+  await assert.rejects(resolveSecretValue(secret({ hostEnv: "PRIVATE_INHERITED" }), Object.create({ PRIVATE_INHERITED: "token" })), /missing or invalid/);
+});
+
+test("temporary secret literals and commands are neither canonicalized nor eagerly resolved", async () => {
+  const secrets = [secret({ textValue: "$FILE:../../missing" }), secret({ env: "ENV_TOKEN", hostEnv: "MISSING" }), secret({ env: "CMD_TOKEN", hostCmd: "exit 99" })];
+  const result = await resolveConfig({
+    cwd: "/repo", agentDir: "/host/agent", projectTrusted: true, configDirName: "pi", env: {},
+    temporaryOverrides: { secrets }, readFile: async () => null,
+    realpath: async (path) => { assert.doesNotMatch(path, /missing/); return path; },
+  });
+  assert.deepEqual(result.config.secrets, secrets);
+});
+
+test("host commands execute a host shell with the supplied environment and trim only final newlines", async () => {
+  assert.equal(await resolveSecretValue(secret({ hostCmd: String.raw`printf ' %s \r\n\n' "$HOST_TOKEN"` }), { HOST_TOKEN: "PRIVATE_TOKEN" }), " PRIVATE_TOKEN ");
+  assert.equal(await resolveSecretValue(secret({ hostCmd: "printf 'one\\ntwo\\n'" }), {}), "one\ntwo");
+  const env = { HOST_TOKEN: "token" };
+  assert.equal(await resolveSecretValue(secret({ hostCmd: "PRIVATE_COMMAND" }), env, async (command, actualEnv) => {
+    assert.equal(command, "PRIVATE_COMMAND"); assert.equal(actualEnv, env); return " token \r\n\n";
+  }), " token ");
+});
+
+test("host command failures and empty output never expose command, stdout, stderr, or injected errors", async () => {
+  const safeError = (error: unknown) => error instanceof ConfigError && error.message === "host secret command failed" && !/PRIVATE/.test(JSON.stringify(error));
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: "printf PRIVATE_STDOUT; printf PRIVATE_STDERR >&2; exit 7 # PRIVATE_COMMAND" }), {}), safeError);
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: "PRIVATE_COMMAND" }), {}, async () => { throw new Error("PRIVATE_COMMAND PRIVATE_STDOUT PRIVATE_STDERR"); }), safeError);
+  for (const output of ["", "\n", "\r\n\n"]) await assert.rejects(resolveSecretValue(secret({ hostCmd: "PRIVATE_COMMAND" }), {}, async () => output), safeError);
+});
+
+test("host command stdout and stderr have a bounded combined output budget", async () => {
+  for (const stream of ["stdout", "stderr"]) {
+    const command = `${JSON.stringify(process.execPath)} -e 'process.${stream}.write("PRIVATE".repeat(12000))'`;
+    await assert.rejects(resolveSecretValue(secret({ hostCmd: command }), {}), (error: unknown) => error instanceof ConfigError && error.message === "host secret command failed");
+  }
+  const combined = `${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(40000)); process.stderr.write("y".repeat(40000))'`;
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: combined }), {}), /host secret command failed/);
+  const boundary = `${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(65536))'`;
+  assert.equal((await resolveSecretValue(secret({ hostCmd: boundary }), {})).length, 65536);
+});
+
+test("host commands have a bounded deadline even when descendants keep pipes open", { timeout: 15_000 }, async () => {
+  const started = Date.now();
+  const command = `${JSON.stringify(process.execPath)} -e 'setTimeout(() => {}, 30000)' & wait # PRIVATE_COMMAND`;
+  await assert.rejects(resolveSecretValue(secret({ hostCmd: command }), {}), (error: unknown) => error instanceof ConfigError && error.message === "host secret command failed");
+  assert.ok(Date.now() - started >= 9_000, "command must fail at the deadline, not during startup");
+  assert.ok(Date.now() - started < 14_000);
+});
+
+test("memory_mib round trips without losing its word separator", () => {
+  const text = overridesToToml({ memoryMiB: 1024 });
+  assert.match(text, /memory_mib = 1024/);
+  assert.equal(parseTomlConfig(text, "cli").value.memoryMiB, 1024);
 });

@@ -11,8 +11,6 @@ dev-image:
     image="pi-microsandbox-dev:local"
     docker build \
       --tag "${image}" \
-      --build-arg IMAGE_VARIANT=default \
-      --build-arg "TOOLCHAINS=node python rust go" \
       --build-arg IMAGE_VERSION=dev \
       --file default-image/Dockerfile \
       default-image
@@ -35,6 +33,10 @@ dev *args: dev-flock dev-image
     export PI_MSB_CPUS=4
     export PI_MSB_MEMORY_MIB=8192
     exec pi --extension . "$@"
+
+# Build the native addon, then start Pi without building a Docker image.
+dev-extension-only *args: dev-flock
+    @pi --extension . "$@"
 
 # Measure repeated sandbox startup and enforce the boot-time regression limit.
 test-boot-speed:

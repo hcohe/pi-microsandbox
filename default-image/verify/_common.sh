@@ -14,14 +14,17 @@ require_commands() {
 
 verify_base_contract() {
     require_commands \
-        awk bash basename cat chmod cp cut date dirname env file git head id ln ls \
+        awk bash basename cat chmod cp curl cut date dirname env file git head id ln ls \
         mkdir mktemp mv pwd readlink rg rm rmdir sh sleep sort stat tail tee test \
         touch tr uname update-ca-certificates wc
 
-    dpkg-query --status ca-certificates file git ripgrep >/dev/null
+    dpkg-query --status ca-certificates curl file git ripgrep >/dev/null
     local common_verify_dir
     common_verify_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
     "${common_verify_dir}/docker.sh"
+    "${common_verify_dir}/gcloud.sh"
+    "${common_verify_dir}/aws.sh"
+    curl --version
     test ! -e /opt/pi-image-install
 
     local tmp_dir
@@ -30,18 +33,8 @@ verify_base_contract() {
     rg -q 'pi-microsandbox' "${tmp_dir}/contract.txt"
     rg -q 'microsandbox' "${tmp_dir}/contract.txt"
     file "${tmp_dir}/contract.txt" | rg -q 'text'
+    curl --fail --silent --show-error \
+        "file://${tmp_dir}/contract.txt" --output "${tmp_dir}/curl.txt"
+    rg -q '^pi-microsandbox$' "${tmp_dir}/curl.txt"
     rm -rf "${tmp_dir}"
-}
-
-verify_no_language_toolchains() {
-    local command_name
-    for command_name in \
-        cargo corepack go node npm npx pip pip3 pnpm python python3 rustc rustup \
-        uv uvx yarn; do
-        if command -v "${command_name}" >/dev/null 2>&1; then
-            printf 'Base image unexpectedly contains language command: %s\n' \
-                "${command_name}" >&2
-            return 1
-        fi
-    done
 }

@@ -1,6 +1,7 @@
+import { generateName } from "@criblinc/docker-names";
+import { classifySettingsEffect } from "./settings-effect.ts";
 import {
   displayId,
-  sandboxNameFor,
   STATE_SCHEMA_VERSION,
   type BootRequest,
   type Config,
@@ -24,17 +25,26 @@ export interface InspectedSandbox {
 }
 
 export interface SandboxManagerDeps {
-  acquireOwnerLock(request: BootRequest): Promise<LockHandle | null>;
+  acquireOwnerLock(request: BootRequest, name: string): Promise<LockHandle | null>;
   pruneOthers(currentSessionId: string): Promise<PruneReport>;
   inspectSandbox(name: string): Promise<InspectedSandbox | null>;
   connectSandbox(value: InspectedSandbox): Promise<unknown>;
   startSandbox(value: InspectedSandbox): Promise<unknown>;
-  createSandbox(request: BootRequest): Promise<unknown>;
+  createSandbox(request: BootRequest, name: string, activationGuard?: () => Promise<void>): Promise<unknown>;
   stopAndRemove(name: string, timeoutMs: number): Promise<void>;
   createTransport(raw: unknown): SandboxTransport;
   createOperations(transport: SandboxTransport): ToolOperations;
   prepareRuntime(runtime: RuntimeExecution, config: Config): Promise<RuntimePreparation>;
   persist(state: PersistedSandboxState): void;
+  /** Privately mask resolved credentials without resolving sources again. */
+  redactError?(message: string): string;
+  /** Called after cleanup errors have been sanitized and ownership released. */
+  disposed?(): void;
+  /** Successful adoption, or conservative loss of VM-instance certainty after inspection. */
+  adopted?(request: BootRequest, verification: "created" | "reconnected" | "live"): void;
+  /** Boot attempt, excluding already-active and live-settings-only reloads. */
+  bootInitiated?(request: BootRequest): void;
+  onState?(state: RuntimeState): void;
   now?: () => number;
 }
 
@@ -111,11 +121,13 @@ function infoFor(
   };
 }
 
-function redactMessage(error: unknown, config?: Config): string {
+function redactMessage(error: unknown, config?: Config, sanitize?: (message: string) => string): string {
   let message = error instanceof Error ? error.message : String(error);
-  for (const secret of config?.secrets ?? []) {
-    if (secret.value) message = message.split(secret.value).join("[REDACTED]");
-  }
+  if (sanitize) message = sanitize(message);
+  const sources = (config?.secrets ?? []).flatMap((secret) => [secret.textValue, secret.hostEnv, secret.hostCmd])
+    .filter((source): source is string => typeof source === "string" && !!source)
+    .flatMap((source) => [source, JSON.stringify(source).slice(1, -1)]);
+  for (const source of [...new Set(sources)].sort((a, b) => b.length - a.length)) message = message.split(source).join("[REDACTED]");
   return message || "unknown error";
 }
 
@@ -134,19 +146,6 @@ function sameBootRequest(a: BootRequest, b: BootRequest): boolean {
   );
 }
 
-function sameSessionRestore(
-  request: BootRequest,
-): PersistedSandboxState | null {
-  const restored = request.restored;
-  if (!restored) return null;
-  if (restored.version !== STATE_SCHEMA_VERSION) return null;
-  if (restored.sessionId !== request.sessionId) return null;
-  if (restored.cwd !== request.cwd ||
-      restored.root !== request.workspace.hostRoot ||
-      restored.guestRoot !== request.workspace.guestRoot) return null;
-  return restored;
-}
-
 /**
  * Lifecycle coordinator for the injected sandbox ports. In particular, no
  * storage or SDK operation is reached until the owner lock has been acquired.
@@ -157,6 +156,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   let runtime: RuntimeExecution | null = null;
   let runtimeInvalid = false;
   let sandboxName: string | null = null;
+  let automaticName: { sessionId: string; name: string } | null = null;
   let lastRequest: BootRequest | null = null;
   let retainedState: PersistedSandboxState | null = null;
   // activeUses includes reservations made before preflight. pendingUses marks
@@ -165,12 +165,43 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   let activeUses = 0;
   let pendingUses = 0;
   const usageDrainWaiters: Array<() => void> = [];
+  let observation: RuntimeState["observation"];
+  let revision = 0;
+  let pendingLifecycle = 0;
+  let passiveInspection: Promise<InspectedSandbox | null> | undefined;
+
+  function notifyState(): void {
+    try { deps.onState?.(manager.getState()); }
+    catch { /* Display observers must never change execution or cleanup. */ }
+  }
+
+  function publish(next: RuntimeState): RuntimeState {
+    state = next;
+    observation = undefined;
+    notifyState();
+    return state;
+  }
+
+  function observe(next: RuntimeState["observation"]): void {
+    if (observation === next) return;
+    observation = next;
+    notifyState();
+  }
 
   // Lifecycle transitions are serialized, but the tool callback itself is not
   // put on this queue. This permits concurrent guest commands while ensuring a
   // wake/replacement cannot race another wake or shutdown.
   let lifecycle: Promise<unknown> = Promise.resolve();
   let transition: Promise<unknown> = Promise.resolve();
+  // Failed-generation cleanup must not hold the preflight queue: an active
+  // callback may be awaiting a reentrant preflight on that same queue.
+  let retirement: Promise<void> = Promise.resolve();
+
+  function beginLifecycle(): void {
+    revision += 1;
+    pendingLifecycle += 1;
+    if (state.status === "active") observe("unknown");
+  }
 
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const result = lifecycle.then(fn, fn);
@@ -191,12 +222,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   }
 
   function setFailure(request: BootRequest | null, error: unknown): RuntimeState {
-    const reason = redactMessage(error, request?.config);
-    state = {
-      status: request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
+    const reason = redactMessage(error, request?.config, deps.redactError);
+    publish({
+      status: !request?.blockHostFallback && request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
       info: null,
       reason,
-    };
+    });
     return state;
   }
 
@@ -230,6 +261,40 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     });
   }
 
+  function retireFailedRuntime(error: unknown): Promise<void> {
+    const current = runtime;
+    const held = lock;
+    runtime = null;
+    runtimeInvalid = false;
+    lock = null;
+    // The failed inspection/reconnect no longer proves cleanup authority for
+    // this name. Future boot/prune must reacquire ownership and validate it.
+    sandboxName = null;
+    setFailure(lastRequest, error);
+
+    // Detach ownership synchronously within the transition, but drain outside
+    // it. Later preflights reject immediately; only the original failing call
+    // and lifecycle operations wait for cleanup of these captured resources.
+    retirement = (async () => {
+      await waitForActiveUses();
+      if (current) {
+        try {
+          await current.transport.dispose();
+        } catch {
+          // Best effort, as in disposeRuntime; ownership must still be released.
+        }
+      }
+      if (held) {
+        try {
+          await held.release();
+        } catch {
+          // The next boot will fail closed if ownership cannot be reacquired.
+        }
+      }
+    })();
+    return retirement;
+  }
+
   function reserveUse(): void {
     activeUses += 1;
     pendingUses += 1;
@@ -246,7 +311,16 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   }
 
   function requestSandboxName(request: BootRequest): string {
-    return request.config.sandboxName ?? sandboxNameFor(request.sessionId);
+    if (request.config.sandboxName !== null) return request.config.sandboxName;
+    if (automaticName?.sessionId === request.sessionId) return automaticName.name;
+    const restored = request.restored;
+    // A saved name is only a locator. Inspection still proves session ownership
+    // and replaces stale workspace/configuration bindings under the owner lock.
+    const savedName = restored?.version === STATE_SCHEMA_VERSION && restored.sessionId === request.sessionId
+      && typeof restored.sandboxName === "string" && restored.sandboxName.length > 0 ? restored.sandboxName : null;
+    const name = savedName ?? generateName();
+    automaticName = { sessionId: request.sessionId, name };
+    return name;
   }
 
   function invalidatesRuntime(error: unknown): boolean {
@@ -272,85 +346,113 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
   }
 
-  async function bootInternal(request: BootRequest): Promise<RuntimeState> {
+  async function bootInternal(request: BootRequest, activationGuard?: () => Promise<void>): Promise<RuntimeState> {
     // Do not mutate or reconnect a resource while a concurrent tool preflight is
     // atomically replacing its runtime handle.
     await transition;
+    await retirement;
+    // Guard inside the lifecycle queue, not only before enqueueing the request.
+    await activationGuard?.();
+    if (activationGuard) request.blockHostFallback = true;
     const previousRequest = lastRequest;
+    const name = requestSandboxName(request);
     if (
       state.status === "active" &&
       runtime &&
       previousRequest &&
-      sandboxName === requestSandboxName(request) &&
+      sandboxName === name &&
+      !request.forceRecreate &&
       sameBootRequest(previousRequest, request)
     ) {
       return state;
     }
+    if (state.status === "active" && runtime && previousRequest && !request.forceRecreate &&
+        previousRequest.sessionId === request.sessionId && previousRequest.cwd === request.cwd &&
+        previousRequest.workspace.hostRoot === request.workspace.hostRoot &&
+        previousRequest.workspace.guestRoot === request.workspace.guestRoot &&
+        sandboxName === name &&
+        classifySettingsEffect(previousRequest.config, request.config) !== "restart") {
+      lastRequest = request;
+      deps.adopted?.(request, "live");
+      return state;
+    }
     if (state.status === "active" && runtime) {
       await shutdownInternal(false);
+      if (manager.getState().status === "unavailable") return state;
     }
+    await activationGuard?.();
 
     lastRequest = request;
-    state = { status: "booting", info: null };
+    deps.bootInitiated?.(request);
+    publish({ status: "booting", info: null, pendingName: name });
     let owner: LockHandle | null;
     try {
-      owner = await deps.acquireOwnerLock(request);
+      owner = await deps.acquireOwnerLock(request, name);
     } catch (error) {
       // A lock implementation failure is fail-closed and must not permit any
       // SDK/storage call to run without ownership.
+      await activationGuard?.();
       return setFailure(request, error);
     }
     if (!owner) {
+      await activationGuard?.();
       // A live owner is not a stale-resource condition. Do not inspect, prune,
       // or otherwise mutate anything when the non-blocking lock says busy.
-      state = {
+      publish({
         status: "unavailable",
         info: null,
         reason: "another process owns this session",
-      };
+      });
       return state;
     }
     lock = owner;
 
     let partialSandbox = false;
+    let created = false;
     let currentRequestInfo: RuntimeState["info"] = null;
     let bootedRuntime: RuntimeExecution | null = null;
 
     try {
+      await activationGuard?.();
       if (request.config.pruneOnStart) {
         await deps.pruneOthers(request.sessionId);
       }
-      const restored = sameSessionRestore(request);
-      const name = requestSandboxName(request);
+      await activationGuard?.();
       sandboxName = name;
       const inspected = await deps.inspectSandbox(name);
+      await activationGuard?.();
       let raw: unknown;
+      if (inspected && inspected.name !== name) throw new Error(`sandbox name mismatch: expected ${name}`);
 
       if (!inspected) {
-        partialSandbox = true;
-        raw = await deps.createSandbox(request);
+        await activationGuard?.();
+        partialSandbox = true; created = true;
+        raw = await deps.createSandbox(request, name, activationGuard);
       } else if (isLegacyManagedOwner(inspected, request)) {
         // The current session owner lock guards removal. Legacy named volumes
         // are intentionally neither inspected nor removed.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
-        partialSandbox = true;
-        raw = await deps.createSandbox(request);
+        await activationGuard?.();
+        partialSandbox = true; created = true;
+        raw = await deps.createSandbox(request, name, activationGuard);
       } else if (!isManagedOwner(inspected, request)) {
         throw new Error(`sandbox name conflict: ${name}`);
-      } else if (!matchesWorkspace(inspected, request)) {
+      } else if (request.forceRecreate || !matchesWorkspace(inspected, request)) {
         // The labels prove this is ours, but its configuration is stale. Only
         // that proven ownership permits a replacement.
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
         // The old instance was removed; a failed replacement still needs its
         // own best-effort cleanup.
-        partialSandbox = true;
-        raw = await deps.createSandbox(request);
+        await activationGuard?.();
+        partialSandbox = true; created = true;
+        raw = await deps.createSandbox(request, name, activationGuard);
       } else if (isRunning(inspected)) {
         raw = await deps.connectSandbox(inspected);
         partialSandbox = true;
       } else if (isStopped(inspected)) {
         partialSandbox = true;
         raw = await deps.startSandbox(inspected);
+        await activationGuard?.();
         if (raw === undefined || raw === null) raw = await deps.connectSandbox(inspected);
       } else {
         // An unknown state is not safe to replace. A connect gives adapters a
@@ -359,10 +461,14 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         partialSandbox = true;
       }
 
+      // SDK create/start/connect may be uncancelable; late handles cannot be adopted.
+      await activationGuard?.();
       bootedRuntime = await connectAndBuild(raw);
       runtime = bootedRuntime;
       runtimeInvalid = false;
+      await activationGuard?.();
       const preparation = await deps.prepareRuntime(bootedRuntime, request.config);
+      await activationGuard?.();
 
       const createdAt = deps.now ? deps.now() : Date.now();
       currentRequestInfo = infoFor(request, createdAt, name, preparation);
@@ -380,13 +486,19 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       };
       deps.persist(persisted);
       retainedState = persisted;
-      state = { status: "active", info: currentRequestInfo };
+      publish({ status: "active", info: currentRequestInfo });
+      deps.adopted?.(request, created ? "created" : "reconnected");
       return state;
     } catch (error) {
       await disposeRuntime();
       if (partialSandbox && sandboxName) {
         try {
-          await deps.stopAndRemove(sandboxName, request.config.stopTimeoutMs);
+          // A different session can win the name between inspection and create.
+          // A rejected create never grants permission to remove that resource.
+          const cleanupTarget = await deps.inspectSandbox(sandboxName);
+          if (cleanupTarget?.name === sandboxName && isManagedOwner(cleanupTarget, request)) {
+            await deps.stopAndRemove(sandboxName, request.config.stopTimeoutMs);
+          }
         } catch {
           // Leave an uncertain labelled sandbox for a later prune/recovery.
         }
@@ -403,6 +515,8 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
           // safe resource action to take if release itself fails.
         }
       }
+      // Obsolete approval must not publish over a newer queued Off/On/session request.
+      await activationGuard?.();
       return setFailure(request, error);
     }
   }
@@ -432,13 +546,17 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     if (isRunning(inspected) && !runtimeInvalid) {
       // The boot-created transport remains authoritative while the sandbox is
       // running. Reconnecting here would replace a valid handle and dispose a
-      // transport that may still have active callers.
+      // transport that may still have active callers. Labels alone cannot prove
+      // that an external same-name replacement is the instance we created.
+      deps.adopted?.(lastRequest, "reconnected");
+      observe(undefined);
       return runtime;
     }
 
     // A stopped/unknown sandbox or invalid running handle requires a
     // replacement transport. Do not start or dispose the old one until every
     // earlier callback has released its runtime-use reservation.
+    observe("unknown");
     await waitForActiveUses();
     let raw: unknown;
     if (isStopped(inspected)) {
@@ -474,7 +592,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         try {
           await deps.stopAndRemove(failedName, lastRequest.config.stopTimeoutMs);
         } catch {
-          throw new Error(`${redactMessage(error, lastRequest.config)}; failed to clean up the restarted sandbox`);
+          throw new Error(`${redactMessage(error, lastRequest.config, deps.redactError)}; failed to clean up the restarted sandbox`);
         }
       }
       throw error;
@@ -482,7 +600,10 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const previous = runtime;
     runtime = replacement;
     runtimeInvalid = false;
-    if (state.info) state = { ...state, info: { ...state.info, docker: { ...preparation.docker } } };
+    if (state.info) publish({ ...state, info: { ...state.info, docker: { ...preparation.docker } } });
+    // A same-name guest is not a trustworthy instance identity. Reconnected VM
+    // policy must become unknown even when the previous transport was ours.
+    deps.adopted?.(lastRequest, "reconnected");
     if (previous && previous !== replacement) {
       try {
         await previous.transport.dispose();
@@ -497,17 +618,20 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     // A preflight may be reconnecting while the lifecycle queue reaches
     // shutdown. Finish that atomic replacement before disposing its handle.
     await transition;
+    await retirement;
     const hadSandbox = Boolean(sandboxName);
     const name = sandboxName;
     const request = lastRequest;
     const oldInfo = state.info;
-    state = { status: "stopping", info: oldInfo };
+    publish({ status: "stopping", info: oldInfo });
 
     await waitForActiveUses();
     await disposeRuntime();
 
     let cleanupError: unknown = null;
-    if (hadSandbox && name && request) {
+    // Failed-generation retirement already released ownership. A later shutdown
+    // must not mutate that name: another process may now own the resource.
+    if (hadSandbox && name && request && lock) {
       try {
         await deps.stopAndRemove(name, request.config.stopTimeoutMs);
       } catch (error) {
@@ -548,16 +672,17 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     }
 
     if (cleanupError) {
-      state = {
+      publish({
         status: "unavailable",
         info: null,
-        reason: redactMessage(cleanupError, request?.config),
-      };
+        reason: redactMessage(cleanupError, request?.config, deps.redactError),
+      });
     } else if (persistDisabled) {
-      state = { status: "off", info: null };
+      publish({ status: "off", info: null });
     } else {
-      state = { status: "disabled", info: null };
+      publish({ status: "disabled", info: null });
     }
+    deps.disposed?.();
   }
 
   const manager: SandboxManager = {
@@ -569,8 +694,45 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       return {
         status: state.status,
         info: state.info ? { ...state.info, docker: { ...state.info.docker } } : null,
+        ...(state.pendingName ? { pendingName: state.pendingName } : {}),
         ...(state.reason ? { reason: state.reason } : {}),
+        ...(observation ? { observation } : {}),
       };
+    },
+
+    async refreshState(): Promise<RuntimeState> {
+      return enqueueTransition(async () => {
+        if (state.status !== "active" || !runtime || !lastRequest || !sandboxName) return manager.getState();
+        if (pendingLifecycle || passiveInspection) {
+          observe("unknown");
+          return manager.getState();
+        }
+        const expected = revision;
+        const request = lastRequest;
+        const name = sandboxName;
+        // Keep at most one underlying passive read in flight, even if the SDK
+        // never settles. The timeout releases the preflight/lifecycle queue.
+        const inspection = Promise.resolve().then(() => deps.inspectSandbox(name));
+        passiveInspection = inspection;
+        void inspection.finally(() => {
+          if (passiveInspection === inspection) passiveInspection = undefined;
+        }).catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let next: RuntimeState["observation"] = "unknown";
+        try {
+          const inspected = await Promise.race([
+            inspection,
+            new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 2_000); }),
+          ]);
+          if (inspected && inspected.name === name && matchesWorkspace(inspected, request)) {
+            if (isStopped(inspected) || ["sleeping", "asleep"].includes(statusOf(inspected) ?? "")) next = "asleep";
+            else if (isRunning(inspected) && !runtimeInvalid) next = undefined;
+          }
+        } catch { /* An unverifiable guest is not evidence of active isolation. */ }
+        finally { clearTimeout(timer); }
+        if (revision === expected && !pendingLifecycle && state.status === "active") observe(next);
+        return manager.getState();
+      });
     },
 
     async withRuntime<T>(callback: (value: RuntimeExecution) => Promise<T>): Promise<T> {
@@ -579,54 +741,54 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       // transport immediately before the callback begins using it.
       reserveUse();
       let activated = false;
+      let ownRetirement: Promise<void> | undefined;
       let current: RuntimeExecution;
       try {
         current = await enqueueTransition(async () => {
-          const value = await wakeIfNeeded();
-          activateUse();
-          activated = true;
-          return value;
+          revision += 1;
+          try {
+            const value = await wakeIfNeeded();
+            activateUse();
+            activated = true;
+            return value;
+          } catch (error) {
+            // Only the first failed active preflight owns retirement. A call
+            // queued before failure (including callback reentry) must also reject
+            // without waiting for the active callbacks that cleanup is draining.
+            if (state.status === "active") ownRetirement = retireFailedRuntime(error);
+            throw error;
+          }
         });
       } catch (error) {
-        if (activated) releaseUse(true);
-        else releaseUse(false);
-        // A wake/reconnect failure must not leave a dead transport owned by a
-        // runtime that is now being offered as host fallback. First wait for
-        // earlier callbacks, then dispose; their transport remains usable until
-        // their callbacks finish.
-        await waitForActiveUses();
-        await disposeRuntime();
-        const held = lock;
-        lock = null;
-        if (held) {
-          try {
-            await held.release();
-          } catch {
-            // The next boot will fail closed if ownership cannot be reacquired.
-          }
-        }
-        if (state.status === "active") setFailure(lastRequest, error);
+        releaseUse(activated);
+        await ownRetirement;
         throw error;
       }
       try {
         return await callback(current);
       } catch (error) {
-        if (runtime === current && invalidatesRuntime(error)) runtimeInvalid = true;
+        if (runtime === current && invalidatesRuntime(error)) {
+          runtimeInvalid = true;
+          observe("unknown");
+        }
         throw error;
       } finally {
         releaseUse(true);
       }
     },
 
-    async boot(request: BootRequest): Promise<RuntimeState> {
-      return enqueue(() => bootInternal(request));
+    async boot(request: BootRequest, activationGuard?: () => Promise<void>): Promise<RuntimeState> {
+      beginLifecycle();
+      return enqueue(() => bootInternal(request, activationGuard)).finally(() => { pendingLifecycle -= 1; });
     },
 
     async shutdown(): Promise<void> {
-      return enqueue(() => shutdownInternal(false));
+      beginLifecycle();
+      return enqueue(() => shutdownInternal(false)).finally(() => { pendingLifecycle -= 1; });
     },
 
     async setEnabled(enabled: boolean): Promise<RuntimeState> {
+      beginLifecycle();
       return enqueue(async () => {
         if (!enabled) {
           if (state.status === "off" && !lock && !runtime) return manager.getState();
@@ -636,7 +798,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
         if (state.status === "active") return manager.getState();
         if (!lastRequest) {
-          state = { status: "unavailable", info: null, reason: "no sandbox boot request" };
+          publish({ status: "unavailable", info: null, reason: "no sandbox boot request" });
           return manager.getState();
         }
         const request: BootRequest = {
@@ -644,7 +806,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
           restored: retainedState ?? lastRequest.restored,
         };
         return bootInternal(request);
-      });
+      }).finally(() => { pendingLifecycle -= 1; });
     },
   };
 

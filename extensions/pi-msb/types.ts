@@ -21,9 +21,6 @@ export function resourceId(sessionId: string): string {
 export function displayId(sessionId: string): string {
   return resourceId(sessionId).slice(0, 6);
 }
-export function sandboxNameFor(sessionId: string): string {
-  return `pi-msb-${resourceId(sessionId)}`;
-}
 // ---------------------------------------------------------------- config ----
 export type NetworkMode = "default" | "open" | "allowlist" | "deny";
 export type FallbackMode = "block" | "host";
@@ -44,7 +41,10 @@ export interface NetworkConfig {
 }
 export interface SecretConfig {
   env: string;
-  value: string;
+  /** Exactly one source is required; textValue is always a literal string. */
+  textValue?: string;
+  hostEnv?: string;
+  hostCmd?: string;
   allowHosts: string[];
 }
 export interface MountConfig {
@@ -82,7 +82,6 @@ export interface Config {
   pruneOnStart: boolean;
   showFooter: boolean;
   lockDir: string;
-  hostRoAllowlist: string[];
 }
 export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends Array<infer U>
@@ -98,7 +97,7 @@ export type DeepReadonly<T> = T extends (...args: any[]) => unknown
     : T extends object
       ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
       : T;
-export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project";
+export type ConfigLayerName = "defaults" | "global" | "project" | "env" | "cli" | "host-default" | "host-project" | "temporary";
 export interface ParsedConfigLayer {
   name: ConfigLayerName;
   value: DeepPartial<Config>;
@@ -109,6 +108,8 @@ export type ConfigLayerInput = Omit<ParsedConfigLayer, "value"> & {
   value: DeepPartial<Config> | DeepReadonly<Config>;
 };
 export interface ResolvedConfig {
+  /** Host-owned source descriptor only; never carries Dockerfile/context contents. */
+  imageBuild?: import("./image-source.ts").DockerfileSource;
   config: Config;
   provenance: Record<string, ConfigLayerName>;
   warnings: string[];
@@ -186,15 +187,14 @@ export interface LocksPort {
 
 // -------------------------------------------------------------- workspace ----
 
-/** One path-preserving read/write bind used by every sandbox. */
+/** One cwd-only, path-preserving read/write bind used by every sandbox. */
 export interface Workspace {
   /** Canonical host directory supplied to the bind mount. */
   hostRoot: string;
-  /** Lexical absolute path used as the guest mount point. */
+  /** Lexical absolute cwd used as the guest mount point. */
   guestRoot: string;
   /** Original lexical absolute cwd retained as the sandbox workdir. */
   cwd: string;
-  fromGit: boolean;
 }
 
 // ------------------------------------------------------------- transport ----
@@ -258,9 +258,57 @@ export interface RuntimeExecution {
   transport: SandboxTransport;
   operations: ToolOperations;
 }
+export interface SessionExecutionIdentity {
+  readonly sessionId: string;
+  readonly cwd: string;
+}
+/** Reference identity changes on every lifecycle replacement, even for the same cwd. */
+export interface SessionExecutionContext {
+  current(): SessionExecutionIdentity;
+  isReady(): boolean;
+  assertCurrent(identity: SessionExecutionIdentity): void;
+  onChange(listener: () => void): void;
+}
+/** One lifecycle boundary shared by runtime acquisition, routing and host grants. */
+export function createSessionExecution(sessionId: string, cwd: string) {
+  let identity: SessionExecutionIdentity = Object.freeze({ sessionId, cwd });
+  let ready = false;
+  const listeners = new Set<() => void>();
+  const context: SessionExecutionContext = {
+    current: () => identity,
+    isReady: () => ready,
+    assertCurrent(expected) {
+      if (!ready || identity !== expected) throw new Error("Session execution context changed or is not ready; tool execution is blocked.");
+    },
+    onChange(listener) { listeners.add(listener); },
+  };
+  return {
+    context,
+    begin(nextSessionId: string, nextCwd: string) {
+      ready = false;
+      identity = Object.freeze({ sessionId: nextSessionId, cwd: nextCwd });
+      for (const listener of listeners) listener();
+      return identity;
+    },
+    finish(expected: SessionExecutionIdentity) {
+      if (identity === expected) ready = true;
+    },
+  };
+}
 export interface ToolOpsProvider {
+  /** Optional for existing test/third-party adapters with a fixed execution context. */
+  readonly execution?: SessionExecutionContext;
   isActive(): boolean;
   getState(): RuntimeState;
+  /** Cached authorization epoch; undefined while identity/configuration or lifecycle is unresolved.
+   * Replaced on runtime/configuration lifecycle changes, even if the same state returns.
+   * Recovery host execution requires this signal and a ready execution context; fixed active-only adapters may omit it. */
+  hostExecutionToken?(): object | undefined;
+  /** Host filesystem validation against the original discovery-time canonical root/device/inode.
+   * Required for recovery and also used for native active host Bash approvals. Must reject absent proof and identity/token changes across filesystem awaits. */
+  validateHostRecoveryRoot?(identity: SessionExecutionIdentity, token: object): Promise<void>;
+  /** Passive, non-waking liveness snapshot for UI; never acquires a tool runtime. */
+  refreshState?(): Promise<RuntimeState>;
   withRuntime<T>(callback: (runtime: RuntimeExecution) => Promise<T>): Promise<T>;
 }
 export interface GrepFormattingHelpers {
@@ -319,10 +367,18 @@ export interface SandboxInfo {
   createdAt: number;
   docker: DockerCapabilityStatus;
 }
+export type ImagePreparationPhase = "checking-source" | "source-changed" | "image-missing" | "using-cache" | "building" | "exporting" | "importing" | "booting";
+
 export interface RuntimeState {
   status: RuntimeStatus;
   info: SandboxInfo | null;
+  /** Display-only selected boot name; not proof of ownership or a ready VM. */
+  pendingName?: string;
+  /** Display-only progress for actual custom-image activation. */
+  imagePreparation?: ImagePreparationPhase;
   reason?: string;
+  /** Display-only liveness; does not change routing or wake eligibility. */
+  observation?: "asleep" | "unknown";
 }
 export interface BootRequest {
   sessionId: string;
@@ -330,9 +386,13 @@ export interface BootRequest {
   workspace: Workspace;
   config: Config;
   restored: PersistedSandboxState | null;
+  /** Recreate only after ownership validation, even when inspected labels match. */
+  forceRecreate?: boolean;
+  /** Locally built images must never route validation/start failures to the host. */
+  blockHostFallback?: boolean;
 }
 export interface SandboxManager extends ToolOpsProvider {
-  boot(request: BootRequest): Promise<RuntimeState>;
+  boot(request: BootRequest, activationGuard?: () => Promise<void>): Promise<RuntimeState>;
   shutdown(): Promise<void>;
   setEnabled(enabled: boolean): Promise<RuntimeState>;
 }
@@ -346,20 +406,49 @@ export interface PruneReport {
   errors: string[];
 }
 
-// --------------------------------------------------------------- host exec ----
-
-export type ExecFn = (
-  command: string,
-  args: string[],
-  options?: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv },
-) => Promise<{ stdout: string; stderr: string; code: number; killed?: boolean }>;
-
 // ------------------------------------------------------- command/control ----
 
+/** Redacted adopted policy; unverified VM fields are omitted rather than guessed. */
+export interface RuntimePolicySnapshot {
+  effectiveToml: string;
+  provenance: Record<string, string>;
+  /** Only these top-level Config keys are known; omitted VM policy is never guessed. */
+  knownFields: Array<keyof Config>;
+  verification: "created" | "reconnected";
+  /** TOML has no null; distinguish automatic naming from an empty string. */
+  automaticSandboxName: boolean;
+  adoptedAt: number;
+}
+/** Agent-safe projection frozen at successful adoption, independent of current desired credentials. */
+export interface AgentRuntimePolicySnapshot {
+  settings: Record<string, unknown>;
+  provenance: Record<string, string>;
+  knownFields: Array<keyof Config>;
+  verification: "created" | "reconnected";
+  adoptedAt: number;
+}
 export interface MsbControl {
+  readDockerfileArtifact?(source: import("./image-source.ts").DockerfileSource, id: string): ReturnType<import("./image-artifact.ts").PendingArtifacts["read"]>;
+  dockerfileSelectionVersion?(source: import("./image-source.ts").DockerfileSource): Promise<string>;
+  buildDockerfile?(options: Omit<import("./image-build.ts").ImageBuildOptions, "sdk">): ReturnType<typeof import("./image-build.ts").buildDockerfileImage>;
+  loadDockerfile?(options: Omit<import("./image-build.ts").ImageLoadOptions, "sdk">): ReturnType<typeof import("./image-build.ts").loadDockerfileImage>;
+  /** Fixed-scope owned Dockerfile backend; no host-tool routing or arbitrary paths. */
+  openDockerfile?(scope: import("./dockerfile-storage.ts").DockerfileScope, ...retiredDestinations: never[]): Promise<import("./dockerfile-storage.ts").DockerfileDraft | undefined>;
+  /** Passive allowlisted snapshot from held state only. No settings.inspect,
+   * source/environment reads, commands, SDK, live log fetching, lifecycle or writes.
+   * May include a held, bounded, failure-time sanitized image build/load snapshot.
+   * Cached desired/adoption/failure evidence is last-known, not live; raw errors are withheld.
+   * Optional for adapters: callers must not fall back to other methods. */
+  getDiagnostics?(): Promise<Record<string, unknown>>;
+  getAgentRuntimePolicy?(): AgentRuntimePolicySnapshot | undefined;
+  getRuntimePolicy?(): RuntimePolicySnapshot | undefined;
+  /** Present on the native integration; optional for third-party control adapters. */
+  readonly settings?: import("./settings.ts").SettingsEditor;
   getState(): RuntimeState;
   setEnabled(enabled: boolean): Promise<void>;
-  reload(): Promise<void>;
+  reload(options?: { allowRestart?: boolean; guard?: () => Promise<void>; signal?: AbortSignal }): Promise<void>;
+  /** Native facade compares candidate to the actual adopted runtime configuration privately. */
+  previewSettings?(draft: import("./settings.ts").SettingsDraft): Promise<import("./settings.ts").SettingsPreview>;
   pruneNow(): Promise<PruneReport>;
   getLogs(tailLines?: number): Promise<string>;
   getEffectiveConfig(): ResolvedConfig;

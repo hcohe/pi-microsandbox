@@ -2,54 +2,14 @@
   "schemaVersion": 1,
   "variants": [
     {
-      "name": "base",
-      "description": "Minimal Pi runtime tools with Docker, Buildx, and Compose; no language toolchains.",
-      "toolchains": [],
-      "tags": {
-        "latest": "base-latest",
-        "release": "base-{version}"
-      }
-    },
-    {
-      "name": "node",
-      "description": "Docker, Buildx, Compose, Node.js, and native addon build support.",
-      "toolchains": ["node"],
-      "tags": {
-        "latest": "node-latest",
-        "release": "node-{version}"
-      }
-    },
-    {
-      "name": "python",
-      "description": "Docker, Buildx, Compose, Python, uv, and native extension build support.",
-      "toolchains": ["python"],
-      "tags": {
-        "latest": "python-latest",
-        "release": "python-{version}"
-      }
-    },
-    {
-      "name": "rust",
-      "description": "Docker, Buildx, Compose, Rust, and native dependency build support.",
-      "toolchains": ["rust"],
-      "tags": {
-        "latest": "rust-latest",
-        "release": "rust-{version}"
-      }
-    },
-    {
-      "name": "go",
-      "description": "Docker, Buildx, Compose, and Go with cgo compilation support.",
-      "toolchains": ["go"],
-      "tags": {
-        "latest": "go-latest",
-        "release": "go-{version}"
-      }
-    },
-    {
       "name": "default",
-      "description": "Complete Docker, Buildx, Compose, Node.js, Python, Rust, and Go development image.",
-      "toolchains": ["node", "python", "rust", "go"],
+      "description": "Complete Docker, Buildx, Compose, gcloud, AWS CLI v2, curl, Node.js, Python, Rust, and Go development image.",
+      "toolchains": [
+        "node",
+        "python",
+        "rust",
+        "go"
+      ],
       "tags": {
         "latest": "latest",
         "release": "{version}"

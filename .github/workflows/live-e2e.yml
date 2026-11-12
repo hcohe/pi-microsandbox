@@ -50,7 +50,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.19.0
 
@@ -94,7 +94,6 @@ jobs:
         run: |
           umask 077
           cat > "$LIVE_PRIVATE_DIR/resource-guard.mjs" <<'NODE'
-          import { createHash } from "node:crypto";
           import { appendFile, readFile, writeFile } from "node:fs/promises";
           import { createRequire } from "node:module";
           import { join } from "node:path";
@@ -106,18 +105,17 @@ jobs:
           const sdk = await import(pathToFileURL(require.resolve("microsandbox")).href);
           const { Sandbox } = sdk;
           const baselinePath = join(privateDir, "resource-baseline.json");
-          const sessionPattern = /^(?:pi-msb-live-[0-9]+-[0-9a-f]+|same-live-session|stale-[0-9]+|pruner-[0-9]+|bad-[0-9]+|fallback-[0-9]+|deny-[0-9]+|prepared-[0-9]+-[0-9a-f]+)$/;
-          const probePattern = /^pi-msb-live-probe-[0-9]+-[0-9]+$/;
-
-          const resourceId = (session) => createHash("sha256").update(session).digest("hex").slice(0, 20);
-          const sandboxName = (session) => `pi-msb-${resourceId(session)}`;
+          const sessionPattern = /^(?:pi-msb-live-[0-9]+-[0-9a-f]+|pi-msb-live-probe-[0-9]+-[0-9]+|same-live-session|stale-[0-9]+|pruner-[0-9]+|bad-[0-9]+|fallback-[0-9]+|deny-[0-9]+|prepared-[0-9]+-[0-9a-f]+)$/;
           const labelsForSandbox = (handle) => handle.config()?.labels ?? {};
-          const isOwnedSandbox = (handle) => {
+          const ownedIdentity = (handle) => {
             const labels = labelsForSandbox(handle);
-            const session = labels["pi-msb.session"] ?? "";
-            return labels["pi-msb.managed"] === "true" &&
-              sessionPattern.test(session) &&
-              handle.name === sandboxName(session);
+            const sessionId = labels["pi-msb.session"] ?? "";
+            return labels["pi-msb.managed"] === "true" && sessionPattern.test(sessionId)
+              ? { name: handle.name, sessionId } : null;
+          };
+          const matchesIdentity = (handle, expected) => {
+            const current = ownedIdentity(handle);
+            return current?.name === expected.name && current.sessionId === expected.sessionId;
           };
 
           async function sandboxes() {
@@ -147,12 +145,15 @@ jobs:
             let errors = 0;
 
             for (const item of newSandboxes) {
-              if (!probePattern.test(item.name) && !isOwnedSandbox(item)) continue;
+              const expected = ownedIdentity(item);
+              if (!expected) continue;
               try {
-                const current = await Sandbox.get(item.name);
-                if (!probePattern.test(current.name) && !isOwnedSandbox(current)) throw new Error("identity changed");
+                const current = await Sandbox.get(expected.name);
+                if (!matchesIdentity(current, expected)) throw new Error("identity changed");
                 try { await current.stopWithTimeout(10_000); } catch {}
-                await (await Sandbox.get(item.name)).remove();
+                const stopped = await Sandbox.get(expected.name);
+                if (!matchesIdentity(stopped, expected)) throw new Error("identity changed");
+                await stopped.remove();
                 removedSandboxes++;
               } catch { errors++; }
             }
@@ -342,7 +343,7 @@ jobs:
 
       - name: Upload sanitized failure log
         if: ${{ always() && (failure() || steps.live.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-e2e-sanitized-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pi-msb-live-${{ github.run_id }}-${{ github.run_attempt }}/sanitized-failure.log

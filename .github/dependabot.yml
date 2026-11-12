@@ -11,8 +11,23 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 7
+    ignore:
+      # Keep declarations aligned with the supported Node 22 runtime floor.
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
     groups:
+      pi:
+        patterns:
+          - "@earendil-works/pi-*"
+        # Pi and TUI share public types; update them together, including majors.
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
       development-minor-patch:
+        exclude-patterns:
+          - "@earendil-works/pi-*"
         dependency-type: "development"
         update-types:
           - "minor"

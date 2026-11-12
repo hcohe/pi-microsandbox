@@ -1,144 +1,145 @@
 # pi-microsandbox
 
-**Let your agents work. Stop babysitting every command.**
+**A little Linux VM for your agent's big ideas.**
 
-Give an agent a task and get on with your day. pi-microsandbox uses
-[Microsandbox](https://microsandbox.dev/) to run
-[Pi](https://github.com/earendil-works/pi)'s file and shell tools in lightweight
-microVMs. Microsandbox is an open-source, local-first runtime for isolating
-untrusted workloads, with a separate Linux kernel for each sandbox.
+Run [Pi](https://github.com/earendil-works/pi)'s file and shell tools inside a
+[Microsandbox](https://microsandbox.dev/) microVM. Your agent gets a Linux
+playground. You get to choose its tools, network access, mounts, and secrets.
 
-Each project can define its own environment and safety boundaries. Set them up
-once, then let the agent get to work.
+- **Real Linux. Your actual files.** Edits land directly in your working directory.
+- **Bring your stack.** The default image includes Node.js, Python, Rust, Go,
+  and Docker. Use this complete [image](docs/images.md), or place a
+  [host-owned Dockerfile](docs/images.md#host-owned-dockerfile-no-host-docker)
+  to build inside a disposable VM—no host Docker needed.
+- **Ask, review, approve.** Let the agent propose sandbox settings instead of
+  playing configuration-file hide-and-seek.
+- **No sneaky host fallback.** If sandbox startup fails, routed tools stay
+  blocked by default. Failure is not permission to run on your host.
 
-[Get started](#get-started) · [Documentation](#documentation) · [Releases](https://github.com/hcohe/pi-microsandbox/releases)
-
-## Try it
-
-Run Pi with pi-microsandbox for one session, without installing it:
-
-```sh
-pi -e npm:pi-microsandbox
-```
-
-## Less supervision. More work getting done.
-
-- Let routine file and shell work happen inside the sandbox. Host execution
-  stays an explicit escape, with approval required while the sandbox is active.
-- Work at the same path inside and outside the VM. Sandboxed writes appear in
-  the host checkout immediately, with no export step.
-- If the sandbox cannot start, routed tools stop by default. They do not quietly
-  run on your host instead.
-
-You still review what the agent produces. The point is to spend your attention
-on the results rather than supervise every step along the way.
-
-## Workspace behavior
-
-If Pi starts inside a Git worktree, pi-microsandbox mounts the whole worktree
-root read/write at the same lexical path in the guest. If Pi starts outside
-Git, it mounts the current working directory itself. Commands start in the
-original current working directory.
-
-This is a VM boundary, not checkout isolation. The selected root is fully
-visible, including `.git`, secrets such as `.env`, untracked files, and sibling
-directories. Writes change the host immediately. Multiple sessions using the
-same checkout share those files and can conflict; use separate host worktrees
-or checkouts when you need independent changes. Containers started inside the
-microVM can also reach the mounted workspace.
-
-[Understand workspace storage and legacy-volume recovery →](docs/storage.md)
-
-## Every project gets its own boundaries
-
-Your frontend app and your internal service do not need the same sandbox.
-Choose a [published variant or custom image](docs/images.md) with the tools a
-project needs, allow only the network hosts it should reach, and configure its
-extra file mounts and secrets. Another project can have a different setup,
-including no network access.
-
-Keep host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml` and
-shared project settings in `.pi-msb.toml`. For host-owned per-project overrides, use
-`~/.pi/agent/pi-microsandbox/projects/<home-relative-project-path>/.pi-msb.toml`.
-For example, `~/Code/pi-microsandbox` uses
-`~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml`.
-Host-owned defaults and project overrides take precedence over local config,
-environment variables, and session settings; project overrides win over the
-host defaults, and configured lists replace lower-layer lists. Pi's custom agent
-directory is respected. See [Configuration](docs/configuration.md#host-owned-project-overrides)
-for details and security-sensitive settings to pin.
-
-The agent gets an environment built for the job. Image cohorts built from this
-version include Docker Engine 29.8.0, Buildx 0.37.1, and Compose 5.5.1. The
-daemon and its containers run inside the microVM; pi-microsandbox never connects
-them to the host Docker socket. Nested containers can still access the mounted
-workspace and remain subject to the outer network policy.
-
-[Configure your project's sandbox →](docs/configuration.md)
+[Get started](#get-started) · [Agent recipes](docs/agent-recipes.md) · [Documentation](#documentation)
 
 ## Get started
 
-You'll need Pi, **Node.js 22.19.0+**, and one of the supported host targets:
-Apple Silicon macOS (`darwin-arm64`), GNU Linux x86_64
-(`linux-x64-gnu`), or GNU Linux arm64 (`linux-arm64-gnu`). Live sandboxes also
-need host virtualization support. The POSIX lock addon is bundled and installs
-without lifecycle scripts or a compiler.
-[Full requirements and installation help →](docs/getting-started.md)
+You'll need **Pi**, **Node.js 22.19.0+**, and either **Apple Silicon macOS** or
+**GNU Linux x86_64/arm64 with accessible KVM**. The matching Microsandbox runtime
+and native lock addon are bundled—keep npm optional dependencies enabled.
+[Full requirements →](docs/getting-started.md)
 
-Install pi-microsandbox:
-
-```sh
-pi install npm:pi-microsandbox
-```
-
-That command also installs the pinned Microsandbox SDK, CLI, and matching
-platform runtime. A separate Microsandbox installation is not required on a
-supported host. Keep npm optional dependencies enabled so npm installs the
-platform package.
-
-If the platform package is unavailable, you can provide a standalone `msb`
-binary with `MSB_PATH`. See the official
-[Microsandbox documentation](https://docs.microsandbox.dev/) for standalone
-installation and runtime troubleshooting. The documentation in this repository
-covers the Pi integration.
-
-Start Pi from the directory where you want to work:
+Try it for one session:
 
 ```sh
 cd /path/to/project
+pi -e npm:pi-microsandbox
+```
+
+Like it? Install it for future sessions:
+
+```sh
+pi install npm:pi-microsandbox
 pi
 ```
 
-Once you're in Pi, inspect the selected workspace root:
+Then ask your agent:
 
-```text
-/msb status
-```
+> Inspect my sandbox with msb_config_get. Explain what's mounted, which network
+> policy is desired versus actually adopted, and whether anything can run on the
+> host. Don't change anything yet.
 
-> **Host execution is separate.** `/msb off` explicitly hands tools to the
-> host. `fallback_mode = "host"` opts into automatic host execution after a
-> sandbox failure. Neither control changes the workspace mount, and neither is
-> sandboxed. The default fallback blocks tools when startup fails.
+Prefer knobs and buttons? **`/msb`** opens the control panel. Use arrows or
+`hjkl` to explore, Enter to edit, and `q` to close.
+[Panel guide →](docs/commands.md)
 
-Upgrading from a release that used named Git volumes requires a manual recovery
-check. Before upgrading, use the old `/msb volumes` and `/msb export` commands
-to inventory and copy retained work. After upgrading, use Microsandbox's own
-tooling to recover or remove legacy volumes; they are never deleted
-automatically. See [workspace storage](docs/storage.md).
+## Let your agent tune its own playground
+
+No need to teach it our TOML dialect. `msb_config_get` exposes settings, schemas,
+origins, and safety context. `msb_config_set` proposes a scoped edit or a batch
+of related edits. **You approve every request** in a No-first dialog showing the
+scope and diff. Project is shared by the main/root Git checkout, linked worktrees
+and nested Git cwd. Without an interactive approval UI, changes are rejected.
+
+Try a few prompts:
+
+> Give this project 2 CPUs and 4096 MiB of RAM. Use Project scope, propose both
+> changes together, and tell me whether the VM restarted successfully.
+
+> For this Session, deny network access. Keep host fallback blocked and don't
+> add any host-tool bypasses. Explain when this restriction expires.
+
+> Add an NPM_TOKEN secret sourced from my host variable PROJECT_NPM_TOKEN,
+> scoped to registry.npmjs.org. Use Project scope. Check network policy separately;
+> don't read or print the token.
+
+The agent proposes; you decide. Review the diff, then ask it to explain the
+returned impact warnings and confirm whether the change was **saved and activated**.
+Resource, image, network, mount, and secret changes may recreate the VM and lose
+its disposable state. Host-file edits are already real and are not rolled back.
+
+[More recipes: offline work, read-only mounts, local servers, recovery →](docs/agent-recipes.md)
+
+Already a Google Cloud admin on your host? [Give the agent a separate read-only
+identity](docs/google-cloud.md)—keyless impersonation, no copied admin profile,
+and a write-denied test to check the boundary.
+
+## Pick how long a setting sticks
+
+| Scope | What it means |
+| --- | --- |
+| **Session** | Memory-only. Resets on Pi `/reload`, session/workspace switch, or shutdown; not restored from the transcript. |
+| **Project** | The main/root Git project, shared from linked worktrees and nested cwd; otherwise canonical cwd. Always host-owned. |
+| **Global** | Saved as your baseline for all projects. |
+
+Precedence is **built-ins < environment < Global < Project < Session**.
+Ordinary **settings reload** preserves Session overrides; Pi's extension
+**`/reload` does not**. When a Session restriction disappears, inherited settings
+may allow broader access. Use Project or Global for restrictions you want to keep.
+
+Setup and inspection create no config files. Saving Global settings creates
+`~/.pi/agent/pi-microsandbox/default.toml`. Non-Git cwd-local policy for `~/Code/app` goes in
+`~/.pi/agent/pi-microsandbox/projects/Code/app/config.toml`. Supported Git
+main, linked and nested cwd use `projects/<home-relative-canonical-main-checkout>/config.toml`;
+roots outside home use `projects-absolute/<absolute-path-without-root>/config.toml`.
+Dockerfile and build-context are siblings. New registered worktrees automatically share
+this readable main-root record, without hashes or an in-repository policy file.
+Non-Git and unsupported Git layouts stay cwd-local. No migration or old hashed-path
+lookup occurs. [Configuration →](docs/configuration.md)
+
+
+## A sandbox, not a spare checkout
+
+**Your cwd is mounted read/write.** The host source is canonical `realpath(cwd)`;
+its lexically resolved path is the guest root and command cwd. Git metadata is
+used only for policy association, never to mount ancestors or siblings outside cwd.
+
+That means `.env`, `.git`, ignored files, and untracked files **inside cwd are
+accessible**, and writes reach the host immediately. Overlapping sessions share
+those files. Use separate worktrees or checkouts for independent changes—not as
+secret filtering. External worktree/submodule Git metadata is not separately
+mounted, so guest Git may need explicit setup. A main checkout's writable `.git`
+contains authoritative cross-worktree registration: sharing policy trusts that
+metadata and any overlapping sessions able to modify it.
+
+Docker runs **inside the VM**, never through your host Docker socket. Containers
+can still access the workspace and extra mounts. Explicit mounts and approved
+host controls can widen the boundary.
+
+Turning the sandbox off explicitly hands tools to the host. So does automatic
+`fallback_mode = "host"` after failure. Keep the default `"block"` for untrusted
+work. [Know the boundary →](docs/safety.md)
 
 ## Documentation
 
-| When you want to… | Read |
+| I want to… | Start here |
 | --- | --- |
-| Install or check host support | [Getting started](docs/getting-started.md) |
-| Understand the workspace mount or recover legacy volumes | [Storage](docs/storage.md) |
-| Choose an image variant or build a custom image | [Images](docs/images.md) |
-| Set up networking, secrets, mounts, or other options | [Configuration](docs/configuration.md) |
-| Look up an `/msb` command | [Command reference](docs/commands.md) |
-| Understand the isolation boundary and host access | [Safety model](docs/safety.md) |
-| Fix a sandbox that won't start | [Troubleshooting](docs/troubleshooting.md) |
-| Run tests or work on the extension | [Development](docs/development.md) |
+| Install and run my first sandbox | [Getting started](docs/getting-started.md) |
+| Ask my agent to configure it | [Agent recipes](docs/agent-recipes.md) |
+| Understand scopes, files, and settings | [Configuration](docs/configuration.md) |
+| Use `/msb` myself | [Control panel](docs/commands.md) |
+| Look up tool arguments and approval behavior | [Tool reference](docs/tools.md) |
+| Understand what the agent can access | [Safety](docs/safety.md) · [Storage](docs/storage.md) |
+| Choose or build a Linux image | [Images](docs/images.md) |
+| Unstick a sandbox | [Troubleshooting](docs/troubleshooting.md) |
+| Work on the extension | [Development](docs/development.md) · [Settings internals](docs/settings-backend.md) |
 
 ---
 
-[MIT license](LICENSE) · [Report a bug](https://github.com/hcohe/pi-microsandbox/issues) · [Report a security issue privately](SECURITY.md)
+[MIT license](LICENSE) · [Releases](https://github.com/hcohe/pi-microsandbox/releases) · [Report a bug](https://github.com/hcohe/pi-microsandbox/issues) · [Report a security issue privately](SECURITY.md)

@@ -2,7 +2,7 @@
 
 ## Project
 
-`pi-microsandbox` is a TypeScript Pi extension that routes file and shell tools through Microsandbox microVMs. It bind-mounts the enclosing Git worktree (or a non-Git cwd) read/write, supports configurable safety boundaries, and includes prebuilt native file-locking addons for supported macOS and Linux targets.
+`pi-microsandbox` is a TypeScript Pi extension that routes file and shell tools through Microsandbox microVMs. It bind-mounts only canonical `realpath(cwd)` read/write at the lexically resolved cwd guest path, supports configurable safety boundaries, and includes prebuilt native file-locking addons for supported macOS and Linux targets.
 
 ## Development workflow
 
@@ -13,10 +13,35 @@
 - Keep generated native binaries out of Git. Changes to the flock addon should also pass `npm run build:flock` and `npm run smoke:flock` on a supported host.
 - Live VM tests are opt-in and require virtualization: `PI_MSB_LIVE_TEST=1 ./scripts/e2e-smoke.sh`. Never treat a skipped run as validation.
 - Update user-facing documentation with behavior or configuration changes. Preserve secure defaults: sandbox failures must not silently fall back to host execution.
-- There are no workspace modes. A Git cwd exposes the whole worktree at the
-  same lexical guest path; a non-Git cwd exposes itself. Treat this read/write
-  host mount, shared sessions, and nested-container access as part of the
-  security boundary.
+- There are no workspace modes or Git-root-selected binds. Guest root and command
+  cwd are the lexically resolved cwd; Git ancestors/siblings outside cwd are
+  never automatically exposed. Canonical cwd remains the session boundary. At
+  supported Git main, linked and nested cwd, Project always uses the same
+  main/root host-owned record. Shared config atomically embeds immutable repository
+  metadata; bounded read-only catalog discovery survives checkout gitfile deletion
+  and covers future registered worktrees without crossing nearer Git boundaries.
+  Non-Git and unsupported Git layouts stay cwd-local; Global is unchanged. There
+  are no Repository/Worktree destinations or persistent checkout overrides.
+  Shared Project storage is projects/<home-relative-canonical-main-root> (or
+  projects-absolute/<absolute-main-root-without-root> outside home), with config.toml,
+  Dockerfile and build-context/ siblings. There are no hashed config/catalog keys,
+  compatibility reads, migrations or checkout overlays. Readable Project keys reject
+  reserved artifact components (case-insensitive build-context/config.toml/Dockerfile);
+  catalog traversal never enters build-context. Dockerfile/context Project saves
+  share config's main-root record and immutable association.
+  Owned source tools support bounded relative UTF-8 context patches, not arbitrary
+  host paths; multi-artifact saves are individually atomic, never jointly/crash
+  atomic, and partial/unknown persistence never authorizes activation.
+- Git metadata inside cwd is exposed but never selects the bind. External
+  linked-worktree/submodule metadata is not separately mounted; guest Git may
+  need explicit setup or mounts. Treat the read/write cwd bind (including secrets
+  and `.git` within it), overlapping sessions, and nested-container access as
+  part of the security boundary. The main checkout's writable `.git` is an
+  authoritative cross-worktree trust boundary, not isolated by shared policy.
+  Reserve every catalogued proof tree against explicit writable mounts, including
+  unrelated sessions; stale/invalid catalog associations fail closed for host
+  repair. Explicit mounts and user-approved host controls
+  are separate; cwd replacement must invalidate prior approvals.
 
 ## Pull requests and releases
 
@@ -28,6 +53,6 @@
 - Repository auto-merge and strict main CI are enabled with zero required reviews and admin/bot bypass disabled. Package tag creation ruleset `26100334` and update/delete ruleset `23345899` preserve the existing human exception; add the installed App only to creation (Always allow), never immutability or main. Leave image-tag rules unchanged.
 - The App-published release triggers `.github/workflows/release.yml`; preserve its safeguards that verify one assembled tarball and publish those exact bytes through OIDC automatically. Keep npm trusted publisher fields owner `hcohe`, repository `pi-microsandbox`, workflow filename `release.yml` (no path), environment `npm`. The environment permits only `v*` tags without required reviewers.
 - Manual Release Please dispatch is recovery-only on `main`. Unchanged existing PRs are not returned by the pinned action; if auto-merge was not enabled, verify that exact release PR and enable squash auto-merge in the UI without bypass. Do not add npm tokens, repack artifacts, or move tags. Rerun the existing failed npm workflow/jobs when safe; npm versions are immutable.
-- Container images are released independently with `image-vX.Y.Z` tags. Publish and verify an image cohort before updating the package's digest-pinned default image.
+- Container images are released independently with `image-vX.Y.Z` tags. Publish and verify an image before updating the package's digest-pinned default image.
 
 See `docs/development.md` for detailed development, packaging, test, and release procedures.

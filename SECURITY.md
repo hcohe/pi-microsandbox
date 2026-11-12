@@ -36,20 +36,44 @@ not include:
 
 - passwords, API keys, npm tokens, cloud credentials, signing material, or
   unredacted environment variables;
-- resolved secret values from `$ENV:` or `$FILE:` references;
+- secret values from `textValue`, host environment variables (`host_env`), or host
+  command output (`host_cmd`);
 - complete sandbox logs, configuration dumps, session files, or command output
   that may contain secrets;
 - workspace or legacy-volume contents, source code, `.env` files, or other
   private user data that is not essential to the report.
 
 If a real secret may have been exposed, revoke or rotate it first. The selected
-workspace is mounted read/write: inside Git it includes the entire worktree,
-including `.git`, secrets, untracked files, and sibling directories; outside
-Git it is the current directory. Writes reach the host immediately, concurrent
-sessions share the checkout, and nested containers can access the mount. Use
+workspace is only canonical `realpath(cwd)`, mounted read/write at the lexically
+resolved cwd as both guest root and command cwd. Git discovery never selects
+the bind or automatically exposes Git ancestors/siblings outside cwd. Within
+cwd, `.git`, secrets, and untracked files remain exposed. External linked-worktree
+or submodule metadata is not separately mounted; guest Git may need explicit
+setup or mounts. Writes reach the host immediately, overlapping sessions share
+host files, and nested containers can access the mount. Explicit mounts and
+user-approved host controls can widen access separately; this is not a guarantee
+against every sandbox escape. Use
 synthetic values in the reproduction and describe omitted material rather than
 attaching it. Remember that GitHub advisory participants can read uploaded
 artifacts, so a private report is not a reason to include unnecessary secrets.
+
+## Diagnostic and recovery tools
+
+`msb_diagnostics` is passive and host-side, so it remains available while sandbox
+execution is blocked. It does not execute host or secret commands, load the native
+SDK, fetch logs, read configuration files or environment values, start a VM, or
+change policy. Reports redact literal credentials, bound output, and identify
+unknown checks instead of exposing raw exceptions. Unlike passive diagnostics,
+configuration inspection exposes host variable names and host command source text
+as readable metadata; do not embed credentials in command text.
+
+Diagnostic access does not grant general host execution. Only exact tool names
+registered by this extension receive the management-tool exemption. Settings
+repairs use the existing explicit user approval, full candidate validation, and
+source/session guards. Invalid-baseline recovery also requires informed approval
+of the newly activated safety policy and every retained host command, not just
+the repaired field. A broken sandbox does not authorize a host fallback,
+a malformed-file overwrite, or bypassing a failed workspace identity check.
 
 ## What happens next
 

@@ -1,7 +1,15 @@
+import { readLoadedImage } from "./image-artifact.ts";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { nativeBuildPlatform, selectedImageReference, discoverDockerfile, type DockerfileSource } from "./image-source.ts";
+import { createSettingsSanitizer, type SettingsSanitizer } from "./settings-redaction.ts";
+import { projectConfigPath } from "./project-storage-path.ts";
+import { repositoryMetadata, type RepositoryMetadata } from "./repository-catalog.ts";
+import { discoverProjectIdentity, ProjectIdentityError, type ProjectIdentity } from "./project-identity.ts";
+import { isSecretHost, networkDestinationKind } from "./network-domains.ts";
 import type {
   Config,
   ConfigLayerInput,
@@ -11,13 +19,19 @@ import type {
   MergeResult,
   ParsedConfigLayer,
   ResolvedConfig,
+  SecretConfig,
 } from "./types.ts";
 
 const ROUTED_TOOLS = ["read", "write", "edit", "ls", "find", "grep", "bash"];
-const PASS_THROUGH_TOOLS = ["todo", "ask_user_question", "web_search", "source_check", "fetch_content"];
-const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "hostRoAllowlist", "network.allowHosts"]);
-const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeHostRoAllowlist", "removeAllowHosts", "removePublishPorts"]);
-const SECRET_FIELDS = new Set(["env", "value", "allowHosts"]);
+const PASS_THROUGH_TOOLS = ["web_search", "source_check", "fetch_content"];
+const ALLOWLIST_PATHS = new Set(["routeTools", "passThroughTools", "hostEnv", "network.allowHosts"]);
+const CONTROL_KEYS = new Set(["removeSecrets", "removeMounts", "removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeAllowHosts", "removePublishPorts"]);
+const SECRET_FIELDS = new Set(["env", "textValue", "hostEnv", "hostCmd", "allowHosts"]);
+const SECRET_SOURCES = ["textValue", "hostEnv", "hostCmd"] as const;
+const REMOVED_SECRET_VALUE_MESSAGE = "secret value was removed; use textValue for literal text or hostEnv for a host environment variable; $ENV: expansion is not supported";
+const HOST_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HOST_CMD_TIMEOUT_MS = 10_000;
+const HOST_CMD_MAX_BYTES = 64 * 1024;
 const MOUNT_FIELDS = new Set(["type", "hostPath", "guestPath", "readonly", "options"]);
 const FORBIDDEN_CONFIG_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const REMOVED_WORKSPACE_KEYS = new Set(["mode", "cloneBranch", "cloneDepth", "shallowArchive", "volumeQuotaMiB"]);
@@ -91,7 +105,6 @@ export const DEFAULT_CONFIG = deepFreeze<Config>({
   pruneOnStart: true,
   showFooter: true,
   lockDir: "~/.pi-msb/locks",
-  hostRoAllowlist: [],
 });
 
 export interface ResolveConfigInput {
@@ -104,6 +117,10 @@ export interface ResolveConfigInput {
   xdgConfigHome?: string;
   agentDir?: string;
   cliOverridesToml?: string;
+  /** Memory-only, authoritative layer above host policy. */
+  temporaryOverrides?: DeepPartial<Config>;
+  /** Opt-in execution-time native selection lookup; passive resolution never loads the SDK. */
+  imageSdkLoader?: import("./image-artifact.ts").ImageSdkLoader;
   readFile?: (path: string) => Promise<string | null>;
   exists?: (path: string) => Promise<boolean>;
   realpath?: (path: string) => Promise<string>;
@@ -160,7 +177,6 @@ type LayerValue = DeepPartial<Config> & {
   removeRouteTools?: unknown;
   removePassThroughTools?: unknown;
   removeHostEnv?: unknown;
-  removeHostRoAllowlist?: unknown;
   removeAllowHosts?: unknown;
   removePublishPorts?: unknown;
 };
@@ -175,7 +191,7 @@ function camel(key: string): string {
   return input.replace(/_([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase()).replace(/Mib$/, "MiB");
 }
 function snake(key: string): string {
-  return key.replace(/MiB/g, "mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  return key.replace(/MiB/g, "Mib").replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
 function removedWorkspaceIssues(value: Record<string, unknown>): string[] {
   return Object.keys(value)
@@ -193,8 +209,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
-function withoutSecret(value: unknown): string {
-  return typeof value === "string" && /^\$(?:ENV|FILE):[^\s]+$/.test(value) ? value : "<redacted>";
+function assertNoDeprecatedSecretSources(value: Record<string, unknown>): void {
+  if (Array.isArray(value.secrets) && value.secrets.some((secret) => isPlainObject(secret) && Object.hasOwn(secret, "value"))) {
+    throw new ConfigError([REMOVED_SECRET_VALUE_MESSAGE]);
+  }
+}
+function secretSourceIssues(secret: unknown): string[] {
+  if (!isPlainObject(secret)) return ["must specify exactly one of textValue, hostEnv, or hostCmd"];
+  if (Object.hasOwn(secret, "value")) return [REMOVED_SECRET_VALUE_MESSAGE];
+  const sources = SECRET_SOURCES.filter((key) => Object.hasOwn(secret, key));
+  const issues: string[] = [];
+  if (sources.length !== 1) issues.push("must specify exactly one of textValue, hostEnv, or hostCmd");
+  for (const key of sources) {
+    const value = secret[key];
+    if (typeof value !== "string") issues.push(`${key} must be a string`);
+    else if (key === "hostEnv" && !HOST_ENV_NAME.test(value)) issues.push("hostEnv must be a valid host environment name");
+    else if (key === "hostCmd" && !value.trim()) issues.push("hostCmd must be a non-empty shell command");
+  }
+  return issues;
 }
 function warning(text: string): string { return text.replace(/(secret|password|token|value)\s*=\s*[^,; ]+/gi, "$1=<redacted>"); }
 
@@ -400,7 +432,7 @@ function knownPath(path: string): boolean {
   if (parts[0] === "docker") return parts.length === 1 || (parts.length === 2 && ["mode", "startupTimeoutMs"].includes(parts[1]));
   if (parts[0] === "secrets") return parts.length === 1 || (parts.length === 2 && SECRET_FIELDS.has(parts[1]));
   if (parts[0] === "mounts") return parts.length === 1 || (parts.length === 2 && MOUNT_FIELDS.has(parts[1]));
-  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir", "hostRoAllowlist"].includes(parts[0]);
+  return ["image", "pullPolicy", "bootstrapTools", "cpus", "memoryMiB", "idleTimeoutSec", "stopTimeoutMs", "detached", "replace", "replaceTimeoutMs", "sandboxName", "blockThirdParty", "routeTools", "passThroughTools", "allowHostExecution", "allowSkillReads", "fallbackMode", "exposeSessionEnvironment", "hostEnv", "autoStart", "pruneOnStart", "showFooter", "lockDir"].includes(parts[0]);
 }
 function collectUnknown(value: unknown, base: string[], warnings: string[]): void {
   if (!isPlainObject(value)) return;
@@ -433,18 +465,13 @@ function withMountDefaults(value: LayerValue): LayerValue {
 }
 function normalizeLayer(name: ConfigLayerName, raw: Record<string, unknown>, source?: string): ParsedConfigLayer {
   assertSafeConfigValue(raw);
-  const normalized = normalizeValue(raw) as Record<string, unknown>;
+  const { _repository: _privateRepository, ...settings } = raw;
+  const normalized = normalizeValue(settings) as Record<string, unknown>;
   assertNoRemovedWorkspaceKeys(normalized);
+  assertNoDeprecatedSecretSources(normalized);
   const value = withMountDefaults(normalized as LayerValue);
   const warnings: string[] = [];
   collectUnknown(value, [], warnings);
-  if (name === "project" && Array.isArray(value.secrets)) {
-    for (const secret of value.secrets as any[]) {
-      if (typeof secret?.value === "string" && !/^\$(?:ENV|FILE):/.test(secret.value)) {
-        warnings.push("project config contains a literal secret value; use $ENV or $FILE instead");
-      }
-    }
-  }
   return { name, value, warnings: warnings.map(warning), source };
 }
 
@@ -480,8 +507,7 @@ export function parseEnvConfig(env: NodeJS.ProcessEnv): ParsedConfigLayer {
   const warnings: string[] = [];
   for (const [name, raw] of Object.entries(env)) {
     if (!name.startsWith("PI_MSB_") || raw === undefined || name === "PI_MSB_DISABLE" || name === "PI_MSB_CONFIG_FILE") continue;
-    const alias = name === "PI_MSB_HOST_RO_PATHS";
-    const parts = alias ? ["hostRoAllowlist"] : name.slice("PI_MSB_".length).split("__").filter(Boolean).map(camel);
+    const parts = name.slice("PI_MSB_".length).split("__").filter(Boolean).map(camel);
     if (!parts.length) continue;
     assign(root, parts, envScalar(raw as string, pathKey(parts)));
   }
@@ -496,7 +522,7 @@ function mergeObject(target: Record<string, any>, source: Record<string, any>, p
     if (CONTROL_KEYS.has(key) || value === undefined) continue;
     // Host policy lists are authoritative, never additive. Drop stale identity
     // provenance too, so replaced project mounts/secrets cannot retain authority.
-    if ((layer === "host-default" || layer === "host-project") && Array.isArray(value)) {
+    if ((layer === "host-default" || layer === "host-project" || layer === "temporary") && Array.isArray(value)) {
       target[key] = [];
       const field = pathKey(path);
       for (const prior of Object.keys(provenance)) if (prior.startsWith(`${field}[`)) delete provenance[prior];
@@ -523,7 +549,7 @@ function mergeObject(target: Record<string, any>, source: Record<string, any>, p
   }
   const removalKeys = prefix[0] === "network"
     ? ["removeAllowHosts", "removePublishPorts"]
-    : ["removeRouteTools", "removePassThroughTools", "removeHostEnv", "removeHostRoAllowlist"];
+    : ["removeRouteTools", "removePassThroughTools", "removeHostEnv"];
   for (const key of removalKeys) {
     const remove = (source as Record<string, unknown>)[key];
     if (!Array.isArray(remove)) continue;
@@ -566,6 +592,7 @@ export function mergeConfigLayers(layers: readonly ConfigLayerInput[]): MergeRes
   for (const layer of layers) {
     assertSafeConfigValue(layer.value);
     assertNoRemovedWorkspaceKeys(layer.value as Record<string, unknown>);
+    assertNoDeprecatedSecretSources(layer.value as Record<string, unknown>);
     warnings.push(...layer.warnings.map(warning));
     const source = withMountDefaults(clone(layer.value) as LayerValue);
     applyRemovals(result, source, layer.name, provenance);
@@ -601,6 +628,7 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   const config = mergeWithDefaults(raw);
   const issues: string[] = [];
   const n = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+  if (typeof config.lockDir !== "string" || !config.lockDir.trim()) issues.push(issueForPath("lockDir", "must be a non-empty string"));
   if (!config.image || typeof config.image !== "string") issues.push(issueForPath("image", "must be a non-empty string"));
   if (!["always", "if-missing", "never"].includes(config.pullPolicy)) issues.push(issueForPath("pullPolicy", "must be always, if-missing, or never"));
   if (!n(config.cpus) || config.cpus < 1 || config.cpus > 64) issues.push(issueForPath("cpus", "must be between 1 and 64"));
@@ -624,10 +652,11 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   if (stringArray("routeTools", config.routeTools)) for (const tool of config.routeTools) if (!ROUTED_TOOLS.includes(tool)) issues.push(issueForPath("routeTools", `unknown routed tool ${tool}`));
   stringArray("passThroughTools", config.passThroughTools);
   if (stringArray("hostEnv", config.hostEnv)) for (const name of config.hostEnv) if (PROTECTED_GUEST_ENV.has(name)) issues.push(issueForPath("hostEnv", `must not forward protected process environment variable ${name}`));
-  stringArray("hostRoAllowlist", config.hostRoAllowlist);
   const network = isPlainObject(config.network) ? config.network : null;
   if (!network || !["default", "open", "allowlist", "deny"].includes(network.mode as string)) issues.push(issueForPath("network.mode", "unknown network mode"));
-  if (network && stringArray("network.allowHosts", network.allowHosts)) { /* checked above */ }
+  if (network && stringArray("network.allowHosts", network.allowHosts)) {
+    for (const host of network.allowHosts) if (!networkDestinationKind(host)) issues.push(issueForPath("network.allowHosts", "must contain exact DNS names or valid IP/CIDR rules; wildcards, URLs and ports are not supported"));
+  }
   if (network && stringArray("network.publishPorts", network.publishPorts)) { /* checked above */ }
   if (network && typeof network.allowDns !== "boolean") issues.push(issueForPath("network.allowDns", "must be boolean"));
   if (network?.mode === "allowlist" && Array.isArray(network.allowHosts) && !network.allowHosts.length && !network.allowDns) issues.push(issueForPath("network", "allowlist needs a host or DNS permission"));
@@ -636,8 +665,9 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   for (const [index, secret] of (Array.isArray(config.secrets) ? config.secrets : []).entries()) {
     if (!secret || typeof secret.env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.env)) issues.push(issueForPath(`secrets[${index}]`, "env must be a valid host environment name"));
     else if (PROTECTED_GUEST_ENV.has(secret.env)) issues.push(issueForPath(`secrets[${index}].env`, `must not set protected process environment variable ${secret.env}`));
-    if (typeof secret?.value !== "string") issues.push(issueForPath(`secrets[${index}].value`, "must be a string"));
+    for (const issue of secretSourceIssues(secret)) issues.push(issueForPath(`secrets[${index}]`, issue));
     if (!Array.isArray(secret?.allowHosts) || !secret.allowHosts.length || secret.allowHosts.some((host: unknown) => typeof host !== "string" || !host)) issues.push(issueForPath(`secrets[${index}]`, "allowHosts must be a non-empty string array"));
+    else if (secret.allowHosts.some((host: unknown) => !isSecretHost(host))) issues.push(issueForPath(`secrets[${index}].allowHosts`, "must contain exact DNS names or wildcard subdomain scopes such as *.googleapis.com; only a single leading *. is supported, not URLs, ports or IP/CIDR rules"));
   }
   const seenGuests: { path: string; index: number }[] = [];
   if (!Array.isArray(config.mounts)) issues.push(issueForPath("mounts", "must be an array"));
@@ -664,17 +694,6 @@ export function validateConfig(raw: DeepPartial<Config>): Config {
   return config;
 }
 
-function normalizeLegacy(config: Config, warnings: string[], canonical?: (p: string) => string): Config {
-  if (!config.hostRoAllowlist.length) return config;
-  warnings.push("hostRoAllowlist is deprecated; use read-only mounts instead");
-  const mounts = [...config.mounts];
-  for (const host of config.hostRoAllowlist) {
-    const path = canonical ? canonical(host) : resolve(host);
-    if (!mounts.some((mount) => mount.guestPath === path)) mounts.push({ type: "dir", hostPath: path, guestPath: path, readonly: true, options: [] });
-  }
-  return { ...config, mounts };
-}
-
 async function defaultRead(path: string): Promise<string | null> { try { return await fs.readFile(path, "utf8"); } catch { return null; } }
 async function readHostPolicyFile(path: string): Promise<string | null> {
   try { return await fs.readFile(path, "utf8"); }
@@ -683,23 +702,17 @@ async function readHostPolicyFile(path: string): Promise<string | null> {
     throw new ConfigError(["host configuration could not be read"]);
   }
 }
-async function defaultExists(path: string): Promise<boolean> { try { await fs.access(path); return true; } catch { return false; } }
 async function defaultRealpath(path: string): Promise<string> { return fs.realpath(path); }
-async function projectFile(cwd: string, repoRoot: string | null | undefined, configDirName: string, exists: (p: string) => Promise<boolean>): Promise<string | null> {
-  let current = resolve(cwd);
-  const stop = repoRoot ? resolve(repoRoot) : null;
-  while (true) {
-    const candidates = [join(current, ".pi-msb.toml"), join(current, configDirName, "msb.toml")];
-    for (const candidate of candidates) if (await exists(candidate)) return candidate;
-    if (stop && current === stop) break;
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return null;
-}
 function configDir(env: NodeJS.ProcessEnv, input: ResolveConfigInput): string {
   return input.xdgConfigHome ?? env.XDG_CONFIG_HOME ?? join(input.homedir ?? env.HOME ?? osHomedir(), ".config");
+}
+/** Ordered legacy inputs shared by normal resolution and degraded inspection. No reads. */
+export function legacyConfigSources(input: ResolveConfigInput): Array<{ name: "legacy" | "environment file"; path: string }> {
+  const env = input.env ?? process.env;
+  return [
+    { name: "legacy", path: join(configDir(env, input), "pi-msb", "config.toml") },
+    ...(env.PI_MSB_CONFIG_FILE ? [{ name: "environment file" as const, path: isAbsolute(env.PI_MSB_CONFIG_FILE) ? env.PI_MSB_CONFIG_FILE : resolve(input.cwd, env.PI_MSB_CONFIG_FILE) }] : []),
+  ];
 }
 function layerFromText(name: ConfigLayerName, text: string, source: string): ParsedConfigLayer {
   try { return normalizeLayer(name, readToml(text), source); }
@@ -709,19 +722,159 @@ function layerFromText(name: ConfigLayerName, text: string, source: string): Par
   }
 }
 
-export async function resolveConfig(input: ResolveConfigInput): Promise<ResolvedConfig> {
+/** Resolve missing policy locations through existing ancestors; dangling links fail closed. */
+export async function canonicalPolicyLocation(path: string, realpath = defaultRealpath): Promise<string> {
+  try { return await realpath(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && dirname(path) !== path) {
+      let missing = false;
+      let appeared = false;
+      try { appeared = !(await fs.lstat(path)).isSymbolicLink(); }
+      catch (error) { missing = (error as NodeJS.ErrnoException).code === "ENOENT"; }
+      if (missing) return join(await canonicalPolicyLocation(dirname(path), realpath), basename(path));
+      // Concurrent bootstrap can create a directory after realpath observed ENOENT.
+      // Retry once for an existing non-link; never treat a dangling link as missing.
+      if (appeared) { try { return await realpath(path); } catch {} }
+    }
+    throw new ConfigError(["host configuration path could not be canonicalized"]);
+  }
+}
+
+/** Follow raw link-target components in filesystem order; jump/.. must inspect jump first. */
+async function hostPolicyAncestorLocations(paths: readonly string[], realpath: (path: string) => Promise<string>): Promise<string[]> {
+  const locations = new Set<string>();
+  let steps = 0;
+  for (const path of paths) {
+    const absolute = resolve(path);
+    let base = parse(absolute).root;
+    let pending = absolute.slice(base.length).split(sep);
+    const visited = new Set<string>();
+    locations.add(base);
+    while (pending.length) {
+      if (++steps > 256) throw new ConfigError(["host configuration ancestor traversal limit exceeded"]);
+      const state = JSON.stringify([base, pending]);
+      if (visited.has(state)) throw new ConfigError(["host configuration ancestor traversal cycle detected"]);
+      visited.add(state);
+      const component = pending.shift()!;
+      if (!component || component === "." || component === "..") {
+        try {
+          if (!(await fs.stat(base)).isDirectory()) throw new Error();
+        } catch { throw new ConfigError(["host configuration ancestors could not be inspected"]); }
+        if (component === "..") base = dirname(base);
+        continue;
+      }
+      const physicalEntry = join(base, component);
+      locations.add(physicalEntry);
+      let target: string | undefined;
+      try { target = await fs.readlink(physicalEntry); }
+      catch (error) {
+        // Missing suffixes and ordinary files/directories remain valid dependencies.
+        if (!["ENOENT", "EINVAL"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+          throw new ConfigError(["host configuration ancestors could not be inspected"]);
+        }
+      }
+      if (target !== undefined) {
+        const root = parse(target).root;
+        if (root) base = root;
+        // Do not join/resolve the target: preserve components following symlinks.
+        pending = [...target.slice(root.length).split(sep), ...pending];
+      } else {
+        base = await canonicalPolicyLocation(physicalEntry, realpath);
+        locations.add(base);
+      }
+    }
+  }
+  return [...locations];
+}
+
+/** A workspace must not be able to retarget any ancestor of a host policy path. */
+export async function assertPolicyOutsideWorkspace(path: string, workspaceRoots: readonly string[], realpath = defaultRealpath): Promise<void> {
+  let current = resolve(path);
+  while (true) {
+    const canonical = await canonicalPolicyLocation(current, realpath);
+    if (workspaceRoots.some((root) => isInside(current, root) || isInside(canonical, root))) {
+      throw new ConfigError(["host configuration must be outside the mounted workspace"]);
+    }
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+/** Persistent host-owned destinations. */
+export interface HostConfigPaths {
+  global: string;
+  project: string;
+}
+export interface HostConfigTargets {
+  agentDir: string;
+  canonicalAgentDir: string;
+  paths: HostConfigPaths;
+  lexicalPaths: HostConfigPaths;
+  identity: ProjectIdentity;
+  repository?: RepositoryMetadata;
+  repositoryName: string;
+  worktreeName: string;
+  isWorktree: boolean;
+}
+
+/** Canonical I/O targets and lexical reference origins stay distinct across an agent-root symlink. */
+export async function hostConfigTargets(input: ResolveConfigInput, replacement?: { file: string; text: string }): Promise<HostConfigTargets> {
+  const realpath = input.realpath ?? defaultRealpath;
+  const env = input.env ?? process.env;
+  const home = await realpath(input.homedir ?? env.HOME ?? osHomedir());
+  const agentDir = resolve(input.agentDir ?? getAgentDir());
+  const canonicalAgentDir = await canonicalPolicyLocation(agentDir, realpath);
+  const workspaceRoots = [resolve(input.repoRoot ?? input.cwd), await realpath(input.repoRoot ?? input.cwd)];
+  const catalogRoot = join(canonicalAgentDir, "pi-microsandbox");
+  for (const tree of ["projects", "projects-absolute"]) {
+    await assertPolicyOutsideWorkspace(join(agentDir, "pi-microsandbox", tree), workspaceRoots, realpath);
+    await assertPolicyOutsideWorkspace(join(catalogRoot, tree), workspaceRoots, realpath);
+    await hostPolicyAncestorLocations([join(agentDir, "pi-microsandbox", tree)], realpath);
+  }
+  let identity: ProjectIdentity;
+  try { identity = await discoverProjectIdentity(input.repoRoot ?? input.cwd, realpath, { root: catalogRoot, home, parse: readRawConfig, replacement }); }
+  catch (error) {
+    if (error instanceof ProjectIdentityError) throw new ConfigError([error.message]);
+    throw error;
+  }
+  const association = identity.association;
+  // Verified Git cwd shares the main-root record; unsupported layouts stay local.
+  const shared = association.commonDir !== null
+    && association.mainCheckoutRoot !== null && join(association.mainCheckoutRoot, ".git") === association.commonDir;
+  const repository = shared ? repositoryMetadata(association.commonDir!, association.mainCheckoutRoot!) : undefined;
+  const targets = (anchor: string): HostConfigPaths => {
+    const directory = join(anchor, "pi-microsandbox");
+    return {
+      global: join(directory, "default.toml"),
+      project: projectConfigPath(directory, home, repository?.main_root ?? identity.cwd),
+    };
+  };
+  return {
+    agentDir, canonicalAgentDir, paths: targets(canonicalAgentDir), lexicalPaths: targets(agentDir), identity, ...(repository ? { repository } : {}),
+    repositoryName: identity.repositoryName, worktreeName: identity.worktreeName, isWorktree: identity.isWorktree,
+  };
+}
+
+/** Shared host-owned targets for resolution and editing, including missing descendants. */
+export async function hostConfigPaths(input: ResolveConfigInput): Promise<HostConfigPaths> {
+  return (await hostConfigTargets(input)).paths;
+}
+
+/** Raw, non-normalized source data. Never expose this to a rendering/logging surface. */
+export function readRawConfig(text: string): Record<string, unknown> {
+  try { return readToml(text); } catch { throw new ConfigError(["invalid raw configuration"]); }
+}
+
+/** Optional internal capture exposes only a redactor bound to the successfully resolved original layers. */
+export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?: (sanitize: SettingsSanitizer) => void): Promise<ResolvedConfig> {
+  const privateSources: unknown[] = [];
   const env = input.env ?? process.env;
   const readFile = input.readFile ?? defaultRead;
-  const exists = input.exists ?? defaultExists;
   const realpath = input.realpath ?? defaultRealpath;
   const warnings: string[] = [];
   const layers: ConfigLayerInput[] = [{ name: "defaults", value: clone(DEFAULT_CONFIG), warnings: [] }];
-  const globalPaths = [join(configDir(env, input), "pi-msb", "config.toml")];
-  if (env.PI_MSB_CONFIG_FILE) globalPaths.push(isAbsolute(env.PI_MSB_CONFIG_FILE) ? env.PI_MSB_CONFIG_FILE : resolve(input.cwd, env.PI_MSB_CONFIG_FILE));
-  for (const file of [...new Set(globalPaths)]) {
-    const text = await readFile(file);
-    if (text !== null) layers.push(layerFromText("global", text, file));
-  }
+  const globalPaths = legacyConfigSources(input).map((source) => source.path);
   const canonicalPath = async (path: string, failClosed = false): Promise<string> => {
     try { return await realpath(path); }
     catch {
@@ -729,101 +882,114 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
       return resolve(path);
     }
   };
-  // Resolve optional policy locations through existing ancestor symlinks too.
-  // A missing file is fine; an existing dangling symlink is not a missing policy.
-  const canonicalPolicyLocation = async (path: string): Promise<string> => {
-    try { return await realpath(path); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" && dirname(path) !== path) {
-        let missing = false;
-        try { await fs.lstat(path); }
-        catch (error) { missing = (error as NodeJS.ErrnoException).code === "ENOENT"; }
-        if (missing) return join(await canonicalPolicyLocation(dirname(path)), basename(path));
-      }
-      throw new ConfigError(["host configuration path could not be canonicalized"]);
-    }
-  };
   const projectRoot = await canonicalPath(input.repoRoot ?? input.cwd);
-  const home = await canonicalPath(input.homedir ?? env.HOME ?? osHomedir());
-  const agentDir = resolve(input.agentDir ?? getAgentDir());
-  // Keep out-of-home paths in a separate namespace, without '..' traversal or
-  // collisions with home-relative projects. Git subdirectories share one policy.
-  const hostProjectFile = isInside(projectRoot, home)
-    ? join(agentDir, "pi-microsandbox", "projects", relative(home, projectRoot), ".pi-msb.toml")
-    : join(agentDir, "pi-microsandbox", "projects-absolute", relative(parse(projectRoot).root, projectRoot), ".pi-msb.toml");
+  const workspaceRoots = [projectRoot, resolve(input.repoRoot ?? input.cwd)];
+  for (const file of [...new Set(globalPaths)]) {
+    const text = await readFile(file);
+    if (text === null) continue;
+    try { await assertPolicyOutsideWorkspace(file, workspaceRoots, realpath); }
+    catch (error) {
+      if (!(error instanceof ConfigError) || !error.message.includes("outside the mounted workspace")) throw error;
+      throw new ConfigError(["global configuration must be outside the mounted workspace; migrate to host-owned pi-microsandbox/default.toml or a per-project override"]);
+    }
+    layers.push(layerFromText("global", text, file));
+    if (captureSanitizer) privateSources.push(readRawConfig(text));
+  }
+  const targets = await hostConfigTargets(input);
+  const hostFiles: Array<["host-default" | "host-project", string, string]> = [
+    ["host-default", targets.paths.global, targets.lexicalPaths.global],
+    ["host-project", targets.paths.project, targets.lexicalPaths.project],
+  ];
   const hostLayers: ParsedConfigLayer[] = [];
+  const presentHostPolicies = new Set<string>();
+  const buildSources = new Map<ConfigLayerName, Pick<DockerfileSource, "dockerfile" | "agentRoot" | "agentAlias" | "scope">>();
   const hostPolicyPaths: string[] = [];
-  for (const [name, file] of [
-    ["host-default", join(agentDir, "pi-microsandbox", "default.toml")],
-    ["host-project", hostProjectFile],
-  ] as const) {
+  for (const [name, file, lexicalFile] of hostFiles) {
     // Protect even missing policy locations, including symlinked parents, so a
     // writable mount cannot create a higher-priority override on the next reload.
-    const protectedPaths = await Promise.all([canonicalPolicyLocation(file), canonicalPolicyLocation(dirname(file))]);
+    await assertPolicyOutsideWorkspace(lexicalFile, workspaceRoots, realpath);
+    await assertPolicyOutsideWorkspace(file, workspaceRoots, realpath);
+    hostPolicyPaths.push(lexicalFile, dirname(lexicalFile));
+    const protectedPaths = await Promise.all([canonicalPolicyLocation(file, realpath), canonicalPolicyLocation(dirname(file), realpath)]);
     hostPolicyPaths.push(...protectedPaths);
     const text = await (input.readFile ?? readHostPolicyFile)(file);
-    if (text === null) continue;
     if (protectedPaths.some((path) => isInside(path, projectRoot))) {
       throw new ConfigError(["host configuration must be outside the mounted workspace"]);
     }
-    const policy = layerFromText(name, text, file);
-    // Relative host-side secret files are relative to their own policy file.
-    if (Array.isArray(policy.value.secrets)) {
-      for (const secret of policy.value.secrets) if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) {
-        secret.value = `$FILE:${await canonicalPath(resolve(dirname(file), secret.value.slice(6)), true)}`;
+    if (text !== null) {
+      if (name === "host-project" && targets.repository) {
+        const metadata = readRawConfig(text)._repository;
+        if (JSON.stringify(metadata, Object.keys(targets.repository).sort()) !== JSON.stringify(targets.repository, Object.keys(targets.repository).sort())) {
+          throw new ConfigError(["shared Project configuration requires immutable repository association metadata; save Project settings to register it"]);
+        }
       }
+      presentHostPolicies.add(name);
     }
+    const policy = text === null ? { name, value: {} as DeepPartial<Config>, warnings: [] } : layerFromText(name, text, lexicalFile);
+    if (captureSanitizer && text !== null) privateSources.push(readRawConfig(text));
     hostLayers.push(policy);
   }
-  // Reserve the whole policy directory while any host policy is active. A
-  // writable child mount must not be able to create a higher-priority project
-  // override that does not exist yet.
-  const hostPolicyRoot = hostLayers.length ? await canonicalPath(join(agentDir, "pi-microsandbox"), true) : undefined;
-  if (hostPolicyRoot) {
-    if (isInside(projectRoot, hostPolicyRoot) || hostPolicyPaths.some((path) => isInside(path, projectRoot))) {
-      throw new ConfigError(["host configuration must be outside the mounted workspace"]);
-    }
-    hostPolicyPaths.push(hostPolicyRoot);
+  hostPolicyPaths.push(...await hostPolicyAncestorLocations(Object.values(targets.lexicalPaths), realpath));
+  // Reserve the policy directory even before any policy files exist. Writable
+  // descendants could otherwise create host-owned overrides for other projects.
+  const hostPolicyRoot = await canonicalPolicyLocation(join(targets.canonicalAgentDir, "pi-microsandbox"), realpath);
+  const hostPolicyRoots = [hostPolicyRoot, join(targets.agentDir, "pi-microsandbox")];
+  if (isInside(projectRoot, hostPolicyRoot) || hostPolicyPaths.some((path) => isInside(path, projectRoot))) {
+    throw new ConfigError(["host configuration must be outside the mounted workspace"]);
   }
-  const project = await projectFile(input.cwd, input.repoRoot, input.configDirName, exists);
-  const projectText = project ? await readFile(project) : null;
-  if (project && !input.projectTrusted) {
-    warnings.push("project config ignored because this project is not trusted");
-    if (projectText !== null) {
-      // Ignored project configuration cannot influence policy, but a removed
-      // workspace selector must still stop startup before direct host writes.
-      try {
-        const normalized = normalizeValue(readToml(projectText)) as Record<string, unknown>;
-        assertNoRemovedWorkspaceKeys(normalized);
-      } catch (error) {
-        if (error instanceof ConfigError && error.issues.some((issue) => issue.includes(REMOVED_WORKSPACE_MESSAGE))) throw error;
-        // Preserve the existing trust rule for every other malformed/unsafe key:
-        // untrusted project configuration is not interpreted.
+  hostPolicyPaths.push(...hostPolicyRoots);
+  // The reciprocal registration is host proof, not guest-editable discovery data.
+  // Reserve its canonical/lexical entries and retargetable ancestors against mounts.
+  hostPolicyPaths.push(...targets.identity.protectedPaths,
+    ...await hostPolicyAncestorLocations(targets.identity.protectedPaths, realpath));
+  // A higher explicit image disables lower Dockerfiles completely, including reads.
+  for (const policy of Object.hasOwn(input.temporaryOverrides ?? {}, "image") ? [] : [...hostLayers].reverse()) {
+    const name = policy.name as "host-default" | "host-project";
+    // A shared Dockerfile cannot establish an uncatalogued association by itself.
+    if (name === "host-project" && targets.repository && !presentHostPolicies.has(name)) continue;
+    const file = hostFiles.find(([scope]) => scope === name)![1];
+    // Image and Dockerfile are one atomic source choice at each host scope.
+    if (Object.hasOwn(policy.value, "image")) break;
+    const dockerfile = join(dirname(file), "Dockerfile");
+    try {
+      const source = { dockerfile, agentRoot: targets.canonicalAgentDir, agentAlias: targets.agentDir, scope: name };
+      const exists = await discoverDockerfile(targets.canonicalAgentDir, dockerfile);
+      // A loaded selection survives missing editable source, never an unsafe source layout.
+      const loaded = input.imageSdkLoader ? await readLoadedImage({ ...source, platform: nativeBuildPlatform() }, input.imageSdkLoader) : undefined;
+      if (exists || loaded) {
+        policy.value.image = `pi-msb-discovered:${name}`;
+        buildSources.set(name, source);
+        break;
       }
-    }
+    } catch { throw new ConfigError(["host-owned Dockerfile could not be safely inspected"]); }
   }
-  if (project && input.projectTrusted && projectText !== null) {
-    const parsed = layerFromText("project", projectText, project);
-    const projectValue = withMountDefaults(clone(parsed.value) as LayerValue);
-    if (Array.isArray(projectValue.mounts)) {
-      projectValue.mounts = await Promise.all(projectValue.mounts.map(async (mount: any) => {
-        if (mount && (mount.type === "dir" || mount.type === "file") && typeof mount.hostPath === "string" && isAbsolute(mount.hostPath)) {
-          return { ...mount, hostPath: await canonicalPath(mount.hostPath, true) };
-        }
-        return mount;
-      })) as any;
-    }
-    layers.push({ ...parsed, value: projectValue });
+  const environment = parseEnvConfig(env);
+  layers.push(environment);
+  if (captureSanitizer) privateSources.push(environment.value);
+  if (input.cliOverridesToml !== undefined) {
+    layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
+    if (captureSanitizer) privateSources.push(readRawConfig(input.cliOverridesToml));
   }
-  layers.push(parseEnvConfig(env));
-  if (input.cliOverridesToml !== undefined) layers.push(parseTomlConfig(input.cliOverridesToml, "cli"));
   layers.push(...hostLayers);
+  if (input.temporaryOverrides) {
+    if (captureSanitizer) privateSources.push(clone(input.temporaryOverrides));
+    layers.push({ name: "temporary", value: clone(input.temporaryOverrides), warnings: [] });
+  }
   const merged = mergeConfigLayers(layers);
   warnings.push(...merged.warnings);
+  let imageBuild: DockerfileSource | undefined;
+  const selectedSource = buildSources.get(merged.provenance.image!);
+  if (selectedSource && merged.value.image === `pi-msb-discovered:${selectedSource.scope}`) {
+    try {
+      const platform = nativeBuildPlatform();
+      const loaded = input.imageSdkLoader ? await readLoadedImage({ ...selectedSource, platform }, input.imageSdkLoader) : undefined;
+      imageBuild = { ...selectedSource, identity: "unloaded", platform, ...(loaded ? { loadedDigest: loaded.digest } : {}) };
+      merged.value.image = selectedImageReference(imageBuild);
+      merged.value.pullPolicy = "never";
+      merged.provenance.pullPolicy = selectedSource.scope;
+    } catch { throw new ConfigError(["host-owned loaded Dockerfile selection could not be safely verified"]); }
+  }
   let config = validateConfig(merged.value);
-  config = normalizeLegacy(config, warnings);
-  // Legacy mounts participate in the same overlap/type checks as native mounts.
-  config = validateConfig(config);
   config = {
     ...config,
     mounts: await Promise.all(config.mounts.map(async (mount) => mount.type === "named" || mount.type === "tmpfs"
@@ -842,12 +1008,6 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   if (projectShadowIssues.length) throw new ConfigError(projectShadowIssues);
 
   if (config.network.mode === "open") warnings.push("network.mode=\"open\" permits private and host access; it is broader than microsandbox default mode");
-  const repo = input.repoRoot ? await canonicalPath(input.repoRoot) : null;
-  const projectMounts = config.mounts.filter((mount) => merged.provenance[`mounts[${mount.guestPath}]`] === "project");
-  const authorizedWrites = layers.filter((layer) => layer.name === "global" || layer.name === "cli" || layer.name === "host-default" || layer.name === "host-project")
-    .flatMap((layer) => ((layer.value as LayerValue).mounts ?? []) as any[])
-    .filter((mount) => mount && mount.readonly === false)
-    .map((mount) => String(canonicalGuestPath(mount.guestPath ?? "")));
   const policyIssues: string[] = [];
   const mountStat = input.stat ?? fs.stat;
   const knownHostDockerSockets = ["/var/run/docker.sock", "/run/docker.sock"];
@@ -856,7 +1016,14 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
   for (const [index, mount] of config.mounts.entries()) {
     if (mount.type === "named" || mount.type === "tmpfs" || typeof mount.hostPath !== "string") continue;
     const host = resolve(mount.hostPath);
-    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || (hostPolicyRoot && isInside(host, hostPolicyRoot)))) {
+    // Reserve Global inputs for Project without reading editable source at runtime:
+    // an explicitly loaded selection must survive missing/edited dependency files.
+    const buildPaths = imageBuild ? [imageBuild.dockerfile, join(dirname(imageBuild.dockerfile), "build-context"),
+      ...(imageBuild.scope === "host-project" ? [targets.canonicalAgentDir, targets.agentDir].flatMap((root) => [join(root, "pi-microsandbox", "Dockerfile"), join(root, "pi-microsandbox", "build-context")]) : [])] : [];
+    if (buildPaths.some((path) => isInside(path, host) || isInside(host, path))) {
+      policyIssues.push("host mounts must not expose Dockerfile or build-context sources");
+    }
+    if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || hostPolicyRoots.some((root) => isInside(host, root)) || targets.identity.protectedPaths.some((root) => isInside(host, root)))) {
       policyIssues.push("writable host mounts must not expose host configuration");
     }
     let unsafe = basename(host) === "docker.sock" || knownHostDockerSockets.some((socket) => isInside(socket, host));
@@ -866,51 +1033,9 @@ export async function resolveConfig(input: ResolveConfigInput): Promise<Resolved
     }
     if (unsafe) policyIssues.push(issueForPath(`mounts[${index}].hostPath`, "must not mount a host socket or Docker socket path"));
   }
-  const projectSecretFiles = new Map<string, { reference: string; canonical: string }>();
-  for (const mount of projectMounts) {
-    if (typeof mount.hostPath !== "string" || mount.type === "named" || mount.type === "tmpfs") continue;
-    const outsideRepo = !repo || !isInside(mount.hostPath, repo);
-    if (outsideRepo && mount.readonly !== true && !authorizedWrites.includes(String(canonicalGuestPath(mount.guestPath ?? "")))) {
-      policyIssues.push("project host mounts outside the repository must be read-only unless a global or session policy authorizes write access");
-    }
-  }
-  const projectSecrets = config.secrets.filter((secret) => merged.provenance[`secrets[${secret.env}]`] === "project");
-  if (projectSecrets.length) {
-    const approvedRoots = await Promise.all([input.cwd, repo ?? input.cwd, input.homedir ?? env.HOME, configDir(env, input)]
-      .filter(Boolean).map((item) => canonicalPath(String(item))));
-    for (const secret of projectSecrets) if (typeof secret?.value === "string" && secret.value.startsWith("$FILE:")) {
-      const file = secret.value.slice(6);
-      const absolute = isAbsolute(file) ? file : resolve(dirname(project!), file);
-      const canonicalFile = await canonicalPath(absolute, true);
-      if (!approvedRoots.some((root) => isInside(canonicalFile, root))) policyIssues.push("project secret file reference is outside approved roots");
-      if (typeof secret.env === "string") projectSecretFiles.set(secret.env, { reference: secret.value, canonical: canonicalFile });
-    }
-  }
   if (policyIssues.length) throw new ConfigError(policyIssues);
-  if (projectSecretFiles.size) {
-    config = {
-      ...config,
-      secrets: config.secrets.map((secret) => {
-        const approved = projectSecretFiles.get(secret.env);
-        return merged.provenance[`secrets[${secret.env}]`] === "project" && approved?.reference === secret.value
-          ? { ...secret, value: `$FILE:${approved.canonical}` }
-          : secret;
-      }),
-    };
-  }
-  if (config.hostRoAllowlist.length) {
-    const legacyPaths = new Map(config.hostRoAllowlist.map((path) => [resolve(path), path]));
-    const canonicalMounts = await Promise.all(config.mounts.map(async (mount) => {
-      const original = mount.hostPath && legacyPaths.has(resolve(mount.hostPath)) ? resolve(mount.hostPath) : undefined;
-      if (original !== undefined && mount.guestPath === original && mount.readonly) {
-        const rp = await canonicalPath(original);
-        return { ...mount, hostPath: rp, guestPath: rp };
-      }
-      return mount;
-    }));
-    config = validateConfig({ ...config, mounts: canonicalMounts });
-  }
-  return { config, provenance: merged.provenance, warnings: warnings.map(warning) };
+  captureSanitizer?.(createSettingsSanitizer([...privateSources, config]));
+  return { config, provenance: merged.provenance, warnings: warnings.map(warning), ...(imageBuild ? { imageBuild } : {}) };
 }
 
 function setAt(base: any, parts: string[], value: unknown): any {
@@ -923,6 +1048,13 @@ function setAt(base: any, parts: string[], value: unknown): any {
   current[parts[parts.length - 1]!] = clone(value);
   return out;
 }
+export function normalizeConfigPath(path: string): string[] {
+  const parts = path.split(".");
+  if (parts.some((part) => !part)) throw new ConfigError(["invalid setting path"]);
+  assertSafeConfigPath(parts);
+  return parts.map(camel);
+}
+
 export function applyOverride(base: DeepPartial<Config>, dottedSnakeKey: string, value: unknown): DeepPartial<Config> {
   const rawParts = dottedSnakeKey.split(".").filter(Boolean);
   assertSafeConfigPath(rawParts);
@@ -971,24 +1103,79 @@ function serializeToml(value: Record<string, unknown>, prefix: string[] = []): s
 }
 export function overridesToToml(value: DeepPartial<Config>): string {
   assertSafeConfigValue(value);
+  assertNoDeprecatedSecretSources(value as Record<string, unknown>);
   return serializeToml(clone(value) as Record<string, unknown>).join("\n").replace(/^\n+/, "") + "\n";
 }
 export function toEffectiveToml(value: ResolvedConfig): string {
   const config = clone(value.config) as any;
-  if (Array.isArray(config.secrets)) config.secrets = config.secrets.map((secret: any) => ({ ...secret, value: withoutSecret(secret.value) }));
+  if (Array.isArray(config.secrets)) config.secrets = config.secrets.map((secret: any) => {
+    for (const key of SECRET_SOURCES) if (Object.hasOwn(secret, key)) secret[key] = "<redacted>";
+    return secret;
+  });
   return overridesToToml(config);
 }
 
-export async function resolveSecretValue(value: string, env: NodeJS.ProcessEnv, readFile: (p: string) => Promise<string> = async (p) => fs.readFile(p, "utf8")): Promise<string> {
-  if (value.startsWith("$ENV:")) {
-    const name = value.slice(5);
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || env[name] === undefined) throw new ConfigError(["secret environment reference is missing or invalid"]);
-    return env[name]!;
+/** Runs only on the host; no SDK or guest shell is involved. */
+function runHostSecretCommand(command: string, env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, { shell: true, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Kill the shell and its descendants so inherited pipes cannot defeat the deadline.
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch { /* already exited */ }
+      child.stdout.destroy();
+      child.stderr.destroy();
+      reject(new ConfigError(["host secret command failed"]));
+    };
+    const timer = setTimeout(fail, HOST_CMD_TIMEOUT_MS);
+    const collect = (chunk: Buffer, stdout: boolean) => {
+      if (settled) return;
+      bytes += chunk.length;
+      if (bytes > HOST_CMD_MAX_BYTES) { fail(); return; }
+      if (stdout) chunks.push(chunk);
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(chunk, true));
+    child.stderr.on("data", (chunk: Buffer) => collect(chunk, false));
+    child.stdout.on("error", fail);
+    child.stderr.on("error", fail);
+    child.on("error", fail);
+    child.on("close", (code) => {
+      if (settled) return;
+      if (code !== 0) { fail(); return; }
+      settled = true;
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+}
+
+export async function resolveSecretValue(
+  secret: SecretConfig,
+  env: NodeJS.ProcessEnv,
+  runCommand: (command: string, env: NodeJS.ProcessEnv) => Promise<string> = runHostSecretCommand,
+): Promise<string> {
+  const issues = secretSourceIssues(secret);
+  if (issues.length) throw new ConfigError(issues);
+  if (secret.textValue !== undefined) return secret.textValue;
+  if (secret.hostEnv !== undefined) {
+    if (!Object.hasOwn(env, secret.hostEnv) || typeof env[secret.hostEnv] !== "string") throw new ConfigError(["host secret environment variable is missing or invalid"]);
+    return env[secret.hostEnv]!;
   }
-  if (value.startsWith("$FILE:")) {
-    try { return await readFile(value.slice(6)); } catch { throw new ConfigError(["secret file reference could not be read"]); }
-  }
-  return value;
+  try {
+    const output = await runCommand(secret.hostCmd!, env);
+    if (typeof output !== "string" || Buffer.byteLength(output, "utf8") > HOST_CMD_MAX_BYTES) throw new Error();
+    const token = output.replace(/(?:\r?\n)+$/, "");
+    if (!token) throw new Error();
+    return token;
+  } catch { throw new ConfigError(["host secret command failed"]); }
 }
 export function isDisabledByEnv(env: NodeJS.ProcessEnv): boolean {
   const value = env.PI_MSB_DISABLE;

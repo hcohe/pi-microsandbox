@@ -20,6 +20,10 @@ function state(status: RuntimeState["status"]): RuntimeState {
   };
 }
 
+function acquireInteraction() {
+  return { signal: new AbortController().signal, release() {} };
+}
+
 function fixture() {
   const notices: Array<{ message: string; type?: string }> = [];
   const calls: Array<{ method: string; args: unknown[] }> = [];
@@ -30,8 +34,8 @@ function fixture() {
     reload: async () => { calls.push({ method: "reload", args: [] }); },
     pruneNow: async () => { calls.push({ method: "pruneNow", args: [] }); return { inspected: 2, removed: ["old"], kept: ["live"], errors: [] }; },
     getLogs: async (tail) => { calls.push({ method: "getLogs", args: [tail] }); return "log line"; },
-    getEffectiveConfig: () => ({ config: { secrets: [{ env: "TOKEN", value: "secret-value", allowHosts: [] }] } } as any),
-    getEffectiveConfigToml: () => "[[secrets]]\nvalue = \"<redacted>\"",
+    getEffectiveConfig: () => ({ config: { secrets: [{ env: "TOKEN", textValue: "secret-value", allowHosts: [] }] } } as any),
+    getEffectiveConfigToml: () => "[[secrets]]\ntext_value = \"<redacted>\"",
     setOverride: async (key, value) => { calls.push({ method: "setOverride", args: [key, value] }); },
     unsetOverride: async (key) => { calls.push({ method: "unsetOverride", args: [key] }); },
     resetOverrides: async () => { calls.push({ method: "resetOverrides", args: [] }); },
@@ -55,65 +59,97 @@ test("status and prompt report the mounted root without mode or volume language"
   assert.doesNotMatch(note, /mode|volume|seed/i);
 });
 
-test("status includes current identity and Docker capability", async () => {
+test("headless /msb is actionable and never mutates runtime", async () => {
   const f = fixture();
+  f.ctx.hasUI = false; f.ctx.mode = "print";
   await createCommandHandler(f.control)("", f.ctx);
-  const message = f.notices.at(-1)?.message ?? "";
-  assert.match(message, /Name: pi-msb-0123456789abcdef0123/);
-  assert.match(message, /Workspace root: \/repo/);
-  assert.match(message, /Workdir: \/repo\/packages\/app/);
-  assert.match(message, /Docker mode: auto/);
-  assert.match(message, /Docker readiness: ready/);
-  assert.match(message, /Docker version: 29\.8\.0/);
-  assert.doesNotMatch(message, /volume|seed|workspace mode/i);
+  assert.match(f.notices.at(-1)?.message ?? "", /interactive terminal mode/);
+  assert.deepEqual(f.calls, []);
 });
 
-test("on, off, and reload wait for idle before handing off", async () => {
+test("every legacy public subcommand is rejected without side effects", async () => {
   const f = fixture();
-  const handler = createCommandHandler(f.control);
-  await handler("off", f.ctx);
-  await handler("on", f.ctx);
-  await handler("reload", f.ctx);
-  assert.deepEqual(
-    f.calls.filter((call) => ["waitForIdle", "setEnabled", "reload"].includes(call.method)).map((call) => call.method),
-    ["waitForIdle", "setEnabled", "waitForIdle", "setEnabled", "waitForIdle", "reload"],
-  );
+  for (const command of ["status", "on", "off", "reload", "prune", "logs 25", "config", "set cpus 2", "unset cpus", "reset", "network deny", "seal", "mount add a b", "help", "volumes ls", "export a"]) {
+    await createCommandHandler(f.control)(command, f.ctx);
+    assert.match(f.notices.at(-1)?.message ?? "", /has no subcommands/);
+  }
+  assert.deepEqual(f.calls, []);
 });
 
-test("prune, config, logs, and overrides use the control facade", async () => {
-  const f = fixture();
-  const handler = createCommandHandler(f.control);
-  await handler("prune", f.ctx);
-  assert.match(f.notices.at(-1)?.message ?? "", /Removed: old/);
-  await handler("config", f.ctx);
-  assert.match(f.notices.at(-1)?.message ?? "", /redacted/);
-  assert.doesNotMatch(f.notices.at(-1)?.message ?? "", /secret-value/);
-  await handler("logs 25", f.ctx);
-  await handler("set network.mode deny", f.ctx);
-  await handler("unset network.mode", f.ctx);
-  await handler("reset", f.ctx);
-  assert.deepEqual(f.calls.slice(-4), [
-    { method: "getLogs", args: [25] },
-    { method: "setOverride", args: ["network.mode", "deny"] },
-    { method: "unsetOverride", args: ["network.mode"] },
-    { method: "resetOverrides", args: [] },
-  ]);
+test("registerMsbCommand exposes only panel opening and no completions", () => {
+  const f = fixture(); let registration: any;
+  registerMsbCommand({ registerCommand: (name: string, options: any) => { assert.equal(name, "msb"); registration = options; } } as any, f.control);
+  assert.equal(registration.description, "Open Microsandbox control panel");
+  assert.equal(typeof registration.handler, "function");
+  assert.equal(registration.getArgumentCompletions, undefined);
 });
 
-test("removed mode, volume, export, and copy commands are unavailable", async () => {
-  const f = fixture();
-  const handler = createCommandHandler(f.control);
-  for (const command of ["volumes ls", "export a", "copy a b", "mode git"]) {
-    await handler(command, f.ctx);
-    assert.match(f.notices.at(-1)?.message ?? "", /unknown \/msb command/);
-    assert.equal(f.notices.at(-1)?.type, "error");
+test("launch diagnostics identify settings stage without echoing messages, causes, custom names or codes", async () => {
+  const { ConfigError } = await import("./config.ts");
+  const f = fixture(); f.ctx.mode = "tui";
+  const error = new ConfigError(["PRIVATE_CONFIG_SENTINEL"]);
+  Object.assign(error, { name: "PRIVATE_NAME_SENTINEL", code: "PRIVATE_CODE_SENTINEL", cause: new Error("PRIVATE_CAUSE_SENTINEL") });
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async (scope: string) => {
+    if (scope === "project") throw error;
+    return { discard() {} };
+  } } });
+  await createCommandHandler(f.control)("", f.ctx);
+  const notice = f.notices.at(-1)?.message ?? "";
+  assert.match(notice, /Project settings \(ConfigError\)/);
+  assert.match(notice, /directory permissions\/symlinks/);
+  assert.doesNotMatch(notice, /PRIVATE_/);
+  assert.deepEqual(f.calls, []);
+});
+
+test("launch I/O diagnostics allow only known safe codes; programmer errors propagate sanitized", async () => {
+  const { PanelLaunchError } = await import("./control-panel.ts");
+  const f = fixture(); f.ctx.mode = "tui";
+  const error = Object.assign(new Error("PRIVATE_IO_SENTINEL"), { code: "EACCES" });
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async () => { throw error; } } });
+  await createCommandHandler(f.control)("", f.ctx);
+  assert.match(f.notices.at(-1)!.message, /Session settings \(Error \/ EACCES\)/);
+  assert.doesNotMatch(f.notices.at(-1)!.message, /PRIVATE_/);
+  Object.defineProperty(f.control, "settings", { configurable: true, value: { acquireInteraction, open: async () => { throw new TypeError("PRIVATE_PROGRAMMER_SENTINEL", { cause: error }); } } });
+  await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
+    assert.ok(error instanceof PanelLaunchError);
+    assert.match(error.message, /Session settings \(TypeError\)/);
+    assert.doesNotMatch(error.stack ?? "", /PRIVATE_/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+test("panel-construction failures propagate with a safe UI stage, not a hidden blanket catch", async () => {
+  const f = fixture(); f.ctx.mode = "tui";
+  const draft = { discard() {}, snapshot() { throw new TypeError("PRIVATE_CONSTRUCTION_SENTINEL"); } };
+  Object.defineProperty(f.control, "settings", { value: { acquireInteraction, open: async () => draft, sharedProject: async () => undefined } });
+  f.ctx.ui.custom = async (factory: any) => factory({}, {}, {}, () => {});
+  await assert.rejects(createCommandHandler(f.control)("", f.ctx), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /panel construction \(TypeError\)/);
+    assert.doesNotMatch(error.stack ?? "", /PRIVATE_/);
+    return true;
+  });
+  assert.deepEqual(f.notices, []);
+});
+
+test("blocked recovery guidance starts passive and describes exact bounded host approval without broad grants", () => {
+  for (const status of ["unavailable", "disabled"] as const) {
+    const note = systemPromptNote(state(status));
+    assert.match(note, /msb_diagnostics.*msb_config_get/);
+    assert.match(note, /execution_target="host"/);
+    assert.match(note, /finite positive timeout <=120/);
+    assert.match(note, /fixed session cwd/);
+    assert.match(note, /real host-user privileges/);
+    assert.match(note, /timeout does not guarantee descendant confinement/);
+    assert.match(note, /Never automatically retry on host/);
   }
 });
 
-test("registerMsbCommand registers the facade-backed handler", () => {
-  const f = fixture();
-  let registration: any;
-  registerMsbCommand({ registerCommand: (_name: string, options: any) => { registration = options; } } as any, f.control);
-  assert.equal(registration.description, "Manage pi-microsandbox");
-  assert.equal(typeof registration.handler, "function");
+test("active prompt retains strict host command instructions when runtime details are unavailable", () => {
+  const note = systemPromptNote({ status: "active", info: null });
+  assert.match(note, /runtime details are unavailable/);
+  assert.match(note, /exactly ONE simple, clear, human-readable command per call and per approval/);
+  assert.match(note, /No command chaining/);
+  assert.match(note, /fresh approval for each step/);
 });
