@@ -77,6 +77,34 @@ test("dockerfile-storage paths use current authoritative Project mapping for nes
   }
 });
 
+test("Project getter defaults to FROM GLOBAL when Global exists without copying or changing existing base intent", async (t) => {
+  const f = await fixture(t);
+  await f.run(true, { scope: "global", content: from, context: [{ path: "private", content: "metadata only" }] });
+  const before = await tree(f.root);
+  const paths = await hostConfigPaths(f.input);
+  const globalDirectory = dirname(paths.global);
+  const originalOpen = fs.open;
+  const open = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    const path = String(args[0]);
+    assert.notEqual(path, join(globalDirectory, "Dockerfile"), "Project getter must not open Global Dockerfile bytes");
+    assert.ok(!path.startsWith(join(globalDirectory, "build-context")), "Project getter must not open Global context bytes");
+    return originalOpen(...args);
+  });
+  const project = await f.run(false, { scope: "project" });
+  open.mock.restore();
+  assert.equal(project.globalDockerfile.exists, true);
+  assert.equal(project.globalDockerfile.path, project.paths.global.dockerfile);
+  assert.equal(project.minimalDockerfile, "FROM GLOBAL\n");
+  assert.equal(project.baseImage, DEFAULT_CONFIG.image);
+  assert.equal(project.exists, false);
+  assert.match(project.editing, /default to FROM GLOBAL/);
+  assert.equal((await f.run(false, { scope: "global" })).minimalDockerfile, from);
+  assert.deepEqual(await tree(f.root), before);
+  await f.run(true, { scope: "project", content: "FROM scratch\n" });
+  assert.equal((await f.run(false, { scope: "project" })).content, "FROM scratch\n");
+  assert.match(f.definitions.get("msb_dockerfile_write").description, /default to FROM GLOBAL/);
+});
+
 for (const scope of ["project", "global"] as const) test(`dockerfile get/write ${scope}: missing/pin/content, approval-bound create/update, no-op preserves mode/mtime`, async (t) => {
   const f = await fixture(t); const before = await tree(f.root);
   const missing = await f.run(false, { scope });

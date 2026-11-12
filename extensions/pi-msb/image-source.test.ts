@@ -198,3 +198,133 @@ test("dedicated context rejects excessive depth/entries and non-regular socket f
   try { await assert.rejects(snapshotDockerfile((await resolveConfig(f.input)).imageBuild!, DEFAULT_CONFIG.image)); }
   finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test("FROM GLOBAL snapshots raw current sources with isolated contexts and dependency-sensitive identity", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM GLOBAL AS base\nCOPY . /project\n");
+  await f.write(f.global, "FROM scratch\nCOPY . /global\n");
+  await f.write(f.paths.global, 'image="not-the-global-base"\n');
+  await f.write(join(dirname(f.project), "build-context", "same"), "PROJECT");
+  await f.write(join(dirname(f.global), "build-context", "same"), "GLOBAL");
+  const source = (await resolveConfig(f.input)).imageBuild!;
+  const first = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+  assert.equal(first.entries[0]!.data!.toString(), "FROM GLOBAL AS base\nCOPY . /project\n");
+  assert.equal(first.global!.entries[0]!.data!.toString(), "FROM scratch\nCOPY . /global\n");
+  assert.equal(first.entries.at(-1)!.data!.toString(), "PROJECT");
+  assert.equal(first.global!.entries.at(-1)!.data!.toString(), "GLOBAL");
+  await f.write(f.paths.global, 'image="another-unrelated-image"\n');
+  assert.equal((await snapshotDockerfile(source, DEFAULT_CONFIG.image)).identity, first.identity);
+  await f.write(f.global, "# raw global comment\nFROM scratch\nCOPY . /global\n");
+  const changed = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+  assert.notEqual(changed.identity, first.identity);
+  await f.write(join(dirname(f.global), "build-context", "same"), "NEW GLOBAL");
+  const contextChanged = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+  assert.notEqual(contextChanged.identity, changed.identity);
+  await fs.chmod(join(dirname(f.global), "build-context", "same"), 0o755);
+  assert.notEqual((await snapshotDockerfile(source, DEFAULT_CONFIG.image)).identity, contextChanged.identity);
+});
+
+test("empty FROM continuation lines retain Global dependency validation and identity", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM \\\n\n \t\n global\n");
+  const source = (await resolveConfig(f.input)).imageBuild!;
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /requires a safe current Global/);
+  await f.write(f.global, "FROM scratch\n");
+  const first = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+  assert.ok(first.global);
+  await f.write(f.global, "FROM scratch\nLABEL changed=true\n");
+  assert.notEqual((await snapshotDockerfile(source, DEFAULT_CONFIG.image)).identity, first.identity);
+});
+
+test("FROM GLOBAL fails closed for missing, recursive or unsafe current Global sources", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM GLOBAL\n");
+  const source = (await resolveConfig(f.input)).imageBuild!;
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /requires a safe current Global/);
+  await f.write(f.global, "FROM GLOBAL\n");
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /Global Dockerfile cannot inherit/);
+  await assert.rejects(snapshotDockerfile({ ...source, dockerfile: f.global }, DEFAULT_CONFIG.image), /Global Dockerfile cannot inherit/);
+  await fs.unlink(f.global);
+  await fs.symlink(f.project, f.global);
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /requires a safe current Global/);
+  await fs.unlink(f.global);
+  await f.write(join(f.cwd, "global-hardlink"), "FROM scratch\n");
+  await fs.link(join(f.cwd, "global-hardlink"), f.global);
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /requires a safe current Global/);
+  await fs.unlink(f.global);
+  await f.write(f.global, "FROM scratch\n");
+  await fs.symlink(f.cwd, join(dirname(f.global), "build-context"));
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /requires a safe current Global/);
+});
+
+test("non-inheriting Project never reads or validates Global dependencies", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM scratch\nRUN <<'EOF'\nFROM GLOBAL\nEOF\n");
+  await fs.mkdir(dirname(f.global), { recursive: true });
+  await fs.symlink(f.cwd, f.global);
+  const source = (await resolveConfig(f.input)).imageBuild!;
+  const originalOpen = fs.open;
+  t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    assert.notEqual(String(args[0]), f.global, "unreferenced Global must not be opened");
+    return originalOpen(...args);
+  });
+  const snapshot = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+  assert.equal(snapshot.global, undefined);
+  await fs.unlink(f.global);
+  await f.write(f.global, "FROM GLOBAL\n");
+  assert.equal((await snapshotDockerfile(source, DEFAULT_CONFIG.image)).identity, snapshot.identity);
+});
+
+test("FROM GLOBAL applies shared byte and entry bounds across both inputs", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM GLOBAL\n");
+  await f.write(f.global, "FROM scratch\n");
+  const source = (await resolveConfig(f.input)).imageBuild!;
+  for (const dockerfile of [f.project, f.global]) {
+    const file = join(dirname(dockerfile), "build-context", "large");
+    await f.write(file, "");
+    await fs.truncate(file, BUILD_LIMITS.bytes / 2);
+  }
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /safe current Global/);
+  for (const dockerfile of [f.project, f.global]) {
+    const context = join(dirname(dockerfile), "build-context");
+    await fs.unlink(join(context, "large"));
+    await Promise.all(Array.from({ length: BUILD_LIMITS.entries / 2 }, (_, index) => f.write(join(context, String(index)), "")));
+  }
+  await assert.rejects(snapshotDockerfile(source, DEFAULT_CONFIG.image), /safe current Global/);
+});
+
+test("Project protects Global source mounts without parsing editable sources", async (t) => {
+  const f = await fixture(t);
+  await f.write(f.project, "FROM GLOBAL\n");
+  await f.write(f.global, "FROM scratch\n");
+  const context = join(dirname(f.global), "build-context");
+  await fs.mkdir(context);
+  for (const path of [f.global, context]) {
+    await f.write(f.paths.project, `mounts=[{type="dir",host_path=${JSON.stringify(path)},guest_path="/global",readonly=true}]`);
+    await assert.rejects(resolveConfig(f.input), /must not expose Dockerfile/);
+  }
+});
+
+test("literal first FROM GLOBAL rewriting preserves directives, comments, RUN and heredoc bytes", async () => {
+  const { rewriteGlobalBase } = await import("./dockerfile-global.ts");
+  const tag = "localhost/pi-msb-global:test";
+  const cases: Array<[string, string]> = [
+    ["  fRoM\tglobal\tAs base\r\n", `  fRoM\t${tag}\tAs base\r\n`],
+    ["\uFEFFFROM GLOBAL\n", `\uFEFFFROM ${tag}\n`],
+    ["FROM \\\n\n \t\n GLOBAL\n", `FROM \\\n\n \t\n ${tag}\n`],
+    ["# syntax=docker/dockerfile:1\nFROM --platform=$BUILDPLATFORM \\\n# leave this comment\n GLOBAL AS base\n", `# syntax=docker/dockerfile:1\nFROM --platform=$BUILDPLATFORM \\\n# leave this comment\n ${tag} AS base\n`],
+    ["# escape=`\nFROM `\n GLOBAL AS base\n", `# escape=\`\nFROM \`\n ${tag} AS base\n`],
+    ["FROM GLO\\\n# preserved\nBAL AS base\n", `FROM ${tag}\\\n# preserved\n AS base\n`],
+    ["# FROM GLOBAL\nFROM GLOBAL\nRUN echo 'FROM GLOBAL'\nRUN <<'EOF'\nFROM GLOBAL\nEOF\nCOPY <<-TXT /file\n\tFROM GLOBAL\n\tTXT\n", `# FROM GLOBAL\nFROM ${tag}\nRUN echo 'FROM GLOBAL'\nRUN <<'EOF'\nFROM GLOBAL\nEOF\nCOPY <<-TXT /file\n\tFROM GLOBAL\n\tTXT\n`],
+    ["ARG BASE=scratch\nFROM GLOBAL AS base\nFROM ${BASE}\n", `ARG BASE=scratch\nFROM ${tag} AS base\nFROM \${BASE}\n`],
+  ];
+  const trailingWhitespace = "FROM " + "\\" + " \t\n GLOBAL\n";
+  cases.push([trailingWhitespace, "FROM " + "\\" + ` \t\n ${tag}\n`]);
+  const pinnedFrontend = `# syntax=docker/dockerfile:1@sha256:${"a".repeat(64)}\n`;
+  cases.push([pinnedFrontend + "FROM GLOBAL\n", pinnedFrontend + `FROM ${tag}\n`]);
+  cases.push(["FROM GLOBAL\nRUN <<E\"OF\"\nFROM GLOBAL\nEOF\n", `FROM ${tag}\nRUN <<E"OF"\nFROM GLOBAL\nEOF\n`]);
+  for (const [input, expected] of cases) assert.equal(rewriteGlobalBase(Buffer.from(input), tag)?.toString(), expected);
+  for (const input of ["FROM scratch\nRUN <<EOF\nFROM GLOBAL\nEOF\n", "FROM global:latest\n", "ARG BASE=GLOBAL\nFROM ${BASE}\n"]) assert.equal(rewriteGlobalBase(Buffer.from(input), tag), undefined);
+  for (const input of ["FROM scratch\nFROM GLOBAL\n", "FROM GLOBAL\nFROM GLOBAL\n", "FROM GLOBAL AS GLOBAL\n", 'FROM "GLOBAL"\n', "FROM --platform linux/amd64 GLOBAL\n", "# syntax=private/frontend:1\nFROM GLOBAL\n"]) assert.throws(() => rewriteGlobalBase(Buffer.from(input), tag), /GLOBAL/);
+});

@@ -426,6 +426,8 @@ test("updates skill access, tracks Bash output, and proxies user_bash", async ()
   const [prompt] = await harness.emit("before_agent_start", { systemPrompt: "base" });
   assert.ok(prompt.systemPrompt.startsWith("base\n\nmode:active\n"));
   assert.match(prompt.systemPrompt, /Before creating Dockerfile customization, call msb_dockerfile_get/);
+  assert.match(prompt.systemPrompt, /default to FROM GLOBAL/);
+  assert.match(prompt.systemPrompt, /Preserve existing base intent/);
   assert.match(prompt.systemPrompt, /msb_dockerfile_write.*explicit per-proposal approval/);
   assert.match(prompt.systemPrompt, /msb_dockerfile_build.*autonomous build\/export only, no approval dialog or UI needed/);
   assert.match(prompt.systemPrompt, /msb_dockerfile_load.*separate default-No approval/);

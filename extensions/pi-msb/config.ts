@@ -1016,7 +1016,11 @@ export async function resolveConfig(input: ResolveConfigInput, captureSanitizer?
   for (const [index, mount] of config.mounts.entries()) {
     if (mount.type === "named" || mount.type === "tmpfs" || typeof mount.hostPath !== "string") continue;
     const host = resolve(mount.hostPath);
-    if (imageBuild && [imageBuild.dockerfile, join(dirname(imageBuild.dockerfile), "build-context")].some((path) => isInside(path, host) || isInside(host, path))) {
+    // Reserve Global inputs for Project without reading editable source at runtime:
+    // an explicitly loaded selection must survive missing/edited dependency files.
+    const buildPaths = imageBuild ? [imageBuild.dockerfile, join(dirname(imageBuild.dockerfile), "build-context"),
+      ...(imageBuild.scope === "host-project" ? [targets.canonicalAgentDir, targets.agentDir].flatMap((root) => [join(root, "pi-microsandbox", "Dockerfile"), join(root, "pi-microsandbox", "build-context")]) : [])] : [];
+    if (buildPaths.some((path) => isInside(path, host) || isInside(host, path))) {
       policyIssues.push("host mounts must not expose Dockerfile or build-context sources");
     }
     if (!mount.readonly && (hostPolicyPaths.some((path) => isInside(path, host)) || hostPolicyRoots.some((root) => isInside(host, root)) || targets.identity.protectedPaths.some((root) => isInside(host, root)))) {

@@ -18,7 +18,7 @@ It does not change VM mounts. See [host execution safety](safety.md#fail-closed-
 | Tool | Job | Needs approval? |
 | --- | --- | --- |
 | `msb_diagnostics` | Passive cached report, even when sandbox execution is blocked | No |
-| `msb_dockerfile_get` | Read scoped Dockerfile, context inventory/requested text, exact paths and pinned FROM starter | No |
+| `msb_dockerfile_get` | Read scoped Dockerfile, context inventory/requested text, exact paths and recommended FROM starter | No |
 | `msb_dockerfile_write` | Persist approved Project/Global Dockerfile/context PATCH only | **Every changed proposal**, through interactive UI |
 | `msb_dockerfile_build` | Autonomous build/export verified reusable artifact; no import/activation | No; works headless/print |
 | `msb_dockerfile_load` | Import exact artifactId, select and guarded reload; no build | **Every invocation**, through interactive UI |
@@ -50,8 +50,10 @@ from main, linked and nested Git cwd; non-Git/unsupported layouts remain cwd-loc
 There is no destination argument: retired Repository/Worktree requests are rejected.
 `target` identifies exactly what was read; `paths` lists Global and Project.
 It returns `exists`, actual Dockerfile UTF-8 `content` (or `null` plus bounded
-reason), bytes, bundled pinned `baseImage`/`minimalDockerfile`, guidance and
-last-known selection. Never use a generated/custom effective image as the starter.
+reason), bytes, bundled pinned `baseImage`, recommended `minimalDockerfile`,
+`globalDockerfile: {exists, path}`, guidance and last-known selection. Project's
+starter is `FROM GLOBAL\n` when Global exists; otherwise it uses the bundled pin.
+Inspect scope `global` before creating a Project extension of it. Never use a generated/custom effective image as the starter.
 `inventory` lists bounded metadata (relative path, directory, bytes, executable);
 `inventoryComplete` is explicit. Only `contextPaths` file contents are read and
 returned in `contextFiles`, with SHA-256 for requested text. No arbitrary 32 MiB
@@ -66,8 +68,17 @@ sources return a bounded generic error, not raw host errors or guessed paths.
 Make the **smallest Dockerfile edit needed**, using minimal instructions. Do not
 add comments or explanatory boilerplate: put explanations and scope recommendations
 in the normal response, not the file. Preserve unrelated existing content and
-functional parser directives (`#syntax`/`#escape`). New Dockerfiles start with only
-`FROM` the bundled digest pin, plus the instructions actually needed.
+functional parser directives (`#syntax`/`#escape`). New Project Dockerfiles default
+to `FROM GLOBAL` when a Global Dockerfile is present. Otherwise (including new
+Global files), start FROM the bundled digest pin. Add only instructions actually
+needed; preserve existing base intent unless asked to change it.
+
+Project's literal first `FROM GLOBAL` builds current Global sources as its base, not Global
+`config.image` or a loaded image. No separate Global build/load is needed. Global
+must exist and cannot itself use `FROM GLOBAL`. Each scope keeps its own `COPY`
+context; both sources enter the fingerprint and combined build limits. Changes to
+either invalidate pending Project artifacts; build/load remain explicit. See
+[Global inheritance](images.md#extend-the-global-dockerfile).
 
 Write accepts optional full Dockerfile `content` and/or a `context` **PATCH**:
 

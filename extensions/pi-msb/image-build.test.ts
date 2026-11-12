@@ -669,3 +669,96 @@ test("pending successful-load discard and shutdown share one idempotent owned re
   assert.equal(removals, 1);
   assert.equal(await artifacts.current(f.source), undefined);
 });
+
+async function inheritingSource(f: Awaited<ReturnType<typeof fixture>>) {
+  const global = join(dirname(f.paths.global), "Dockerfile");
+  await fs.mkdir(dirname(global), { recursive: true });
+  await fs.writeFile(global, "FROM scratch\nCOPY . /global\n");
+  await fs.writeFile(f.dockerfile, "FROM GLOBAL AS base\nCOPY . /project\n");
+  for (const [file, content] of [[global, "GLOBAL"], [f.dockerfile, "PROJECT"]]) {
+    const context = join(dirname(file!), "build-context");
+    await fs.mkdir(context);
+    await fs.writeFile(join(context, "same"), content!);
+  }
+  const { identity, platform } = await snapshotDockerfile(f.source, DEFAULT_CONFIG.image);
+  const source = { ...f.source, identity, platform };
+  return { source, global };
+}
+
+test("FROM GLOBAL builds current Global then Project in one builder with isolated COPY roots and an internal base tag", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const { source } = await inheritingSource(f);
+  await fs.writeFile(f.paths.global, 'image="must-not-be-used"\n');
+  const bound = (guest: string) => calls.find((call) => call.startsWith(`builder-bind:${guest}:`))!.slice(`builder-bind:${guest}:`.length);
+  let rewritten = "";
+  const sdk = buildSdk(calls, { create: async () => {
+    const project = bound("/pi-msb-input"); const global = bound("/pi-msb-global-input");
+    assert.notEqual(project, global);
+    assert.equal(await fs.readFile(join(project, "same"), "utf8"), "PROJECT");
+    assert.equal(await fs.readFile(join(global, "same"), "utf8"), "GLOBAL");
+    assert.deepEqual((await fs.readdir(project)).sort(), ["Dockerfile", "same"]);
+    assert.deepEqual((await fs.readdir(global)).sort(), ["Dockerfile", "same"]);
+    rewritten = await fs.readFile(join(project, "Dockerfile"), "utf8");
+    assert.equal(await fs.readFile(join(global, "Dockerfile"), "utf8"), "FROM scratch\nCOPY . /global\n");
+  } });
+  const built = await buildDockerfileImage({ sdk, source, acquireLock });
+  const builds = built.logs.filter((log) => log.args.includes("buildx"));
+  assert.equal(builds.length, 2);
+  assert.equal(builds[0]!.args.at(-1), "/pi-msb-global-input");
+  assert.equal(builds[1]!.args.at(-1), "/pi-msb-input");
+  const globalTag = builds[0]!.args[builds[0]!.args.indexOf("--tag") + 1]!;
+  assert.match(globalTag, /^localhost\/pi-msb-global:/);
+  assert.equal(rewritten, `FROM ${globalTag} AS base\nCOPY . /project\n`);
+  assert.equal(builds[1]!.args[builds[1]!.args.indexOf("--tag") + 1], buildImageReference(source));
+  assert.equal(calls.filter((call) => call === "builder-create").length, 1);
+  assert.ok(calls.includes("builder-readonly:/pi-msb-global-input"));
+  assert.equal(calls.filter((call) => call.includes('"save"')).length, 1);
+  assert.equal(calls.some((call) => call.startsWith("image-load:") || call.includes("must-not-be-used")), false);
+  assert.equal((await buildDockerfileImage({ sdk, source, acquireLock })).cacheHit, true);
+  assert.equal(calls.filter((call) => call === "builder-create").length, 1);
+  await assertClean(calls);
+});
+
+test("Global build failure aborts Project and export without publishing or importing", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const { source } = await inheritingSource(f);
+  await assert.rejects(buildDockerfileImage({ sdk: buildSdk(calls, { failStep: "build" }), source, acquireLock }), /exited with status 1/);
+  const builds = calls.filter((call) => call.includes('"buildx"'));
+  assert.equal(builds.length, 1);
+  assert.match(builds[0]!, /pi-msb-global-input/);
+  assert.equal(calls.some((call) => call.includes('"save"') || call.startsWith("image-load:")), false);
+  assert.equal(await pendingArtifacts.current(source), undefined);
+  await assertClean(calls);
+});
+
+test("Global edits invalidate pending Project load, while a loaded Project survives missing editable dependencies", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const { source, global } = await inheritingSource(f);
+  const sdk = buildSdk(calls);
+  const built = await buildDockerfileImage({ sdk, source, acquireLock });
+  await fs.writeFile(join(dirname(global), "build-context", "same"), "EDITED GLOBAL");
+  await assert.rejects(loadDockerfileImage({ sdk, source, artifactId: built.artifact.artifactId, expectedSelectionVersion: "missing" }), /Stale source/);
+  assert.equal(calls.some((call) => call.startsWith("image-load:")), false);
+  const { identity, platform } = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+  const current = { ...source, identity, platform };
+  const rebuilt = await buildDockerfileImage({ sdk, source: current, acquireLock });
+  assert.notEqual(rebuilt.artifact.artifactId, built.artifact.artifactId);
+  await loadDockerfileImage({ sdk, source: current, artifactId: rebuilt.artifact.artifactId, expectedSelectionVersion: "missing" });
+  await fs.unlink(global); await fs.unlink(f.dockerfile);
+  const loaded = await resolveConfig({ ...f.input, imageSdkLoader: async () => sdk });
+  assert.equal(loaded.config.image, selectedImageReference(source));
+  assert.ok(loaded.imageBuild?.loadedDigest);
+  assert.equal(calls.filter((call) => call === "builder-create").length, 2, "runtime resolution must not build dependencies");
+  await assertClean(calls);
+});
+
+test("Project without FROM GLOBAL stages no Global source even when Global is unsafe", async (t) => {
+  const f = await fixture(t); const calls: string[] = [];
+  const global = join(dirname(f.paths.global), "Dockerfile");
+  await fs.symlink(f.dockerfile, global);
+  const sdk = buildSdk(calls);
+  const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  assert.equal(built.logs.filter((log) => log.args.includes("buildx")).length, 1);
+  assert.equal(calls.some((call) => call.includes("pi-msb-global-input")), false);
+  await assertClean(calls);
+});

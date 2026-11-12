@@ -60,6 +60,7 @@ extensions/pi-msb/config.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/diagnostics-tools.ts required
 extensions/pi-msb/build-context-storage.ts required
+extensions/pi-msb/dockerfile-global.ts required
 extensions/pi-msb/dockerfile-storage.ts required
 extensions/pi-msb/dockerfile-tools.ts required
 extensions/pi-msb/dockerfile-review.ts required

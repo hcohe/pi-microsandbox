@@ -131,7 +131,12 @@ You may put `Dockerfile` beside the selected host-owned policy (Global or Projec
 `build-context/` beside it. No repository tree or parent cwd context is inherited.
 An explicit scope `image` wins over its colocated Dockerfile; otherwise that
 Dockerfile supplies its image. Project overrides Global; Session `image` overrides
-all. Dockerfile/context Project saves use the same shared main-root record as config
+all. A Project Dockerfile starting `FROM GLOBAL` explicitly extends the current
+Global Dockerfile, regardless of Global `image` intent; each uses its own context.
+Missing/unsafe Global sources or recursive Global inheritance fail closed.
+This does not change scope selection or trigger implicit build/load. See
+[Global inheritance](images.md#extend-the-global-dockerfile).
+Dockerfile/context Project saves use the same shared main-root record as config
 from main, linked and nested cwd, with one exact-target source review.
 A first shared source save explicitly registers the same immutable `_repository`
 metadata in shared config; it preserves user/unknown keys and image intent (TOML

@@ -618,3 +618,46 @@ test("shutdown cancels and awaits an in-flight builder before disposing pending 
   assert.equal(f.calls.includes("builder-destroy"), true);
   assert.equal(f.calls.some((call) => call.startsWith("image-load:")), false);
 });
+
+async function writeGlobalDependency(f: Awaited<ReturnType<typeof fixture>>) {
+  const global = join(dirname(f.paths.global), "Dockerfile");
+  await fs.writeFile(global, from);
+  await fs.writeFile(f.dockerfile, "FROM GLOBAL\n");
+  const context = join(dirname(global), "build-context");
+  await fs.mkdir(context);
+  await fs.writeFile(join(context, "base.txt"), "current Global input");
+  return { global, context };
+}
+
+for (const change of ["dockerfile", "context", "missing"] as const) test(`Global ${change} edit during Project load approval withholds import`, async (t) => {
+  const f = await fixture(t);
+  const { global, context } = await writeGlobalDependency(f);
+  const built = (await f.run("build")).details;
+  assert.equal(built.success, true, JSON.stringify(built));
+  f.review(async () => {
+    if (change === "dockerfile") await fs.writeFile(global, from + "# changed dependency\n");
+    if (change === "context") await fs.writeFile(join(context, "base.txt"), "changed dependency");
+    if (change === "missing") await fs.unlink(global);
+  });
+  const boundary = f.calls.length;
+  const loaded = (await f.run("load", { scope: "project", artifactId: built.artifactId })).details;
+  assert.equal(loaded.success, false, JSON.stringify(loaded));
+  assert.equal(loaded.imported, false);
+  noRuntime(f.calls.slice(boundary));
+});
+
+test("Global dependency change during its build aborts Project, export and publication", async (t) => {
+  const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+  const f = await fixture(t, { build: async () => { entered.resolve(); await release.promise; } });
+  const { context } = await writeGlobalDependency(f);
+  const pending = f.run("build");
+  await entered.promise;
+  await fs.writeFile(join(context, "base.txt"), "changed while Global builds");
+  release.resolve();
+  const built = (await pending).details;
+  assert.equal(built.success, false, JSON.stringify(built));
+  assert.match(built.reason, /Source changed during build request/);
+  assert.equal(f.calls.filter((call) => call.includes('"buildx"')).length, 1);
+  assert.equal(f.calls.some((call) => call.includes('"save"')), false);
+  noRuntime(f.calls);
+});

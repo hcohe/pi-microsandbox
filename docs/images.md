@@ -66,7 +66,8 @@ an updated mutable tag, or `"never"` to require a cached local image.
 
 **Call `msb_dockerfile_get` with `{"scope":"project"}` (or `"global"`) first.**
 It reads the actual scoped Dockerfile, returns authoritative host paths, and gives
-a directly usable bundled digest-pinned `FROM` starter. Propose a complete
+a recommended `FROM GLOBAL` starter for Project when a Global Dockerfile exists,
+or the bundled digest-pinned `FROM` starter otherwise. Propose a complete
 replacement with `msb_dockerfile_write` using the same scope and `content`, and/or
 a relative `context` patch. Getter `contextPaths` requests bounded context text. Its
 No-first per-proposal review combines scope and a compact unified diff in one
@@ -99,8 +100,10 @@ separate `msb_config_set` approval. [Tool contract](tools.md#msb_dockerfile_get-
 Make the smallest edit needed, with minimal Dockerfile instructions. Do not add
 comments or explanatory boilerplate; explain changes and scope in the normal
 response, not the file. Preserve unrelated existing content and functional parser
-directives. For new files start FROM the bundled digest pin, adding only needed
-instructions.
+directives. For new Project files, default to `FROM GLOBAL` when a Global
+Dockerfile exists; inspect it with `msb_dockerfile_get` scope `global` first.
+Otherwise (including new Global files), start FROM the bundled digest pin.
+Add only needed instructions; do not change an existing file's base intent unless asked.
 
 Tool Dockerfiles are bounded to 32 KiB valid UTF-8 (no unsupported controls),
 never silently truncated. Content and full diffs are intentionally exposed to the
@@ -172,10 +175,38 @@ Use a verified `@sha256:...` suffix for reproducibility; the tag above is only a
 readable example. Custom images still need the required guest tools and Docker
 components if runtime Docker is required.
 
+### Extend the Global Dockerfile
+
+A Project Dockerfile can start from the user's Global Dockerfile:
+
+```dockerfile
+FROM GLOBAL
+RUN apt-get update && apt-get install -y --no-install-recommends cowsay \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Use literal `GLOBAL` in the **first `FROM` instruction** (case-insensitive):
+`FROM [--platform=TOKEN] GLOBAL [AS name]`. Continuations, `#escape` and official
+`docker/dockerfile` frontends are supported. Later `FROM GLOBAL`, a stage named
+`GLOBAL` in an inheriting build, and nonstandard frontends are rejected. `ARG`
+expansion is unchanged; it is not a way to request Global inheritance.
+
+`GLOBAL` is an extension-provided base, not a registry image. Explicit Project
+build first builds the **current Global Dockerfile and its dedicated context**
+in the same disposable builder, then builds Project on that image. No prior
+Global build/load or separate Global activation is needed. Global `config.image`
+and previously loaded images are not used. Missing/unsafe Global sources or
+Global itself using `FROM GLOBAL` fail closed, with no bundled-image fallback.
+Each scope's `COPY` sees only its own context; Global files are not merged into
+Project context. Changes to either Dockerfile or context invalidate pending
+Project artifacts and build-cache identity; explicitly rebuild and approve load.
+Already loaded images retain the existing explicit build/load lifecycle.
+
 ### Build boundary and lifecycle
 
 On explicit build, the extension snapshots only
-`Dockerfile` and the **contents of its dedicated `build-context/`**. That directory
+`Dockerfile` and the **contents of its dedicated `build-context/`** (plus the
+same separately isolated Global sources when Project uses `FROM GLOBAL`). Each directory
 becomes the context root for `COPY`; Dockerfile is staged at its root. No implicit
 repository, TOML files, other projects, policy tree, host credentials, host Docker
 socket, or runtime mounts/environment/secrets are supplied. Do not place secrets
@@ -183,7 +214,8 @@ in the dedicated context or Dockerfile: those bytes are deliberately build input
 `build-context/Dockerfile` is rejected to prevent overwriting the selected source.
 All symlinks, multiply-linked regular files (hardlinks), special files and changing
 inputs are rejected. Limits: 32 MiB total source bytes, 2,048 entries (including
-Dockerfile/directories), 16 context nesting levels. A context is optional.
+Dockerfile/directories), 16 context nesting levels. For `FROM GLOBAL`, byte/entry
+limits cover both scopes together. A context is optional.
 
 A separate disposable **rootful** Microsandbox VM runs the existing digest-pinned
 bundled image with guest Docker/Buildx (2 CPUs, 4,096 MiB RAM, 8,192 MiB writable

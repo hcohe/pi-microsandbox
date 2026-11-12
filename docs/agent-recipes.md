@@ -42,8 +42,10 @@ else's setup. Unknown runtime policy should stay **unknown**, not become
 > Make cowsay available for this project. Call msb_dockerfile_get with scope
 > project first. Make the smallest Dockerfile edit needed, using minimal
 > instructions; do not add comments or explanatory boilerplate. Preserve unrelated
-> existing content and functional parser directives. For a new file start FROM
-> the bundled digest pin and add only the requested package instructions, without
+> existing content and functional parser directives. For a new Project file,
+> default to FROM GLOBAL when the getter reports a Global Dockerfile present;
+> inspect scope global first. Otherwise start FROM the bundled digest pin
+> (also for new Global files). Add only requested package instructions, without
 > unrelated packages. Explain the change and recommended Project or Global scope in
 > your normal response, not the file. Propose the complete resulting content via
 > msb_dockerfile_write; let me review the scope and added/removed code, with

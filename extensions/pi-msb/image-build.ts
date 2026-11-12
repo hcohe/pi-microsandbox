@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rewriteGlobalBase } from "./dockerfile-global.ts";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { MicrosandboxModule } from "./control.ts";
@@ -224,10 +225,23 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     await fs.mkdir(input, { mode: 0o700 });
     await fs.mkdir(output, { mode: 0o700 });
     outputIdentity = await fs.lstat(output);
-    for (const entry of snapshot.entries) {
-      const path = join(input, entry.path);
-      if (entry.data === undefined) await fs.mkdir(path, { recursive: true, mode: entry.mode });
-      else await fs.writeFile(path, entry.data, { mode: entry.mode, flag: "wx" });
+    const globalReference = `localhost/pi-msb-global:${owner}`;
+    const globalInput = snapshot.global ? join(temporary, "global-input") : undefined;
+    const stage = async (directory: string, entries: typeof snapshot.entries, rewrite = false) => {
+      for (const entry of entries) {
+        const path = join(directory, entry.path);
+        if (entry.data === undefined) await fs.mkdir(path, { recursive: true, mode: entry.mode });
+        else {
+          const data = rewrite && entry.path === "Dockerfile" ? rewriteGlobalBase(entry.data, globalReference) : entry.data;
+          if (!data) throw new Error("Missing FROM GLOBAL dependency");
+          await fs.writeFile(path, data, { mode: entry.mode, flag: "wx" });
+        }
+      }
+    };
+    await stage(input, snapshot.entries, !!snapshot.global);
+    if (globalInput) {
+      await fs.mkdir(globalInput, { mode: 0o700 });
+      await stage(globalInput, snapshot.global!.entries);
     }
     check();
     if (sdk.defaultBackendKind() !== "local") throw new Error("Builder backend changed");
@@ -240,13 +254,14 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
       .workdir("/pi-msb-input").labels({ "pi-msb.builder": owner });
     builder.network((network: any) => network.policy({ ...publicPolicy, defaultIngress: "deny" }));
     builder.volume("/pi-msb-input", (mount: any) => mount.bind(input).readonly());
+    if (globalInput) builder.volume("/pi-msb-global-input", (mount: any) => mount.bind(globalInput).readonly());
     builder.volume("/pi-msb-output", (mount: any) => mount.bind(output));
     // Do not race create(): retain and clean up even a late SDK result after cancellation.
     await validateLocation();
     check();
     if (sdk.defaultBackendKind() !== "local") throw new Error("Builder backend changed");
     await validateTemporary(temporary);
-    if (await fs.realpath(temporary) !== temporary || await fs.realpath(input) !== input || await fs.realpath(output) !== output) throw new Error("Build staging path changed");
+    if (await fs.realpath(temporary) !== temporary || await fs.realpath(input) !== input || await fs.realpath(output) !== output || globalInput && await fs.realpath(globalInput) !== globalInput) throw new Error("Build staging path changed");
     phase = "build";
     await guard();
     createAttempted = true;
@@ -281,6 +296,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     };
     await run("/usr/local/sbin/pi-msb-docker-start", ["15000"], 17_000);
     const docker = ["--host=unix:///var/run/docker.sock"];
+    if (snapshot.global) await run("/usr/local/bin/docker", [...docker, "buildx", "build", "--load", "--platform", source.platform, "--tag", globalReference, "--file", "/pi-msb-global-input/Dockerfile", "/pi-msb-global-input"], BUILD_TIMEOUT_MS);
     await run("/usr/local/bin/docker", [...docker, "buildx", "build", "--load", "--platform", source.platform, "--tag", reference, "--file", "/pi-msb-input/Dockerfile", "/pi-msb-input"], BUILD_TIMEOUT_MS);
     phase = "export";
     await run("/usr/local/bin/docker", [...docker, "save", "--output", "/pi-msb-output/image.tar", reference], BUILD_TIMEOUT_MS);

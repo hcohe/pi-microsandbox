@@ -5,29 +5,29 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { SettingsConflictError } from "./settings-conflict.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
-import { BUILD_LIMITS } from "./image-source.ts";
+import { BUILD_LIMITS, discoverDockerfile } from "./image-source.ts";
 import { BundlePersistenceError, DOCKERFILE_MAX_BYTES, validDockerfileText, type DockerfileScope, type DockerfileDraft } from "./dockerfile-storage.ts";
 import { CONTEXT_LIMITS, validateContextEdits, validContextPath, type ContextEdit } from "./build-context-storage.ts";
 import { approveDockerfileReview, dockerfileDisplay, unifiedDockerfileDiff, type DockerfileReviewCandidate } from "./dockerfile-review.ts";
 import type { MsbControl, SessionExecutionContext } from "./types.ts";
 
 const scopeSchema = Type.Union([Type.Literal("project"), Type.Literal("global")]);
-const starter = () => `FROM ${DEFAULT_CONFIG.image}\n`;
-const minimalEditGuidance = "Make the smallest Dockerfile edit needed, using minimal instructions. Do not add comments or explanatory boilerplate; put explanations and scope recommendations in the normal response, not the file. Preserve unrelated existing content and functional parser directives. New Dockerfiles start FROM the bundled digest pin.";
+const starter = (inheritGlobal: boolean) => inheritGlobal ? "FROM GLOBAL\n" : `FROM ${DEFAULT_CONFIG.image}\n`;
+const minimalEditGuidance = "Make the smallest Dockerfile edit needed, using minimal instructions. Do not add comments or explanatory boilerplate; put explanations and scope recommendations in the normal response, not the file. Preserve unrelated existing content and functional parser directives. For a new Project Dockerfile, default to FROM GLOBAL when a Global Dockerfile is present; inspect it with msb_dockerfile_get scope global first. Otherwise (including new Global Dockerfiles), start FROM the bundled digest pin. Preserve existing base intent unless asked to change it.";
 const warnings = [
   "Dockerfile, requested context text and full diff are returned to the model and may appear in the transcript. NEVER embed credentials or secrets.",
   "Approval authorizes only saving this exact scope/path/content. Build is a separate autonomous export-only tool; load requires separate default-No approval. No reload, image selection or VM restart occurs here.",
   "Dockerfile build instructions (including scripts they run) execute in the disposable builder VM. Copied inputs may also run inside the resulting sandbox VM, never as host commands. Builds can download over PUBLIC egress independently of runtime network deny; no host credentials, runtime secrets or mounts are supplied. Public egress can exfiltrate build inputs.",
   "Project shares the main/root record from main, linked and nested Git cwd; non-Git/unsupported layouts stay cwd-local. Shared registration adds only immutable host-owned repository metadata, never image/user intent. No existing Dockerfile/context is copied. Project overrides Global; explicit image at a scope wins over that scope's Dockerfile. Session image can shadow it. Only reviewed repository registration can edit config metadata; this tool never changes image intent. Inspect msb_config_get; propose image inherit via msb_config_set separately with its own approval if needed.",
 ];
-const guidance = () => ({
-  baseImage: DEFAULT_CONFIG.image, minimalDockerfile: starter(),
+const guidance = (inheritGlobal: boolean) => ({
+  baseImage: DEFAULT_CONFIG.image, minimalDockerfile: starter(inheritGlobal),
   warnings, editing: minimalEditGuidance,
   selection: "No activation is inferred from file existence. Use msb_config_get for effective image intent/source; generated local image references must not be persisted. Saving a shadowed Dockerfile does not select it.",
   context: "Only the selected scope's optional build-context/ contents are COPY root, never the policy tree or repository. Use context PATCH entries {path,content,executable?} for bounded relative UTF-8 text edits; null deletes one file, unspecified files (including binary) are preserved. .dockerignore and nested executable scripts are supported. Use exact inventory spelling: case-folded/canonically Unicode-normalized aliases of files or ancestor directories (including between proposals) are rejected even on case-sensitive hosts; root Dockerfile aliases are reserved. Getter contextPaths explicitly requests text; inventory never reads unrequested file contents. No arbitrary host paths, mounts, secrets or user config intent changes. build-context/Dockerfile, symlinks, hardlinks and special files are rejected by the builder. The selected agent root symlink is supported; descendants cannot be symlinks.",
   limits: { dockerfileUtf8Bytes: DOCKERFILE_MAX_BYTES, build: BUILD_LIMITS, context: CONTEXT_LIMITS, text: "Valid UTF-8 without control/format characters except tab, CR and LF. Oversized/binary files are not returned or overwritten; no silent truncation." },
   lifecycle: "Getter is passive: no writes, approval, SDK, commands, build, VM start or reload. Write requires per-proposal No-first UI approval and only persists approved sources, individually atomic (NOT jointly/crash atomic). Explicit build autonomously exports a reusable verified artifact without UI approval; explicit load requires default-No approval and imports/selects it and requests guarded reload respecting Off/autoStart. Failed build preserves written source and prior image; failed load retains the artifact. Runtime never builds/imports edited source. Stale source rejects load. No host fallback. Unchanged write is a no-op.",
-  imageContract: "Use the bundled published digest pin above, NOT effective config.image. Keep required guest commands in the final image; Docker is optional unless docker.mode=require.",
+  imageContract: "Project may use literal GLOBAL only in its first FROM [--platform=TOKEN] GLOBAL [AS name] (case-insensitive). Later FROM GLOBAL, a GLOBAL stage alias in inheriting builds and nonstandard Dockerfile frontends are rejected; ARG does not request inheritance. FROM GLOBAL builds the current Global Dockerfile with its own context as the base; it does not use Global config.image or a previously loaded image. Global must exist and cannot itself use FROM GLOBAL. Each scope keeps its own COPY context; changing either source invalidates pending Project artifacts. Otherwise use the bundled published digest pin above, NOT effective config.image. Keep required guest commands in the final image; Docker is optional unless docker.mode=require.",
 });
 // Escape untrusted display strings, including terminal/bidi controls in host-selected paths.
 const display = (value: unknown) => JSON.stringify(value).replace(/[\x7f-\x9f\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => char.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
@@ -83,7 +83,7 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
     label: set ? "Propose Microsandbox Dockerfile" : "Read Microsandbox Dockerfile",
     description: set
       ? "Propose Dockerfile replacement and/or relative UTF-8 build-context PATCH in Project or Global. Project is shared by main, linked and nested Git cwd with ONE default-No approval; no copying between scopes. Fixed host-owned source roots only; no host execution permission needed. Explicit per-proposal No-first user review shows complete added/removed code above No/Yes choices. Approval authorizes source persistence only; never builds/imports/loads/restarts/selects an image. Before save, no UI/denial/cancellation/stale source means no write or reload. Cancellation after save preserves bytes but blocks activation. Unchanged is a no-op. Saves never edit image/config intent: inspect get/config_get for shadowing; inherit image separately. Never embed secrets: content/diff may enter transcript. After saving call msb_dockerfile_build, then msb_dockerfile_load with its artifactId. " + minimalEditGuidance
-      : "Read shared Project target or Global host-owned Dockerfile and bounded build-context inventory/requested text plus exact config/context paths, bundled digest-pinned FROM starter, precedence, limits and build guidance. Passive even Off/blocked with canonical workspace known: no writes, SDK, commands, approval, build or reload. UTF-8 content up to 32 KiB, never truncated; unsafe/oversized sources return bounded metadata/reason. Content is intentionally returned to the model: no embedded credentials/secrets. " + minimalEditGuidance,
+      : "Read shared Project target or Global host-owned Dockerfile and bounded build-context inventory/requested text plus exact config/context paths, recommended FROM GLOBAL starter when Global exists (otherwise bundled digest pin), precedence, limits and build guidance. Passive even Off/blocked with canonical workspace known: no writes, SDK, commands, approval, build or reload. UTF-8 content up to 32 KiB, never truncated; unsafe/oversized sources return bounded metadata/reason. Content is intentionally returned to the model: no embedded credentials/secrets. " + minimalEditGuidance,
     parameters: Type.Object({ scope: scopeSchema, ...(set ? {
       content: Type.Optional(Type.String({ maxLength: DOCKERFILE_MAX_BYTES, description: "Optional complete Dockerfile replacement; at most 32768 UTF-8 bytes. Omit for context-only edits. " + minimalEditGuidance })),
       context: Type.Optional(Type.Array(Type.Object({ path: Type.String(), content: Type.Union([Type.String({ maxLength: CONTEXT_LIMITS.fileBytes }), Type.Null()]), executable: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), { maxItems: CONTEXT_LIMITS.files, description: "PATCH of relative build-context text files, not replacement of the tree. null deletes one file; unspecified files are preserved. 32KiB/file, 64KiB total; no secrets." })),
@@ -191,9 +191,12 @@ export function registerDockerfileTools(pi: ExtensionAPI, control: MsbControl, e
         if (!draft) throw new Error("Unavailable backend");
         const { version: _version, ...source } = draft.source;
         const contextFiles = await draft.readContext(input.contextPaths ?? []);
+        const globalExists = input.scope === "global" ? draft.source.exists
+          : await discoverDockerfile(draft.paths.canonicalAgentDir, draft.paths.global.dockerfile);
+        await draft.assertUnchanged();
         check();
         return result({ outcome: "inspected", readOnly: true, scope: input.scope, destination: input.scope, paths: draft.paths, target: draft.target, ...source,
-          inventory: draft.context.map(({ version: _version, ...entry }) => entry), inventoryComplete: true, contextFiles, ...guidance(), warnings, lastKnownSelection: selection(control, draft.target.dockerfile) });
+          inventory: draft.context.map(({ version: _version, ...entry }) => entry), inventoryComplete: true, contextFiles, globalDockerfile: { exists: globalExists, path: draft.paths.global.dockerfile }, ...guidance(input.scope === "project" && globalExists), warnings, lastKnownSelection: selection(control, draft.target.dockerfile) });
       } catch (error) {
         if (error instanceof BundlePersistenceError) return result({ outcome: "conflict", saved: "unknown", reloaded: false,
           phase: "storage", code: "STORAGE_PARTIAL", persistedArtifacts: error.persisted, uncertainArtifact: error.uncertain, review,
