@@ -704,6 +704,8 @@ test("Dockerfile writer result text is compact while getter retains source and m
   assert.match(read.details.editing, /smallest Dockerfile edit/); assert.match(read.details.editing, /Do not add comments/);
   assert.match(read.details.editing, /normal response/); assert.match(read.details.editing, /parser directives/);
   assert.ok(!read.details.lifecycle.includes("change a Dockerfile comment"));
+  assert.match(read.details.lifecycle, /Actual runtime boot checks native MSB/);
+  assert.match(read.details.lifecycle, /Source saves and no-op\/live reloads remain nonbuilding/);
   assert.match(f.definitions.get("msb_dockerfile_write").description, /smallest Dockerfile edit/);
   assert.match(f.definitions.get("msb_dockerfile_write").parameters.properties.content.description, /Do not add comments/);
 });

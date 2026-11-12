@@ -80,3 +80,16 @@ test("literal prefix text has no reference redaction semantics", () => {
     literal: "<redacted>", suffix: "literal-prefix", unrelated: "$FILE:ordinary-text",
   });
 });
+
+test("sanitizer exposes only immutable originating private-literal presence metadata", () => {
+  const clear = createSettingsSanitizer([{ hostEnv: "PUBLIC_NAME", hostCmd: "printf PUBLIC_COMMAND" }]);
+  const privateSources = [{ secrets: [{ textValue: "PRIVATE_METADATA_TOKEN" }] }];
+  const privateSanitizer = createSettingsSanitizer(privateSources);
+  assert.equal(clear.hasPrivateLiterals, false);
+  assert.equal(privateSanitizer.hasPrivateLiterals, true);
+  privateSources.length = 0;
+  assert.equal(privateSanitizer.hasPrivateLiterals, true, "proof describes captured origin, not mutated sources");
+  assert.throws(() => { (privateSanitizer as any).hasPrivateLiterals = false; }, TypeError);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(privateSanitizer, "hasPrivateLiterals"), { value: true, writable: false, enumerable: false, configurable: false });
+  assert.doesNotMatch(JSON.stringify(Object.getOwnPropertyDescriptors(privateSanitizer)), /PRIVATE_METADATA_TOKEN/);
+});

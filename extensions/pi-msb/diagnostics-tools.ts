@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { MsbControl } from "./types.ts";
+import { isImagePreparationFailureSnapshot } from "./image-boot-notice.ts";
 import { HOST_COMMAND_GUIDANCE } from "./host-command-guidance.ts";
 
 export const MAX_DIAGNOSTICS_BYTES = 48 * 1024;
@@ -24,7 +25,8 @@ const record = (v: unknown): Record<string, unknown> => v && typeof v === "objec
 const pick = (v: unknown, allowed: string[], fallback = "unknown") => typeof v === "string" && allowed.includes(v) ? v : fallback;
 
 /** Allowlist, rather than serialize arbitrary adapter metadata/toJSON/errors.
- * All strings are fixed enums, fixed prose or constrained version numbers.
+ * Strings are fixed enums/prose/version numbers, except branded immutable
+ * failure-time redacted and bounded image snapshots (never arbitrary adapter strings).
  * Thus both structured details and terminal rendering are bounded and inert.
  */
 export function boundDiagnosticsReport(report: Record<string, unknown>): Record<string, unknown> {
@@ -44,23 +46,30 @@ export function boundDiagnosticsReport(report: Record<string, unknown>): Record<
       readiness: Object.fromEntries(["workspaceReady", "settingsReady", "configReady"].map((key) => [key, readiness[key] === true])),
       host: { platform: pick(host.platform, ["darwin", "linux", "win32", "freebsd", "openbsd", "aix", "sunos", "android"]), arch: pick(host.arch, ["arm", "arm64", "x64", "ia32", "ppc64", "s390x", "riscv64"]), node: typeof host.node === "string" && /^v\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host.node) ? host.node : "unknown" },
       failure: { phase, code, reason: failureSummaries[code] },
+      ...(isImagePreparationFailureSnapshot(report.imagePreparationFailure) ? { imagePreparationFailure: report.imagePreparationFailure } : {}),
       desired: { evidence: "last-known resolution; not live", validForSession: readiness.configReady === true && desired.validForSession === true, ...(readiness.configReady === true && desired.validForSession === true ? { settings: safeSettings } : {}) },
       adoption: { evidence: "last-known; not live", known: adoption.known === true, verification: pick(adoption.verification, ["created", "reconnected"]) },
     } : { reason: outcome === "rejected" ? "Only optional format=text/json is accepted. No changes made." : "Safe diagnostics unavailable from this adapter. Error details withheld; no changes made." }),
     recovery: "Use msb_config_get to inspect constraints and msb_config_set to propose supported repairs, even while blocked. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Workspace identity failure requires host working-directory repair and Pi restart before editing. Never automatically disable protection or enable host fallback.",
-    notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "logs/stdout", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
+    notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "live log/stdout reads", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
   };
 }
 function result(report: Record<string, unknown>, format: "text" | "json" = "text") {
-  const details = boundDiagnosticsReport(report);
-  const text = (format === "text" ? "Microsandbox diagnostics (passive, read-only)\n" : "") + JSON.stringify(details, null, 2);
+  let details = boundDiagnosticsReport(report);
+  const render = () => (format === "text" ? "Microsandbox diagnostics (passive, read-only)\n" : "") + JSON.stringify(details, null, 2);
+  let text = render();
+  // Never write overflow output or return a partial failure snapshot as complete evidence.
+  if (Buffer.byteLength(text) > MAX_DIAGNOSTICS_BYTES || Buffer.byteLength(JSON.stringify(details)) > MAX_DIAGNOSTICS_BYTES) {
+    details = boundDiagnosticsReport({ outcome: "unavailable" });
+    text = render();
+  }
   return { content: [{ type: "text" as const, text }], details };
 }
 
 export function registerDiagnosticsTool(pi: ExtensionAPI, control: MsbControl): void {
   pi.registerTool({
     name: "msb_diagnostics", label: "Microsandbox diagnostics",
-    description: "Passive read-only diagnostics available even when off or blocked. Only already held state and cached safe configuration projections; no settings inspection, source/environment reads, commands, SDK, logs, credential resolution, live checks, bootstrap or writes. Start here and use msb_config_get before explaining a narrow live diagnostic need and requesting one explicitly approved host bash command (finite positive timeout <=120 seconds, execution cwd (default: fixed session cwd), ready identity/configuration and existing host permission required). Never disable protection or enable fallback as a workaround. Optional format=text/json only. Both text and details bounded to 48 KiB; no overflow files. " + HOST_COMMAND_GUIDANCE,
+    description: "Passive read-only diagnostics available even when off or blocked. Only already held state, cached safe configuration projections and latest bounded sanitized image preparation/build/load failure output from this session/attempt. No settings inspection, source/environment reads, commands, SDK, live log fetching, credential resolution, live checks, bootstrap or writes. Cached image failure is separate from runtime blocking status and clears on a new image attempt or session; it is not live evidence. Start here and use msb_config_get before explaining a narrow live diagnostic need and requesting one explicitly approved host bash command (finite positive timeout <=120 seconds, execution cwd (default: fixed session cwd), ready identity/configuration and existing host permission required). Never disable protection or enable fallback as a workaround. Optional format=text/json only. Both text and details bounded to 48 KiB; no overflow files. " + HOST_COMMAND_GUIDANCE,
     parameters,
     renderCall() { return new Text("Microsandbox diagnostics (passive, read-only)", 0, 0); },
     renderResult() { return new Text("Passive diagnostics; no live checks or changes. See tool content for results.", 0, 0); },

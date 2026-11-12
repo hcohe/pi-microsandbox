@@ -157,7 +157,9 @@ A save and runtime adoption are separate outcomes. Failed activation does not
 undo an already saved setting and never authorizes host fallback.
 
 `msb_diagnostics` provides passive, cached recovery information without commands,
-SDK loading, file/environment reads, logs, credentials, or VM startup. These three
+SDK loading, file/environment reads, live log fetching, credential resolution, or VM startup.
+It may return bounded image build/load failure output already sanitized and cached
+at failure time; unavailable redaction context withholds detail. These three
 exact management-tool names receive an exemption only when registration
 provenance resolves to this extension's actual entry module. An arbitrary
 `msb_*` tool or foreign registration doesn't inherit it. [Tool contract →](tools.md)

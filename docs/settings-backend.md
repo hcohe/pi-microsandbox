@@ -189,9 +189,13 @@ before retrying. Runtime is not mutated by the settings editor in that case.
 
 `msb_diagnostics` uses the native control facade's cached, sanitized diagnostic
 snapshot of allowlisted enums, booleans, counts and constrained host versions.
-Arbitrary error/configuration strings are withheld, even if they appear redactable.
+Arbitrary error/configuration strings are withheld. The exception is an immutable,
+bounded image preparation/build/load failure snapshot, sanitized at failure time
+before normalization/truncation and scoped to the latest attempt/current session.
+It is separate from runtime failure classification (an explicit build can fail
+while the runtime remains active). Unavailable startup tokens withhold detail.
 Its invocation does not call the settings inspector (which fingerprints
-sources/environment), load the SDK, resolve credentials, read logs, execute host
+sources/environment), load the SDK, resolve credentials, fetch live logs, execute host
 commands, or perform lifecycle operations. Runtime and desired/adopted information
 is explicitly last-known; missing redaction context produces a generic failure
 rather than raw error text. Output is bounded in both presentation and structured

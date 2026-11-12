@@ -15,7 +15,7 @@ import { registerMsbCommand, systemPromptNote } from "./command.ts";
 import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
-import { notifyCustomImageBoot } from "./image-boot-notice.ts";
+import { imagePreparationMessages, notifyImagePreparation, notifyImagePreparationFailure, notifyCustomImageBoot } from "./image-boot-notice.ts";
 import { registerConfigTools } from "./settings-tools.ts";
 import { registerDiagnosticsTool } from "./diagnostics-tools.ts";
 import { registerDockerfileTools } from "./dockerfile-tools.ts";
@@ -30,7 +30,7 @@ export function footerStatus(state: RuntimeState, visible: boolean): string | un
     case "off": return "Microsandbox disabled - Running on host";
     case "host-fallback": return "MSB host fallback";
     case "unavailable": return "Microsandbox Blocked";
-    case "booting": return state.pendingName ?? state.info?.name ?? "MSB starting";
+    case "booting": return state.imagePreparation ? imagePreparationMessages[state.imagePreparation] : state.pendingName ?? state.info?.name ?? "MSB starting";
     case "stopping": return "MSB stopping";
     default: return "MSB disabled";
   }
@@ -58,6 +58,12 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     env: process.env,
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
     entries: () => currentContext?.sessionManager.getEntries() ?? [],
+    onImagePreparation: (phase) => {
+      if (currentContext) notifyImagePreparation(currentContext, phase);
+    },
+    onImagePreparationFailure: (message) => {
+      if (currentContext) notifyImagePreparationFailure(currentContext, message);
+    },
     onCustomImageBoot: (source) => {
       if (currentContext) notifyCustomImageBoot(currentContext, source);
     },
@@ -143,6 +149,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   };
 
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
+    if (!ctx.hasUI) return;
     const text = footerStatus(state, integration.configRef.value.showFooter);
     if (text !== undefined) ensureCustomFooter(ctx);
     if (text === undefined) {
@@ -199,13 +206,13 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       if (generation !== uiGeneration || currentProvider.execution!.current() !== identity) return;
       lastConfig = integration.control.getEffectiveConfig();
       updateStatus(ctx, state);
-      for (const warning of lastConfig.warnings) ctx.ui.notify(`pi-microsandbox: ${warning}`, "warning");
+      if (ctx.hasUI) for (const warning of lastConfig.warnings) ctx.ui.notify(`pi-microsandbox: ${warning}`, "warning");
     } catch (error) {
       // Invalid config and native boot failures are fail-closed. Do not throw from
       // the lifecycle hook: Pi remains usable and routed tools remain blocked.
       if (generation !== uiGeneration) return;
       updateStatus(ctx, { status: "unavailable", info: null });
-      ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
+      if (ctx.hasUI) ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   });
 
@@ -224,7 +231,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     stopBootAnimation();
     stopObservation();
     customFooterInstalled = false;
-    ctx.ui.setStatus("pi-msb", undefined);
+    if (ctx.hasUI) ctx.ui.setStatus("pi-msb", undefined);
     await closeControlPanel();
     await integration.manager.shutdown();
     // Pi tears down extension-owned UI after this hook. Do not call
@@ -253,7 +260,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       if (generation !== uiGeneration || currentProvider.execution!.current() !== replacement) return;
     } catch (error) {
       if (generation !== uiGeneration) return;
-      ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
+      if (ctx.hasUI) ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
     if (generation === uiGeneration) updateStatus(ctx, integration.control.getState());
   });

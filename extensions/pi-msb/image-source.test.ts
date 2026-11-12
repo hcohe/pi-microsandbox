@@ -93,6 +93,7 @@ test("builder writable disk size participates in Dockerfile cache identity", asy
   };
   assert.equal(snapshot.identity, identity(BUILD_ROOT_DISK_MIB));
   assert.notEqual(snapshot.identity, identity());
+  assert.notEqual(snapshot.identity, identity(8192), "previous 8 GiB builder caches cannot prove the larger-disk build");
 });
 
 test("Dockerfile uses canonical exact cwd identity, never parent project policy", async (t) => {

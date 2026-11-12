@@ -1,5 +1,9 @@
 const REDACTED = "<redacted>";
-export type SettingsSanitizer = <T>(value: T, additionalPrivateSources?: unknown[], format?: "toml") => T;
+export interface SettingsSanitizer {
+  <T>(value: T, additionalPrivateSources?: unknown[], format?: "toml"): T;
+  /** Originating private-literal coverage only; absent metadata cannot prove safety. */
+  readonly hasPrivateLiterals?: boolean;
+}
 
 const normalizedKey = (key: string): string => key.replace(/_/g, "").toLowerCase();
 function sourceField(key: string): boolean {
@@ -27,7 +31,7 @@ function createSettingsSanitizerContext(privateSources: unknown[]): Set<string> 
 /** Mask literal credentials, including repetitions in public source descriptors, warnings, keys and paths. */
 export function createSettingsSanitizer(privateSources: unknown[]): SettingsSanitizer {
   const secrets = createSettingsSanitizerContext(privateSources);
-  return <T>(value: T, additionalPrivateSources: unknown[] = [], format?: "toml"): T => {
+  const sanitize = <T>(value: T, additionalPrivateSources: unknown[] = [], format?: "toml"): T => {
     const additional = createSettingsSanitizerContext(additionalPrivateSources);
     const literals = [...new Set([...secrets, ...additional])].sort((a, b) => b.length - a.length);
     const text = (input: string, preserveControls = false): string => {
@@ -53,4 +57,5 @@ export function createSettingsSanitizer(privateSources: unknown[]): SettingsSani
     }
     return visit(value);
   };
+  return Object.defineProperty(sanitize, "hasPrivateLiterals", { value: secrets.size > 0 });
 }

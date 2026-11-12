@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { buildSdk } from "../../test/image-build-fixture.ts";
-import { DEFAULT_CONFIG, hostConfigPaths } from "./config.ts";
+import { DEFAULT_CONFIG, hostConfigPaths, resolveConfig } from "./config.ts";
 import { createMsbIntegration } from "./control.ts";
 import { registerDockerfileTools } from "./dockerfile-tools.ts";
 import { selectedImageReference } from "./image-source.ts";
@@ -25,7 +25,10 @@ async function fixture(t: TestContext, options: { exportFailure?: "eof" | Error;
   const integration = createMsbIntegration({ ...input, sessionId: "phases", sdkLoader: async () => sdk,
     acquireOwnerLock: async () => ({ path: "test", release: async () => undefined }), locksPort: { tryAcquire: async () => null } });
   t.after(async () => { await integration.manager.shutdown(); await fs.rm(root, { recursive: true, force: true }); });
-  await integration.configureSession({ sessionId: "phases", cwd, projectTrusted: true });
+  // These tests exercise explicit phases; suppress the separate automatic boot path.
+  const initial = await resolveConfig(input);
+  initial.config.autoStart = false;
+  await integration.configureSession({ sessionId: "phases", cwd, projectTrusted: true, config: initial });
   if (options.sdkAcquire) { const build = integration.control.buildDockerfile!; integration.control.buildDockerfile = async (request) => { await options.sdkAcquire!(); return build(request); }; }
   const definitions = new Map<string, any>();
   registerDockerfileTools({ registerTool(tool: any) { definitions.set(tool.name, tool); } } as any, integration.control, integration.provider.execution);
@@ -46,9 +49,9 @@ function forbidBuildUI(ctx: any) {
 }
 const noRuntime = (calls: string[]) => assert.equal(calls.some((call) => /^(image-load:|create:|stop:|start:)/.test(call)), false, calls.join("\n"));
 
-test("write/build/load are independent; build cache is reusable; explicit load alone activates; edited startup source never rebuilds", async (t) => {
+test("write/build/load are independent; build cache is reusable; live reload of edited source never builds", async (t) => {
   const f = await fixture(t, { autoStart: true });
-  assert.equal(f.integration.control.getState().status, "unavailable");
+  assert.equal(f.integration.control.getState().status, "off");
   assert.equal(f.calls.includes("builder-create"), false);
   const previous = f.integration.control.getEffectiveConfig().config.image;
   const reload = f.integration.control.reload;
@@ -77,7 +80,7 @@ test("write/build/load are independent; build cache is reusable; explicit load a
   assert.equal(f.integration.control.getState().status, "active");
   assert.equal(f.calls.slice(boundary).some((call) => /^(image-load:|builder-|stop:|create:)/.test(call)), false);
   await f.integration.control.setEnabled(false); await f.integration.control.setEnabled(true);
-  assert.equal(f.integration.control.getState().status, "active");
+  assert.equal(f.integration.control.getState().status, "unavailable", "next actual boot must prepare edited source, not boot stale selection");
   assert.equal(f.integration.control.getEffectiveConfig().config.image, selected);
 });
 

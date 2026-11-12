@@ -134,7 +134,8 @@ Dockerfile supplies its image. Project overrides Global; Session `image` overrid
 all. A Project Dockerfile starting `FROM GLOBAL` explicitly extends the current
 Global Dockerfile, regardless of Global `image` intent; each uses its own context.
 Missing/unsafe Global sources or recursive Global inheritance fail closed.
-This does not change scope selection or trigger implicit build/load. See
+This does not change scope selection. Current inputs are prepared at actual
+runtime boot, not source save or passive inspection. See
 [Global inheritance](images.md#extend-the-global-dockerfile).
 Dockerfile/context Project saves use the same shared main-root record as config
 from main, linked and nested cwd, with one exact-target source review.
@@ -161,12 +162,17 @@ inherited. `msb_dockerfile_write` persists sources only; explicit
 `msb_dockerfile_build` autonomously exports a reusable verified artifact without an
 approval dialog or UI (including headless/print). Write and load retain separate
 default-No approval; explicit `msb_dockerfile_load` imports/selects the chosen
-artifact and requests guarded reload. Source edits
-never rebuild on startup/reload: the last explicitly loaded image is reused, or
-activation fails closed if none is usable. Failed build leaves sources and the
-previous image intact; failed load retains the artifact for retry. Unchanged
-sources reuse a verified export cache only through explicit build. Built-image
-runtime failures block even with host fallback configured. Inspection never builds
+artifact and requests guarded reload. Actual startup/restart automatically checks
+the current Dockerfile, context and `FROM GLOBAL` identity against native MSB
+build/selected references. Matching native digests reuse the image with no build
+or import; changed/missing selections are built and imported before boot without
+separate load approval. Source saves and no-op/live-settings reloads remain
+nonbuilding. Deleted Dockerfiles may retain their native selection, but unsafe
+sources or missing required dependencies fail closed. Failed build leaves sources
+and the previous image intact; failed explicit load retains the artifact for retry.
+Fresh integrations conservatively recreate persisted VMs whose actual image digest
+cannot be proved, even when the native image is reused. Built-image preparation and
+runtime failures block stale-image boot and host fallback. Inspection never builds
 or creates cache directories. Input bounds, trust rules, disk requirements,
 refresh behavior and the opt-in roundtrip are documented in
 [Host-owned Dockerfile](images.md#host-owned-dockerfile-no-host-docker).

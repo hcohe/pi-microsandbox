@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { footerStatus, styleFooterStatus } from "./index.ts";
-import type { RuntimeState } from "./types.ts";
+import { imagePreparationMessages } from "./image-boot-notice.ts";
+import type { ImagePreparationPhase, RuntimeState } from "./types.ts";
 
 const active: RuntimeState = {
   status: "active",
@@ -325,7 +326,7 @@ test("headless sessions never start footer polling or animation timers", async (
     let session = 'headless';
     const ctx = {cwd: process.cwd(), mode: 'print', hasUI: false, isProjectTrusted: () => true,
       sessionManager: {getSessionId: () => session, getEntries: () => []},
-      ui: {theme: {fg: (_role, text) => text}, setFooter() {}, setStatus() {}, notify() {}}};
+      ui: {theme: {fg() { throw Error("headless UI"); }}, setFooter() { throw Error("headless UI"); }, setStatus() { throw Error("headless UI"); }, notify() { throw Error("headless UI"); }}};
     const lifecycle = (event) => hooks.get(event).at(-1)({}, ctx);
     await lifecycle('session_start');
     assert.deepEqual(intervals, [], 'headless boot and terminal state must not start UI timers');
@@ -536,4 +537,17 @@ test("selected boot names reach the footer through deferred lock, create, prepar
     encoding: "utf8", stdio: "pipe",
   });
   assert.match(output, /PASS pending-footer/);
+});
+
+
+test("custom image preparation footer names each phase, respects visibility and keeps the boot animation", () => {
+  for (const phase of Object.keys(imagePreparationMessages) as ImagePreparationPhase[]) {
+    const state: RuntimeState = { status: "booting", info: null, pendingName: "vm-name", imagePreparation: phase };
+    assert.equal(footerStatus(state, true), imagePreparationMessages[phase]);
+    assert.equal(footerStatus(state, false), undefined);
+    const colors: string[] = [];
+    const theme = { fg: (role: string, text: string) => { if (text === "●") colors.push(role); return text; } };
+    for (const frame of [0, 1]) styleFooterStatus(theme, footerStatus(state, true)!, state, frame);
+    assert.deepEqual(colors, ["warning", "dim"]);
+  }
 });

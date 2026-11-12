@@ -8,7 +8,7 @@ import { createMsbIntegration } from "./control.ts";
 import { BUILD_FAILURE, buildDockerfileImage, loadDockerfileImage, ImagePhaseError } from "./image-build.ts";
 import { pendingArtifacts, readArtifact, readLoadedImage, PendingArtifacts } from "./image-artifact.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
-import { buildImageReference, selectedImageReference, nativeBuildPlatform, snapshotDockerfile } from "./image-source.ts";
+import { BUILD_ROOT_DISK_MIB, buildImageReference, selectedImageReference, nativeBuildPlatform, snapshotDockerfile } from "./image-source.ts";
 
 async function fixture(t: TestContext) {
   const root = await fs.mkdtemp("/tmp/pi-msb-builder-test-");
@@ -41,9 +41,11 @@ test("builder exports a reusable verified artifact without import or runtime cal
   const built = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
   assert.equal(built.cacheHit, false);
   assert.ok(calls.includes("builder-cpus:2")); assert.ok(calls.includes("builder-memory:4096"));
-  assert.ok(calls.includes("builder-rootDisk:8192"));
+  const diskSize = Number(calls.find((call) => call.startsWith("builder-rootDisk:"))?.split(":")[1]);
+  assert.equal(diskSize, BUILD_ROOT_DISK_MIB);
+  assert.ok(Number.isSafeInteger(diskSize) && diskSize >= 32 * 1024, "finite multi-stage VFS disk allowance");
   assert.equal(calls.find((call) => call.startsWith("builder-image:")), `builder-image:${DEFAULT_CONFIG.image}`);
-  assert.ok(calls.findIndex((call) => call.startsWith("builder-image:")) < calls.indexOf("builder-rootDisk:8192"));
+  assert.ok(calls.findIndex((call) => call.startsWith("builder-image:")) < calls.indexOf(`builder-rootDisk:${BUILD_ROOT_DISK_MIB}`));
   assert.ok(calls.includes("builder-security:default"));
   assert.ok(calls.includes("builder-user:root"));
   assert.ok(calls.includes("builder-detached:false"));
@@ -557,7 +559,9 @@ test("approved native cache export can rewrite config/digest, requires new exact
   const original = await loadDockerfileImage({ sdk, source: f.source, artifactId: first.artifact.artifactId, expectedSelectionVersion: "missing" });
   await assert.rejects(readArtifact(f.source, first.artifact.artifactId), /unavailable/);
   const imports = calls.filter((call) => call.startsWith("image-load:")).length;
-  const cached = await buildDockerfileImage({ sdk, source: f.source, acquireLock });
+  const phases: string[] = [];
+  const cached = await buildDockerfileImage({ sdk, source: f.source, acquireLock, onProgress: (phase) => phases.push(phase) });
+  assert.deepEqual(phases, ["exporting"], "native cache export must not claim rebuilding");
   assert.equal(cached.cacheHit, true);
   assert.notEqual(cached.artifact.archiveDigest, first.artifact.archiveDigest);
   assert.notEqual(cached.artifact.configDigest, first.artifact.configDigest);

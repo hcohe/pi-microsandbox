@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { boundDiagnosticsReport, MAX_DIAGNOSTICS_BYTES, registerDiagnosticsTool } from "./diagnostics-tools.ts";
+import { imagePreparationFailureSnapshot } from "./image-boot-notice.ts";
+import { ImagePhaseError } from "./image-build.ts";
+import { createSettingsSanitizer } from "./settings-redaction.ts";
 import type { MsbControl } from "./types.ts";
 
 function tool(control: Partial<MsbControl>) {
@@ -59,4 +62,50 @@ test("throwing metadata getters are contained without leaking raw error", async 
   const result = await d.execute("id", {});
   assert.equal(result.details.outcome, "unavailable");
   assert.ok(!JSON.stringify(result).includes("PRIVATE"));
+});
+
+
+test("only immutable failure-time sanitized snapshots survive double bounding; hostile adapter fields stay withheld", async () => {
+  const secret = " whitespace-private-token\n";
+  const hostile = `${secret}\x1b\u202e\u2066\u2028\u2029\ud800`;
+  const error = new ImagePhaseError("build", hostile, [{
+    phase: "build", command: "docker", args: [hostile], stdout: `${hostile} stdout-tail`,
+    stderr: `${hostile} stderr-tail`, exitCode: 37, truncated: false,
+  }]);
+  const snapshot = imagePreparationFailureSnapshot(error, createSettingsSanitizer([{ textValue: secret }]), "build");
+  assert.ok(Object.isFrozen(snapshot));
+  // Mutation of the original errors/logs must not affect cached evidence.
+  error.logs[0]!.stderr = "MUTATED_PRIVATE";
+  for (const failure of [{ ...snapshot, sanitized: true, message: hostile }, { sanitized: true, stderrTail: hostile }]) {
+    const output = await tool({ async getDiagnostics() { return { outcome: "diagnosed", imagePreparationFailure: failure }; } }).execute("diag", {});
+    assert.equal(output.details.imagePreparationFailure, undefined);
+    assert.doesNotMatch(JSON.stringify(output), /whitespace-private-token/);
+  }
+  const report = { outcome: "diagnosed", imagePreparationFailure: snapshot };
+  assert.deepEqual(boundDiagnosticsReport(boundDiagnosticsReport(report)), boundDiagnosticsReport(report));
+  for (const format of ["text", "json"]) {
+    const output = await tool({ async getDiagnostics() { return boundDiagnosticsReport(report); } }).execute("diag", { format });
+    assert.equal(output.details.imagePreparationFailure.exitCode, 37);
+    assert.match(output.details.imagePreparationFailure.stderrTail, /<redacted>.*stderr-tail/);
+    assert.match(output.details.imagePreparationFailure.stdoutTail, /<redacted>.*stdout-tail/);
+    assert.doesNotMatch(JSON.stringify(output), /whitespace-private-token|MUTATED_PRIVATE/);
+    assert.doesNotMatch(JSON.stringify(output.details), /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u);
+  }
+});
+
+test("maximal Unicode and JSON-escaped cached failure remains bounded in both representations", async () => {
+  for (const character of ["😀", '"', "\\", "\uFFFF"]) {
+    const large = character.repeat(100_000);
+    const error = new ImagePhaseError("export", large, [{
+      phase: "export", command: large, args: [large], stdout: large, stderr: large, truncated: false, exitCode: 42,
+    }]);
+    const snapshot = imagePreparationFailureSnapshot(error, (text) => text);
+    for (const format of ["text", "json"]) {
+      const output = await tool({ async getDiagnostics() { return { outcome: "diagnosed", imagePreparationFailure: snapshot }; } }).execute("diag", { format });
+      assert.equal(output.details.outcome, "diagnosed");
+      assert.equal(output.details.imagePreparationFailure.phase, "export");
+      assert.ok(Buffer.byteLength(output.content[0].text) <= MAX_DIAGNOSTICS_BYTES);
+      assert.ok(Buffer.byteLength(JSON.stringify(output.details)) <= MAX_DIAGNOSTICS_BYTES);
+    }
+  }
 });

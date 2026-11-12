@@ -5,16 +5,16 @@ import { join } from "node:path";
 import type { MicrosandboxModule } from "./control.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
-import { BUILD_ROOT_DISK_MIB, buildImageReference, selectedImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
+import { BUILD_ROOT_DISK_MIB, buildImageReference, discoverDockerfile, selectedImageReference, snapshotDockerfile, type DockerfileSource } from "./image-source.ts";
 import { lockPathFor, tryAcquireOrphanLock } from "./locks.ts";
 import { cachedImage, copyArtifactFile, pendingArtifacts, PendingArtifacts, readArtifactFile, selectionVersion, type BuildArtifact } from "./image-artifact.ts";
 import { buildLockDirectory } from "./image-build-lock.ts";
 import { causalErrorDetails, createSdkTransport, SandboxTransportError, type StreamDiagnostics } from "./transport.ts";
-import type { LockHandle, SandboxTransport } from "./types.ts";
+import type { ImagePreparationPhase, LockHandle, SandboxTransport } from "./types.ts";
 
 const BUILD_TIMEOUT_MS = 20 * 60_000;
 const PATH_ENV = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-export const BUILD_FAILURE = "No verified explicitly loaded Dockerfile image is available. Use msb_dockerfile_build then msb_dockerfile_load; no implicit build/import or host fallback was attempted.";
+export const BUILD_FAILURE = "The current Dockerfile image could not be prepared or verified. Sandbox activation is blocked; no stale image or host fallback was used. Inspect the source or use msb_dockerfile_build then msb_dockerfile_load for diagnostics.";
 export interface BuildDiagnostics {
   sdk: "microsandbox@0.7.14";
   failureKind: "commandNonzero" | StreamDiagnostics["failureKind"] | "operation";
@@ -48,6 +48,7 @@ export interface ImageBuildOptions {
   source: DockerfileSource;
   signal?: AbortSignal;
   guard?: () => Promise<void>;
+  onProgress?: (phase: ImagePreparationPhase) => void;
   /** Test seam; production uses the bundled cross-process flock. */
   acquireLock?: (directory: string, identity: string) => Promise<LockHandle | null>;
 }
@@ -189,7 +190,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     await validateLocation();
     const artifacts = options.artifacts ?? pendingArtifacts;
     const cached = await artifacts.current(source);
-    if (cached) { await guard(); await cached.assertUnchanged(); check(); return { artifact: cached.artifact, cacheHit: true, logs }; }
+    if (cached) { await guard(); await cached.assertUnchanged(); check(); options.onProgress?.("using-cache"); return { artifact: cached.artifact, cacheHit: true, logs }; }
     const native = await cachedImage(sdk, reference, source.platform);
     if (native) {
       const alias = await fs.mkdtemp("/tmp/pi-msb-export-");
@@ -202,6 +203,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
       try {
         path = await fs.realpath(alias); await checkExportDirectory();
         await guard(); check();
+        options.onProgress?.("exporting");
         await sdk.Image!.save(reference, { outputPath: join(path, "image.tar"), format: "docker" });
         if ((await cachedImage(sdk, reference, source.platform))?.manifestDigest !== native.manifestDigest) throw new Error("Native build reference changed during export");
         const artifact = await artifacts.publish(source, join(path, "image.tar"), async () => { check(); await guard();
@@ -213,7 +215,8 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
         await fs.rm(path, { recursive: true });
       }
     }
-    check();
+    check(); await guard();
+    options.onProgress?.("building");
     // Keep staging in /tmp, but never pass its platform-specific aliases to
     // no-follow SDK binds (macOS /tmp is a symlink to /private/tmp).
     temporaryAlias = await fs.mkdtemp("/tmp/pi-msb-build-");
@@ -299,6 +302,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     if (snapshot.global) await run("/usr/local/bin/docker", [...docker, "buildx", "build", "--load", "--platform", source.platform, "--tag", globalReference, "--file", "/pi-msb-global-input/Dockerfile", "/pi-msb-global-input"], BUILD_TIMEOUT_MS);
     await run("/usr/local/bin/docker", [...docker, "buildx", "build", "--load", "--platform", source.platform, "--tag", reference, "--file", "/pi-msb-input/Dockerfile", "/pi-msb-input"], BUILD_TIMEOUT_MS);
     phase = "export";
+    options.onProgress?.("exporting");
     await run("/usr/local/bin/docker", [...docker, "save", "--output", "/pi-msb-output/image.tar", reference], BUILD_TIMEOUT_MS);
     // Stop guest access to the output before inspecting or importing its archive.
     await cleanupBuilder();
@@ -364,7 +368,7 @@ export interface ImageLoadOptions extends ImageBuildOptions {
   onSelectionPublished?: (assertSelected: () => Promise<void>) => void;
 }
 
-/** Explicit approved import only. Native aliases are additive and nontransactional. */
+/** Import for approved explicit load or actual runtime boot. Native aliases are additive and nontransactional. */
 export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ artifact: BuildArtifact; digest: string; assertSelected(): Promise<void> }> {
   let phase = "validation";
   let imported: boolean | "unknown" = false;
@@ -411,11 +415,13 @@ export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ 
       if (existingBuild && existingSelected && existingBuild.manifestDigest === existingSelected.manifestDigest
         && await inspectConfig(reference) === candidate.artifact.configDigest && await inspectConfig(selectedRef) === candidate.artifact.configDigest) {
         await guard(); await candidate.assertUnchanged();
+        options.onProgress?.("using-cache");
         digest = existingBuild.manifestDigest!;
       } else {
         await guard(); await candidate.assertUnchanged();
         if ((await readArtifactFile(archive)).version !== data.version) throw new Error("Import copy changed");
         phase = "import"; imported = "unknown"; selected = "unknown";
+        options.onProgress?.("importing");
         const handles = await sdk.Image.load(archive, { tag: selectedRef });
         // Image.load imports BOTH the sanitized RepoTag and the extra selected tag.
         const build = handles.find((image) => image.reference === reference);
@@ -455,10 +461,71 @@ export async function loadDockerfileImage(options: ImageLoadOptions): Promise<{ 
   } catch (error) { throw new ImagePhaseError(phase, error instanceof Error ? error.message : String(error), [], imported, selected); }
 }
 
-/** Runtime may only verify a previously explicitly loaded selection. Never build or import. */
+/** Verify the retained selection without reading source or building (including live/no-op reload). */
 export async function verifyDockerfileImage(options: ImageBuildOptions): Promise<void> {
   const { sdk, source } = options;
   if (!source.loadedDigest || !sdk.Image || sdk.defaultBackendKind?.() !== "local") throw new Error(BUILD_FAILURE);
   const image = await cachedImage(sdk, selectedImageReference(source), source.platform);
   if (image?.manifestDigest !== source.loadedDigest) throw new Error(BUILD_FAILURE);
+}
+
+/** Actual boot only: native content-keyed and selected tags must agree on the current source. */
+export async function ensureDockerfileImage(options: ImageBuildOptions & { previousSourceIdentity?: string }): Promise<{ source: DockerfileSource; assertCurrent(): Promise<void> }> {
+  const { sdk } = options;
+  const guard = async () => { options.signal?.throwIfAborted(); await options.guard?.(); options.signal?.throwIfAborted(); };
+  const source = { ...options.source };
+  const exists = async () => {
+    if (await fs.realpath(source.agentRoot) !== source.agentRoot || await fs.realpath(source.agentAlias) !== source.agentRoot) throw new Error("Agent directory identity changed");
+    return discoverDockerfile(source.agentRoot, source.dockerfile);
+  };
+  await guard();
+  options.onProgress?.("checking-source");
+  const present = await exists();
+  if (present) {
+    const snapshot = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+    const previousIdentity = options.previousSourceIdentity ?? source.identity;
+    if (previousIdentity !== "unloaded" && previousIdentity !== snapshot.identity) options.onProgress?.("source-changed");
+    source.identity = snapshot.identity;
+    source.platform = snapshot.platform;
+  }
+  const assertSource = async () => {
+    await guard();
+    if (await exists() !== present) throw new Error("Runtime build source changed");
+    if (present) {
+      const snapshot = await snapshotDockerfile(source, DEFAULT_CONFIG.image);
+      if (snapshot.identity !== source.identity || snapshot.platform !== source.platform) throw new Error("Runtime build source changed");
+    }
+    await guard();
+  };
+  await assertSource();
+  if (!present) {
+    // Only a genuinely absent Dockerfile retains the old selection; unsafe or invalid inputs fail closed.
+    const assertCurrent = async () => { await assertSource(); await verifyDockerfileImage({ ...options, source }); await guard(); };
+    await assertCurrent();
+    options.onProgress?.("using-cache");
+    return { source, assertCurrent };
+  }
+  const expectedSelectionVersion = await selectionVersion(sdk, source);
+  const native = await cachedImage(sdk, buildImageReference(source), source.platform);
+  await assertSource();
+  if (native && native.manifestDigest === expectedSelectionVersion) {
+    source.loadedDigest = native.manifestDigest;
+    const assertCurrent = async () => {
+      await assertSource();
+      if ((await cachedImage(sdk, buildImageReference(source), source.platform))?.manifestDigest !== source.loadedDigest) throw new Error("Native build image changed");
+      await verifyDockerfileImage({ ...options, source });
+      await guard();
+    };
+    await assertCurrent();
+    options.onProgress?.("using-cache");
+    return { source, assertCurrent };
+  }
+  if (!native) options.onProgress?.("image-missing");
+  const built = await buildDockerfileImage({ ...options, source, guard: assertSource });
+  await assertSource();
+  const loaded = await loadDockerfileImage({ ...options, source, guard: assertSource, artifactId: built.artifact.artifactId, expectedSelectionVersion });
+  source.loadedDigest = loaded.digest;
+  const assertCurrent = async () => { await assertSource(); await loaded.assertSelected(); await guard(); };
+  await assertCurrent();
+  return { source, assertCurrent };
 }

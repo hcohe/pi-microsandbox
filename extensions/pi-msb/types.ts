@@ -367,11 +367,15 @@ export interface SandboxInfo {
   createdAt: number;
   docker: DockerCapabilityStatus;
 }
+export type ImagePreparationPhase = "checking-source" | "source-changed" | "image-missing" | "using-cache" | "building" | "exporting" | "importing" | "booting";
+
 export interface RuntimeState {
   status: RuntimeStatus;
   info: SandboxInfo | null;
   /** Display-only selected boot name; not proof of ownership or a ready VM. */
   pendingName?: string;
+  /** Display-only progress for actual custom-image activation. */
+  imagePreparation?: ImagePreparationPhase;
   reason?: string;
   /** Display-only liveness; does not change routing or wake eligibility. */
   observation?: "asleep" | "unknown";
@@ -431,8 +435,9 @@ export interface MsbControl {
   /** Fixed-scope owned Dockerfile backend; no host-tool routing or arbitrary paths. */
   openDockerfile?(scope: import("./dockerfile-storage.ts").DockerfileScope, ...retiredDestinations: never[]): Promise<import("./dockerfile-storage.ts").DockerfileDraft | undefined>;
   /** Passive allowlisted snapshot from held state only. No settings.inspect,
-   * source/environment reads, commands, SDK, logs, lifecycle or writes.
-   * Cached desired/adoption is last-known, not live; raw errors are withheld.
+   * source/environment reads, commands, SDK, live log fetching, lifecycle or writes.
+   * May include a held, bounded, failure-time sanitized image build/load snapshot.
+   * Cached desired/adoption/failure evidence is last-known, not live; raw errors are withheld.
    * Optional for adapters: callers must not fall back to other methods. */
   getDiagnostics?(): Promise<Record<string, unknown>>;
   getAgentRuntimePolicy?(): AgentRuntimePolicySnapshot | undefined;

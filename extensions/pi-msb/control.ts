@@ -1,8 +1,9 @@
+import { formatImagePreparationFailure, imagePreparationFailureSnapshot, type ImagePreparationFailureSnapshot } from "./image-boot-notice.ts";
 import { PendingArtifacts, selectionVersion } from "./image-artifact.ts";
 import { homedir } from "node:os";
 import type { DockerfileSource } from "./image-source.ts";
 import { openDockerfile } from "./dockerfile-storage.ts";
-import { BUILD_FAILURE, buildDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
+import { BUILD_FAILURE, buildDockerfileImage, ensureDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
@@ -41,6 +42,7 @@ import {
   type RuntimeExecution,
   type RuntimePreparation,
   type RuntimeState,
+  type ImagePreparationPhase,
   type RuntimePolicySnapshot,
   type SessionExecutionIdentity,
   type ToolOperations,
@@ -83,6 +85,8 @@ export interface MsbControlOptions {
   entries?: () => readonly unknown[];
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
   onState?: (state: RuntimeState) => void;
+  onImagePreparation?: (phase: ImagePreparationPhase) => void;
+  onImagePreparationFailure?: (message: string) => void;
   onCustomImageBoot?: (source: DockerfileSource) => void;
 }
 
@@ -273,12 +277,38 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   const settingsInput = () => ({ cwd, repoRoot: workspace?.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env });
   const settings = new SettingsEditor(settingsInput(), sessionId);
-  // Diagnostics never resolve configuration or inspect settings. Only this small,
-  // non-string projection is retained on the existing resolution paths. Raw
-  // parser/SDK errors are deliberately withheld: even a known sanitizer cannot
+  // Diagnostics never resolve configuration or inspect settings. Configuration
+  // keeps only a non-string projection; image failures separately retain bounded,
+  // failure-time sanitized snapshots. Raw parser/SDK errors are withheld:
+  // even a known sanitizer cannot
   // prove coverage for rejected syntax or unobserved reconnect credentials.
   let diagnosticDesired: Record<string, unknown> | undefined;
   let diagnosticFailure: DiagnosticFailureCode = "unknown";
+  let diagnosticImageFailure: { identity: SessionExecutionIdentity; snapshot: ImagePreparationFailureSnapshot } | undefined;
+  let imageFailureAttempt: object = {};
+  const beginImageFailureAttempt = () => {
+    diagnosticImageFailure = undefined;
+    return imageFailureAttempt = {};
+  };
+  const safeImageFailure = (error: unknown, resolution: ResolvedConfig, config: Config,
+    operation: ImagePreparationFailureSnapshot["operation"],
+    sanitize = resolutionSanitizers.get(resolution) ?? createSettingsSanitizer([config])) => {
+    const sensitive = new Set(logSecretRedactions);
+    let unavailableTokens = config.secrets.some((secret) => secret.hostCmd !== undefined && !resolvedCommandSources.has(secret.hostCmd));
+    try {
+      for (const secret of config.secrets) if (secret.hostEnv) {
+        const value = (options.env ?? process.env)[secret.hostEnv];
+        if (value) sensitive.add(value);
+        else unavailableTokens = true;
+      }
+    } catch { unavailableTokens = true; }
+    return imagePreparationFailureSnapshot(error, (text) => unavailableTokens
+      ? "Diagnostic detail withheld: startup secret tokens unavailable for redaction."
+      : sanitize(redactedError(text, config, sensitive).message), operation, {
+        allowUpstreamTruncatedOutput: !unavailableTokens && sanitize.hasPrivateLiterals === false
+          && config.secrets.length === 0 && sensitive.size === 0,
+      });
+  };
   let capturingBootFailure = false;
   const cacheDiagnosticConfig = (config: Config): void => {
     diagnosticDesired = {
@@ -599,10 +629,13 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   };
   let buildAbort = new AbortController();
   let activationGeneration = 0;
+  let imagePreparation: { generation: number; identity: SessionExecutionIdentity; phase: ImagePreparationPhase } | undefined;
   let bootedDockerfileDigest: string | undefined;
+  let bootedDockerfileIdentity: string | undefined;
   const invalidateActivation = () => {
     capturingBootFailure = false;
     activationGeneration++;
+    imagePreparation = undefined;
     buildAbort.abort();
     buildAbort = new AbortController();
   };
@@ -610,9 +643,31 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     invalidateActivation();
     const generation = activationGeneration;
     const identity = execution.context.current();
-    const source = resolved.imageBuild;
+    const resolution = resolved;
+    const source = resolution.imageBuild;
+    let failureAttempt = imageFailureAttempt;
+    const selectedWorkspace = workspace;
     const signal = AbortSignal.any([buildAbort.signal, ...(approval?.signal ? [approval.signal] : [])]);
     const current = () => generation === activationGeneration && execution.context.current() === identity && !signal.aborted;
+    const progress = (phase: ImagePreparationPhase) => {
+      if (!current() || imagePreparation?.phase === phase && imagePreparation.generation === generation) return;
+      imagePreparation = { generation, identity, phase };
+      notifyState(visibleState());
+      options.onImagePreparation?.(phase);
+    };
+    const clearPreparation = () => {
+      if (imagePreparation?.generation !== generation) return;
+      imagePreparation = undefined;
+      if (execution.context.current() === identity) notifyState(visibleState());
+    };
+    const cancelled = () => {
+      if (generation === activationGeneration && execution.context.current() === identity) {
+        failureState = { status: "unavailable", info: null, reason: "Custom image activation cancelled; no host fallback was attempted." };
+        for (const [token, owner] of displayActivities) if (owner === identity) displayActivities.delete(token);
+        clearPreparation();
+      }
+    };
+    signal.addEventListener("abort", cancelled, { once: true });
     const approvalBound = !!(approval?.guard || approval?.signal);
     const assertApproval = async () => {
       approval?.signal?.throwIfAborted();
@@ -621,22 +676,50 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       approval?.signal?.throwIfAborted();
       if (approvalBound && !current()) throw new Error("Runtime activation superseded");
     };
+    const assertActivation = async () => {
+      await assertApproval();
+      if (!current() || resolved !== resolution || workspace !== selectedWorkspace) throw new Error("Runtime activation superseded");
+      await assertWorkspaceRootCurrent(request.workspace);
+      if (!current() || resolved !== resolution || workspace !== selectedWorkspace) throw new Error("Runtime activation superseded");
+    };
+    let assertImage: (() => Promise<void>) | undefined;
+    const assertRuntime = async () => { await assertActivation(); await assertImage?.(); await assertActivation(); };
     managerIdentity = identity;
     requestExecutions.set(request, managerIdentity);
     diagnosticFailure = "runtime_start_failed";
     capturingBootFailure = true;
     try {
       if (source && manager.isActive() && source.loadedDigest !== bootedDockerfileDigest) request.forceRecreate = true;
+      // Live verification/handoff is not a new preparation attempt and must retain
+      // completed explicit failures. Actual preparation starts its own diagnostic epoch.
+      if (source && (!manager.isActive() || request.forceRecreate)) failureAttempt = beginImageFailureAttempt();
       if (source) {
         request.blockHostFallback = true;
         try {
           if (request.config.image !== resolved.config.image || request.config.pullPolicy !== "never") throw new Error(BUILD_FAILURE);
           const msb = await sdk();
           if (!current()) return visibleState();
-          await verifyDockerfileImage({ sdk: msb, source, signal });
-        } catch {
+          if (!manager.isActive() || request.forceRecreate) {
+            const prepared = await withArtifactOperation((operationSignal) => ensureDockerfileImage({ sdk: msb, artifacts, source, signal: operationSignal, guard: assertActivation, onProgress: progress, previousSourceIdentity: bootedDockerfileIdentity }), signal);
+            await assertActivation();
+            Object.assign(source, prepared.source);
+            assertImage = prepared.assertCurrent;
+            // Stable aliases do not prove the image of a previously persisted VM.
+            // Only this integration's successful boot establishes runtime digest identity.
+            if (!bootedDockerfileDigest || source.loadedDigest !== bootedDockerfileDigest) request.forceRecreate = true;
+          } else {
+            assertImage = () => verifyDockerfileImage({ sdk: msb, source, signal });
+          }
+          await assertRuntime();
+        } catch (error) {
           await assertApproval();
           if (!current()) return visibleState();
+          const snapshot = safeImageFailure(error, resolution, request.config, "activation");
+          if (current() && imageFailureAttempt === failureAttempt && snapshot.failureKind !== "cancelled") {
+            beginImageFailureAttempt();
+            diagnosticImageFailure = { identity, snapshot };
+            options.onImagePreparationFailure?.(formatImagePreparationFailure(snapshot));
+          }
           // This path deliberately bypasses manager fallback, even if host fallback was configured.
           return { status: "unavailable", info: null, reason: BUILD_FAILURE } as RuntimeState;
         }
@@ -647,23 +730,36 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       // Keep recovery's reviewed runtime status stable until approval is revalidated.
       failureState = null;
       if (source) requestBootNotices.set(request, () => {
-        if (current()) options.onCustomImageBoot?.(source);
+        if (current()) {
+          progress("booting");
+          options.onCustomImageBoot?.(source);
+        }
       });
-      const result = await manager.boot(request, approvalBound ? assertApproval : undefined);
+      const result = await manager.boot(request, source ? assertRuntime : approvalBound ? assertApproval : undefined);
       if (approvalBound) await assertApproval();
       if (!current()) return visibleState();
       if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
-      if (result.status === "active") bootedDockerfileDigest = source?.loadedDigest;
+      if (result.status === "active") {
+        bootedDockerfileDigest = source?.loadedDigest;
+        bootedDockerfileIdentity = source?.identity;
+      }
       return result;
     } catch (error) {
       if (approvalBound && generation === activationGeneration && execution.context.current() === identity && !manager.isActive()) {
         failureState = { status: "unavailable", info: null, reason: "Approved runtime activation was cancelled or superseded; no host fallback was attempted." };
       }
       throw error;
-    } finally { if (generation === activationGeneration) capturingBootFailure = false; }
+    } finally {
+      signal.removeEventListener("abort", cancelled);
+      clearPreparation();
+      if (generation === activationGeneration) capturingBootFailure = false;
+    }
   };
   const displayActivities = new Map<symbol, SessionExecutionIdentity>();
   const displayState = (state = visibleState()): RuntimeState => {
+    if (imagePreparation?.identity === execution.context.current() && imagePreparation.generation === activationGeneration) {
+      return { status: "booting", info: null, pendingName: state.pendingName, imagePreparation: imagePreparation.phase };
+    }
     if ([...displayActivities.values()].includes(execution.context.current())) {
       return { status: "booting", info: null, ...(state.status === "booting" && state.pendingName ? { pendingName: state.pendingName } : {}) };
     }
@@ -680,6 +776,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     };
   };
   const beginDisplayActivity = (): (() => void) => {
+    // A newly approved enable/reload supersedes any in-flight image preparation.
+    if (imagePreparation) invalidateActivation();
     hostExecutionToken = {};
     const token = Symbol();
     const identity = execution.context.current();
@@ -710,7 +808,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   const provider: ToolOpsProvider = {
     execution: execution.context,
     isActive: () => execution.context.isReady() && visibleState().status === "active" && manager.isActive(),
-    getState: visibleState,
+    getState: () => imagePreparation?.identity === execution.context.current() ? displayState() : visibleState(),
     hostExecutionToken: () => execution.context.isReady() && settingsReady && configReady && workspace
       && ![...displayActivities.values(), ...pendingHostChanges.values()].includes(execution.context.current()) ? hostExecutionToken : undefined,
     validateHostRecoveryRoot: async (identity, token) => {
@@ -844,6 +942,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     const previous = execution.context.current();
     invalidateActivation();
     const identity = execution.begin(setup.sessionId, setup.cwd);
+    beginImageFailureAttempt();
     displayActivities.clear();
     failureState = { status: "booting", info: null };
     if (previous.sessionId !== setup.sessionId || previous.cwd !== setup.cwd) settings.endSession();
@@ -865,6 +964,24 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     });
     sessionSetup = result.catch(() => undefined);
     return result;
+  };
+
+  const captureImageOperation = async <T>(operation: "build" | "load", signal: AbortSignal | undefined,
+    run: (signal: AbortSignal, sdk: MicrosandboxModule) => Promise<T>): Promise<T> => {
+    const identity = execution.context.current();
+    const attempt = beginImageFailureAttempt();
+    const resolution = resolved, config = configSnapshot();
+    const sanitize = requestSanitizers.get(config)!;
+    return withArtifactOperation(async (operationSignal) => {
+      try { return await run(operationSignal, await sdk()); }
+      catch (error) {
+        if (identity === execution.context.current() && attempt === imageFailureAttempt && !operationSignal.aborted) {
+          const snapshot = safeImageFailure(error, resolution, config, operation, sanitize);
+          if (snapshot.failureKind !== "cancelled") diagnosticImageFailure = { identity, snapshot };
+        }
+        throw error;
+      }
+    }, signal);
   };
 
   const control: MsbControl = {
@@ -889,8 +1006,12 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     async readDockerfileArtifact(source, id) { return artifacts.read(source, id); },
     async dockerfileSelectionVersion(source) { return selectionVersion(await sdk(), source); },
-    async buildDockerfile(options) { return withArtifactOperation(async (signal) => buildDockerfileImage({ ...options, signal, artifacts, sdk: await sdk() }), options.signal); },
-    async loadDockerfile(options) { return withArtifactOperation(async (signal) => loadDockerfileImage({ ...options, signal, artifacts, sdk: await sdk() }), options.signal); },
+    async buildDockerfile(options) {
+      return captureImageOperation("build", options.signal, (signal, sdk) => buildDockerfileImage({ ...options, signal, artifacts, sdk }));
+    },
+    async loadDockerfile(options) {
+      return captureImageOperation("load", options.signal, (signal, sdk) => loadDockerfileImage({ ...options, signal, artifacts, sdk }));
+    },
     async getDiagnostics() {
       const state = visibleState();
       const statuses = ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"];
@@ -907,6 +1028,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         readiness: { workspaceReady: workspace !== null && settingsReady, settingsReady, configReady },
         host: { platform: process.platform, arch: process.arch, node: process.version },
         failure: { phase, code },
+        ...(diagnosticImageFailure?.identity === execution.context.current() ? { imagePreparationFailure: diagnosticImageFailure.snapshot } : {}),
         desired: { evidence: "last-known resolution; not live", validForSession: configReady,
           ...(configReady && diagnosticDesired ? { settings: { ...diagnosticDesired } } : {}) },
         adoption: { evidence: "last-known; not live", known: currentAdoption() !== undefined,
@@ -914,7 +1036,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         recovery: !settingsReady
           ? "Fix working-directory identity on the host and restart Pi; settings editing is blocked until canonical workspace discovery succeeds."
           : "Use msb_config_get to inspect recovery constraints, then msb_config_set to propose a supported repair. Diagnostics cannot repair anything; msb_config_set requires explicit approval. Invalid syntax may require manual host repair. Never disable protection or use host fallback as an automatic repair.",
-        notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "logs/stdout", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
+        notPerformed: ["commands", "source reads", "environment reads", "credential resolution", "SDK loading", "live log/stdout reads", "health", "installation", "network", "virtualization", "credential validity", "writes", "repairs"],
       });
     },
     getAgentRuntimePolicy: () => {
@@ -1022,7 +1144,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           await reloadOptions?.guard?.();
           assertCurrent();
           pendingRestart ||= classifySettingsEffect(configRef.value, next.config) === "restart";
-          if (pendingRestart && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+          const imageRestart = next.imageBuild && manager.isActive() && next.imageBuild.loadedDigest !== bootedDockerfileDigest;
+          if ((pendingRestart || imageRestart) && reloadOptions?.allowRestart === false && !explicitOff && (manager.isActive() || next.config.autoStart)) {
             throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
           }
           const forceRecreate = pendingRestart;
@@ -1093,6 +1216,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       configReady = false;
       workspace = null;
       diagnosticDesired = undefined;
+      beginImageFailureAttempt();
       diagnosticFailure = "unknown";
       adopted = undefined;
       endingSession = true;

@@ -4,7 +4,9 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { hostConfigPaths, resolveConfig } from "./config.ts";
-import { customImageBootMessage, notifyCustomImageBoot } from "./image-boot-notice.ts";
+import { ImagePhaseError } from "./image-build.ts";
+import { createSettingsSanitizer } from "./settings-redaction.ts";
+import { customImageBootMessage, imagePreparationFailureMessage, imagePreparationMessages, notifyImagePreparation, notifyImagePreparationFailure, notifyCustomImageBoot } from "./image-boot-notice.ts";
 import type { DockerfileSource } from "./image-source.ts";
 
 const source: DockerfileSource = {
@@ -79,10 +81,20 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     const controlUrl = ${JSON.stringify(new URL("./control.ts", import.meta.url).href)};
     const indexUrl = ${JSON.stringify(new URL("./index.ts", import.meta.url).href)};
     const {buildSdk} = await import(${JSON.stringify(new URL("../../test/image-build-fixture.ts", import.meta.url).href)});
-    const {DEFAULT_CONFIG, hostConfigPaths, resolveConfig} = await import(${JSON.stringify(new URL("./config.ts", import.meta.url).href)});
+    const {hostConfigPaths, resolveConfig} = await import(${JSON.stringify(new URL("./config.ts", import.meta.url).href)});
     const {customImageBootMessage} = await import(${JSON.stringify(new URL("./image-boot-notice.ts", import.meta.url).href)});
-    const {snapshotDockerfile} = await import(${JSON.stringify(new URL("./image-source.ts", import.meta.url).href)});
-    const calls = [], sdk = buildSdk(calls);
+    const calls = [], statuses = [], sdk = buildSdk(calls, {
+      build: async () => {
+        await new Promise(resolve=>setTimeout(resolve,450));
+        assert.match(statuses.at(-1), /Building Dockerfile image/,'animation must retain building phase');
+        assert.equal(custom().length,0,'building cannot announce boot');
+      },
+      import: async () => {
+        await new Promise(resolve=>setTimeout(resolve,450));
+        assert.match(statuses.at(-1), /Importing.*loading Dockerfile image/,'animation must retain importing phase');
+        assert.equal(custom().length,0,'importing cannot announce boot');
+      },
+    });
     sdk.NetworkPolicy.allowAll=()=>({});
     globalThis.fixture = {sdk};
     const wrapper = 'data:text/javascript,' + encodeURIComponent(
@@ -104,7 +116,7 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     const integration=globalThis.fixture.integration;
     const ctx={cwd:process.cwd(),mode:'rpc',hasUI:true,isProjectTrusted:()=>true,
       sessionManager:{getSessionId:()=> 'notice',getEntries:()=>[]},
-      ui:{theme:{fg:(role,text)=>role+':'+text},setFooter(){},setStatus(){},notify(message,level){notices.push([message,level]);}}};
+      ui:{theme:{fg:(role,text)=>role+':'+text},setFooter(){},setStatus(_key,text){statuses.push(text);},notify(message,level){notices.push([message,level]);}}};
     const lifecycle=event=>hooks.get(event).at(-1)({},ctx);
     const custom=()=>notices.filter(([text])=>text.includes('Booting from custom image'));
     await lifecycle('session_start'); // bundled image: no custom notice
@@ -112,16 +124,11 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     assert.ok(notices.some(([text,level])=>text.includes('network.mode=')&&level==='warning'));
     await lifecycle('session_shutdown');
     await fs.writeFile(dockerfile,'FROM scratch\\n');
-    await lifecycle('session_start'); // unloaded source fails closed before boot
-    assert.equal(integration.control.getState().status,'unavailable'); assert.equal(custom().length,0);
+    await lifecycle('session_start'); // actual boot automatically prepares new source
+    assert.equal(integration.control.getState().status,'active'); assert.equal(custom().length,1);
     const selected=(await resolveConfig({...input,imageSdkLoader:async()=>sdk})).imageBuild;
-    const snapshot=await snapshotDockerfile(selected,DEFAULT_CONFIG.image);
-    const buildSource={...selected,identity:snapshot.identity};
-    const built=await integration.control.buildDockerfile({source:buildSource});
-    await integration.control.loadDockerfile({source:buildSource,artifactId:built.artifact.artifactId,expectedSelectionVersion:'missing'});
-    assert.equal(custom().length,0,'build/load alone must not notify');
     await integration.control.getEffectiveConfig(); await integration.control.settings.inspect();
-    assert.equal(custom().length,0,'passive inspections must not notify');
+    assert.equal(custom().length,1,'passive inspections must not notify');
     await integration.control.reload();
     assert.equal(integration.control.getState().status,'active');
     assert.deepEqual(custom(),[[customImageBootMessage(selected),'info']]);
@@ -160,4 +167,94 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     console.log('PASS custom boot notice');
   `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_BOOTSTRAP_TOOLS: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe", timeout: 30_000 });
   assert.match(output, /PASS custom boot notice/);
+});
+
+
+test("preparation notices follow existing TUI/RPC/headless conventions; errors remain visible", () => {
+  for (const mode of ["tui", "rpc", "print", "json"] as const) {
+    const calls: Array<[string, string]> = [];
+    const ctx = { hasUI: mode === "tui" || mode === "rpc", mode, ui: {
+      theme: { fg: (role: string, text: string) => { assert.equal(mode, "tui"); return `${role}:${text}`; } },
+      notify: (text: string, level: string) => calls.push([text, level]),
+    } };
+    notifyImagePreparation(ctx as any, "building");
+    notifyImagePreparation(ctx as any, "booting");
+    notifyImagePreparationFailure(ctx as any, "Failed build; retry");
+    assert.deepEqual(calls, ctx.hasUI ? [[`${mode === "tui" ? "dim:" : ""}${imagePreparationMessages.building}`, "info"], ["Failed build; retry", "error"]] : []);
+  }
+});
+
+test("preparation failure feedback sanitizes/redacts before bounding output and preserves typed failure/status", () => {
+  const secret = "secret-token";
+  const error = new ImagePhaseError("build", `bad ${secret}\x1b[31m\u202e`, [{
+    phase: "build", command: "/usr/local/bin/docker", args: ["buildx", "build"],
+    stdout: "", stderr: "x".repeat(4000) + secret + "\x07\u2066\u2028 missing dependency", truncated: false, exitCode: 17,
+  }]);
+  const message = imagePreparationFailureMessage(error, createSettingsSanitizer([{ textValue: secret }]));
+  assert.match(message, /build; exit status 17; command .*docker buildx build/);
+  assert.match(message, /<redacted>.*missing dependency/);
+  assert.doesNotMatch(message, /secret-token/);
+  assert.doesNotMatch(message.replaceAll("\n", ""), /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+  assert.ok(message.length < 2200);
+  const timeout = new ImagePhaseError("export", "Stream completion not proven");
+  timeout.diagnostics = { failureKind: "timeout" } as any;
+  assert.match(imagePreparationFailureMessage(timeout, (text) => text), /export; timeout/);
+  assert.doesNotMatch(imagePreparationFailureMessage(timeout, (text) => text), /exit status/);
+});
+
+for (const stream of ["stdout", "stderr"] as const) test(`failure feedback redacts whitespace-bearing ${stream} secrets before trimming`, () => {
+  const secret = " whitespace-private-token\n";
+  const error = new ImagePhaseError("build", "Build failed", [{
+    phase: "build", command: "/usr/local/bin/docker", args: ["buildx", "build"],
+    stdout: "", stderr: "", [stream]: secret, truncated: false, exitCode: 1,
+  }]);
+  const message = imagePreparationFailureMessage(error, createSettingsSanitizer([{ textValue: secret }]));
+  assert.match(message, /Output tail: <redacted>/);
+  assert.doesNotMatch(message, /whitespace-private-token/);
+});
+
+for (const evidence of ["stderr", "stdout", "error"] as const) test(`preparation ENOSPC ${evidence} evidence explains finite VFS disk and host storage recovery`, () => {
+  const error = new ImagePhaseError(evidence === "error" ? "export" : "build", evidence === "error" ? "ENOSPC: write failed" : "Command failed", [{
+    phase: "build", command: "/usr/local/bin/docker", args: ["buildx", "build"],
+    stdout: "", stderr: "", ...(evidence !== "error" ? { [evidence]: "failed to prepare layer: no space left on device" } : {}),
+    truncated: false, ...(evidence !== "error" ? { exitCode: 102 } : {}),
+  }]);
+  const message = imagePreparationFailureMessage(error, (text) => text);
+  assert.match(message, /fixed 32 GiB writable disk/);
+  assert.match(message, /VFS.*copies full layers.*RUN steps\/stages/);
+  assert.match(message, /even with free host space/);
+  assert.match(message, /Host-backed temporary staging\/exports or native cache.*check host free space/);
+  assert.match(message, /reduce stages\/dependencies.*cleanup in the same step.*retry/);
+  assert.match(message, /no host fallback/);
+  assert.doesNotMatch(message, /Fix the source/);
+  if (evidence === "error") assert.doesNotMatch(message, /exit status/);
+  else assert.match(message, /exit status 102/);
+});
+
+test("preparation space guidance requires redacted bounded evidence, not a status or generic disk error", () => {
+  for (const text of ["dependency unavailable", "disk read error", "x".repeat(9000) + "permission denied"]) {
+    const error = new ImagePhaseError("build", "Command failed", [{
+      phase: "build", command: "docker", args: [], stdout: "", stderr: text, truncated: false, exitCode: 102,
+    }]);
+    const message = imagePreparationFailureMessage(error, (value) => value);
+    assert.match(message, /Fix the source and retry/);
+    assert.doesNotMatch(message, /Storage exhaustion|VFS|32 GiB/);
+  }
+  const secret = "ENOSPC private-token\x1b\u202e";
+  const error = new ImagePhaseError("build", secret);
+  const message = imagePreparationFailureMessage(error, createSettingsSanitizer([{ textValue: secret }]));
+  assert.doesNotMatch(message, /ENOSPC|private-token|Storage exhaustion/);
+  assert.doesNotMatch(message.replaceAll("\n", ""), /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+  assert.match(message, /<redacted>/);
+  assert.doesNotMatch(message, /exit status/);
+});
+
+test("direct failure formatter conservatively withholds upstream-truncated output without coverage proof", () => {
+  const error = new ImagePhaseError("build", "Build failed", [{
+    phase: "build", command: "docker", args: ["buildx", "build"],
+    stdout: "possibly-partial-private-stdout", stderr: "possibly-partial-private-stderr", truncated: true, exitCode: 1,
+  }]);
+  const message = imagePreparationFailureMessage(error, (text) => text);
+  assert.match(message, /Output withheld: upstream truncation/);
+  assert.doesNotMatch(message, /possibly-partial-private/);
 });

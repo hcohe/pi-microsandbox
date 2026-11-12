@@ -12,8 +12,14 @@ Ask your agent:
 > fallback, or broaden host tools/mounts as a workaround. Verify activation.
 
 `msb_diagnostics` works while routed tools are blocked. It uses cached,
-secret-redacted state—no commands, SDK loading, file/environment reads, logs,
-credential resolution, or VM startup. It isn't a live health check.
+secret-redacted state—no commands, SDK loading, file/environment reads, live log fetching,
+credential resolution, or VM startup. It may include the latest cached safe image
+build/load failure with phase, command/status, bounded output tails and recovery
+hints. These were sanitized at failure time, not fetched by diagnostics. A new
+automatic preparation/recreation, explicit build/load attempt or session clears
+the cache; unchanged/live-only reloads retain completed failures. Upstream-truncated
+output is withheld when full credential redaction cannot be established. It isn't a
+live health check.
 
 If passive inspection is insufficient, ask the agent to explain the narrow live
 diagnostic need and expected host effects, then request one simple, clear,

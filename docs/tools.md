@@ -232,8 +232,14 @@ See the [native cache trust/lifecycle contract](images.md#build-boundary-and-lif
 Expanded build/load results show artifact IDs, diagnostics, actual command statuses,
 partial effects and recovery. Terminal control/bidi payloads are escaped, not executed.
 Failed build never removes saved source or changes the previous loaded/running
-image. Startup/reload verify the last loaded selection and never rebuild edited
-source; no usable selection means fail closed. No silent host fallback.
+image. Actual runtime startup/restart automatically checks current Dockerfile,
+context and `FROM GLOBAL` inputs against native build/selected references,
+building/importing when needed without separate load approval. Unchanged native
+images need no build/import. Passive inspection, source saves and no-op/live
+reloads remain nonbuilding; explicit build stays export-only and explicit load
+still requires approval. Missing Dockerfiles can retain a verified native
+selection, but invalid current sources or preparation failures block stale-image
+boot and host fallback.
 
 Inspect `msb_config_get` for explicit-image/higher-scope blockers; inheritance
 requires separate config approval. See [images](images.md#host-owned-dockerfile-no-host-docker)
@@ -245,6 +251,16 @@ Call `{}` for a passive diagnostic report, or `{"format":"json"}` for JSON.
 It works headlessly and without a running sandbox. It reports cached runtime and
 configuration readiness, static failure categories, small last-known desired and
 adoption summaries, recovery actions, and checks that have **not** been performed.
+When available, `imagePreparationFailure` separately reports the latest automatic
+image preparation or explicit build/load failure: operation, phase, failed command,
+actual observed exit status (never invented for a timeout), typed failure kind,
+bounded sanitized stderr/stdout tails, import/selection uncertainty and recovery
+guidance, including storage hints. An explicit build failure does not imply the
+running sandbox is blocked. The cache clears synchronously on actual automatic
+source preparation/recreation, an explicit build/load attempt or a new session
+(including teardown); cancelled/superseded attempts cannot publish stale failures.
+Unchanged/live-only reloads retain completed failures; failed live image verification
+can replace them. Successful preparation/build/load retries clear prior failures.
 Cached status is not a live health, connectivity, image, or virtualization check.
 
 The diagnostic invocation does not execute commands, load the native SDK,
@@ -252,8 +268,16 @@ start/restart a VM, fetch logs, read configuration files, enumerate the environm
 resolve credentials, or write anything. It accepts no command or file-path inputs.
 Unknown failures remain generic rather than echoing unsafe exception text. Both
 text and structured output are bounded. Arbitrary parser/error text, configuration
-strings, source descriptors, paths, and logs are deliberately withheld rather than
-risk leaking credentials. The configuration tools still expose host source names
+strings, source descriptors, paths, and live logs are deliberately withheld rather than
+risk leaking credentials. The only freeform exception is the already-held image
+failure snapshot, sanitized at failure time before truncation; unavailable startup
+secret tokens cause its detail to be withheld. Untyped errors remain generic.
+Output already truncated by the upstream collector is withheld with an explicit
+reason whenever private literals (including shadowed ones), runtime secret sources
+or resolved tokens may require redaction; ordinary long output retains useful
+bounded tails only when the originating context proves none are present. Diagnostics never fetches logs or
+resolves secrets to populate it. Both text and details are limited to 48 KiB; an
+oversized report returns a safe unavailable result, never an overflow file. The configuration tools still expose host source names
 and command text as described below—do not embed credentials in commands.
 
 For recovery, inspect `msb_config_get`, then propose a scoped `msb_config_set`.
