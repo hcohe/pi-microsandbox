@@ -150,7 +150,9 @@ for (const scope of ["project", "global"] as const) test(`index custom image not
     assert.equal(custom().length,4,'headless boot must not notify');
     ctx.mode='rpc'; ctx.hasUI=true;
     const imageGet=sdk.Image.get; sdk.Image.get=async()=>{throw Error('missing loaded image');};
-    await assert.rejects(integration.control.reload(),/activation failed|could not be safely/);
+    await assert.rejects(integration.control.reload(),/Microsandbox configuration failed/);
+    assert.equal((await integration.control.getDiagnostics()).configurationFailure.kind,'read');
+    assert.equal(notices.filter(([text,level])=>level==='error'&&text.includes('Microsandbox configuration failed')).length,1);
     assert.equal(custom().length,4,'unverifiable loaded image must not announce boot');
     sdk.Image.get=imageGet;
     await integration.control.setEnabled(false); await integration.control.reload();

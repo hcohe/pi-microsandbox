@@ -1,3 +1,4 @@
+import { configurationFailureSnapshot, formatConfigurationFailure, type ConfigurationFailureSnapshot } from "./configuration-failure.ts";
 import { formatImagePreparationFailure, imagePreparationFailureSnapshot, type ImagePreparationFailureSnapshot } from "./image-boot-notice.ts";
 import { PendingArtifacts, selectionVersion } from "./image-artifact.ts";
 import { homedir } from "node:os";
@@ -87,6 +88,7 @@ export interface MsbControlOptions {
   onState?: (state: RuntimeState) => void;
   onImagePreparation?: (phase: ImagePreparationPhase) => void;
   onImagePreparationFailure?: (message: string) => void;
+  onConfigurationFailure?: (failure: ConfigurationFailureSnapshot) => void;
   onCustomImageBoot?: (source: DockerfileSource) => void;
 }
 
@@ -278,10 +280,12 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
   const settingsInput = () => ({ cwd, repoRoot: workspace?.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env });
   const settings = new SettingsEditor(settingsInput(), sessionId);
   // Diagnostics never resolve configuration or inspect settings. Configuration
-  // keeps only a non-string projection; image failures separately retain bounded,
+  // keeps only safe static projections; image failures separately retain bounded,
   // failure-time sanitized snapshots. Raw parser/SDK errors are withheld:
   // even a known sanitizer cannot
   // prove coverage for rejected syntax or unobserved reconnect credentials.
+  let diagnosticConfigurationFailure: ConfigurationFailureSnapshot | undefined;
+  let configurationFailureAttempt: object = {};
   let diagnosticDesired: Record<string, unknown> | undefined;
   let diagnosticFailure: DiagnosticFailureCode = "unknown";
   let diagnosticImageFailure: { identity: SessionExecutionIdentity; snapshot: ImagePreparationFailureSnapshot } | undefined;
@@ -852,21 +856,37 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     requestSanitizers.set(snapshot, resolutionSanitizers.get(resolved) ?? createSettingsSanitizer([snapshot]));
     return snapshot;
   };
-  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false, nativeImages = false): Promise<ResolvedConfig> => {
+  const resolveForWorkspace = async (selected: Workspace, approvedSettingsReload = false, nativeImages = false, signal?: AbortSignal): Promise<ResolvedConfig> => {
     hostExecutionToken = {};
     configReady = false;
     const input = { ...settingsInput(), cwd: selected.cwd, repoRoot: selected.guestRoot };
-    if (approvedSettingsReload) settings.assertSession(input, sessionId);
-    else settings.configureSession(input, sessionId);
-    let sanitize!: SettingsSanitizer;
-    let next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary(), ...(nativeImages ? { imageSdkLoader: async () => loadSdk() } : {}) }, (captured) => { sanitize = captured; });
-    if (!nativeImages && !explicitOff && (manager.isActive() || next.config.autoStart)) {
-      next = await resolveConfig({ ...input, temporaryOverrides: settings.temporary(), imageSdkLoader: async () => loadSdk() }, (captured) => { sanitize = captured; });
+    const identity = execution.context.current();
+    const attempt = configurationFailureAttempt = {};
+    try {
+      if (approvedSettingsReload) settings.assertSession(input, sessionId);
+      else settings.configureSession(input, sessionId);
+      let sanitize!: SettingsSanitizer;
+      let next = await resolveConfig({ cwd: selected.cwd, repoRoot: selected.guestRoot, projectTrusted, configDirName: options.configDirName, agentDir: options.agentDir, env: options.env, temporaryOverrides: settings.temporary(), ...(nativeImages ? { imageSdkLoader: async () => loadSdk() } : {}) }, (captured) => { sanitize = captured; });
+      if (!nativeImages && !explicitOff && (manager.isActive() || next.config.autoStart)) {
+        next = await resolveConfig({ ...input, temporaryOverrides: settings.temporary(), imageSdkLoader: async () => loadSdk() }, (captured) => { sanitize = captured; });
+      }
+      // Resolution evidence is published only for the current session and attempt.
+      resolutionSanitizers.set(next, sanitize);
+      if (execution.context.current() === identity && configurationFailureAttempt === attempt && !signal?.aborted) diagnosticConfigurationFailure = undefined;
+      return next;
+    } catch (error) {
+      const snapshot = configurationFailureSnapshot(error);
+      if (execution.context.current() === identity && configurationFailureAttempt === attempt && !signal?.aborted) {
+        const changed = JSON.stringify(diagnosticConfigurationFailure) !== JSON.stringify(snapshot);
+        diagnosticConfigurationFailure = snapshot;
+        // Resolution events only: passive diagnostics, polling and state churn never notify.
+        if (changed) {
+          try { options.onConfigurationFailure?.(snapshot); } catch { /* UI must not affect fail-closed resolution. */ }
+        }
+      }
+      // Rejected sources may contain secrets absent from the prior valid config.
+      throw new Error(formatConfigurationFailure(snapshot));
     }
-    // Shared diagnostic state is committed by callers only after their lifecycle
-    // identity checks, never by a resolution that may have become obsolete.
-    resolutionSanitizers.set(next, sanitize);
-    return next;
   };
 
   const configureSessionInternal = async (setup: SessionSetup, isCurrent: () => boolean): Promise<RuntimeState> => {
@@ -943,6 +963,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     invalidateActivation();
     const identity = execution.begin(setup.sessionId, setup.cwd);
     beginImageFailureAttempt();
+    configurationFailureAttempt = {};
+    diagnosticConfigurationFailure = undefined;
     displayActivities.clear();
     failureState = { status: "booting", info: null };
     if (previous.sessionId !== setup.sessionId || previous.cwd !== setup.cwd) settings.endSession();
@@ -1028,6 +1050,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         readiness: { workspaceReady: workspace !== null && settingsReady, settingsReady, configReady },
         host: { platform: process.platform, arch: process.arch, node: process.version },
         failure: { phase, code },
+        ...(diagnosticConfigurationFailure ? { configurationFailure: diagnosticConfigurationFailure } : {}),
         ...(diagnosticImageFailure?.identity === execution.context.current() ? { imagePreparationFailure: diagnosticImageFailure.snapshot } : {}),
         desired: { evidence: "last-known resolution; not live", validForSession: configReady,
           ...(configReady && diagnosticDesired ? { settings: { ...diagnosticDesired } } : {}) },
@@ -1132,7 +1155,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
             settingsReady = true;
             cwd = workspace.cwd;
             activeProjectRoot = workspace.guestRoot;
-            next = await resolveForWorkspace(workspace, !!reloadOptions?.guard);
+            next = await resolveForWorkspace(workspace, !!reloadOptions?.guard, false, reloadOptions?.signal);
             assertCurrent();
           } catch (error) {
             assertCurrent();
@@ -1216,6 +1239,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       configReady = false;
       workspace = null;
       diagnosticDesired = undefined;
+      configurationFailureAttempt = {};
+      diagnosticConfigurationFailure = undefined;
       beginImageFailureAttempt();
       diagnosticFailure = "unknown";
       adopted = undefined;

@@ -57,6 +57,7 @@ docs/troubleshooting.md required
 docs/tools.md required
 extensions/pi-msb/command.ts required
 extensions/pi-msb/config.ts required
+extensions/pi-msb/configuration-failure.ts required
 extensions/pi-msb/control.ts required
 extensions/pi-msb/diagnostics-tools.ts required
 extensions/pi-msb/build-context-storage.ts required

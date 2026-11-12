@@ -11,6 +11,18 @@ Ask your agent:
 > supported settings repair for approval. Don't turn off the sandbox, enable host
 > fallback, or broaden host tools/mounts as a workaround. Verify activation.
 
+Configuration failures automatically produce an error notification in Pi's UI—no
+`/msb` required. The same safe information appears in `msb_diagnostics` as
+`configurationFailure`: known setting names with static constraints (for example,
+`cpus` must be 1–64), or TOML syntax, file-access or policy-boundary guidance.
+Rejected values, source paths and raw parser errors are withheld. Syntax errors
+usually need manual host-side repair before reloading. Identical failures are
+not repeatedly notified until recovery or a new session; passive diagnostics and
+footer polling never notify. Headless sessions still receive diagnostic reports.
+A failed reload can leave the previous active VM running: the configuration
+failure is separate from runtime blocking status. Successful resolution, session
+replacement and shutdown clear the cached configuration failure.
+
 `msb_diagnostics` works while routed tools are blocked. It uses cached,
 secret-redacted state—no commands, SDK loading, file/environment reads, live log fetching,
 credential resolution, or VM startup. It may include the latest cached safe image

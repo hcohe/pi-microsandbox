@@ -47,12 +47,12 @@ test("blocked invalid startup exposes passive diagnostics and approval-bound hos
     const original = 'cpus = 0\\nauto_start = false\\n';
     await writeFile(paths.global, original);
     const { default: register } = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
-    const tools = new Map(), hooks = new Map(); let answer = 'No', approvals = 0;
+    const tools = new Map(), hooks = new Map(), notices = []; let answer = 'No', approvals = 0;
     register({ registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
       on(event, handler) { hooks.set(event, [...(hooks.get(event) ?? []), handler]); } });
     const ctx = { cwd: process.cwd(), mode: 'rpc', hasUI: true, isProjectTrusted: () => true,
       sessionManager: { getSessionId: () => 'blocked-repair', getEntries: () => [] },
-      ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, notify() {},
+      ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, notify(message, level) { notices.push([message, level]); },
         select: async (_question, options) => { approvals++; assert.deepEqual(options, ['No', 'Yes']); return answer; } } };
     await hooks.get('session_start').at(-1)({}, ctx);
     const run = (name, args) => tools.get(name).execute(name, args, undefined, undefined, ctx);
@@ -71,6 +71,12 @@ test("blocked invalid startup exposes passive diagnostics and approval-bound hos
     assert.equal(diagnostic.details.runtime.status, 'unavailable');
     assert.equal(diagnostic.details.readiness.configReady, false);
     assert.equal(diagnostic.details.readOnly, true);
+    assert.equal(diagnostic.details.configurationFailure.problems[0].path, 'cpus');
+    const configErrors = () => notices.filter(([message, level]) => level === 'error' && message.includes('Microsandbox configuration failed'));
+    assert.equal(configErrors().length, 1, 'startup automatically notifies without /msb');
+    assert.match(configErrors()[0][0], /cpus:.*1–64/);
+    await run('msb_diagnostics', {});
+    assert.equal(configErrors().length, 1, 'passive reads do not notify');
     assert.equal(approvals, 0);
     const inspection = await run('msb_config_get', {});
     assert.equal(inspection.details.recovery.available, true);
@@ -88,6 +94,7 @@ test("blocked invalid startup exposes passive diagnostics and approval-bound hos
     assert.equal(after.details.recovery, undefined);
     const afterDiagnostic = await run('msb_diagnostics', {});
     assert.equal(afterDiagnostic.details.readiness.configReady, true);
+    assert.equal(afterDiagnostic.details.configurationFailure, undefined);
     assert.equal(afterDiagnostic.details.runtime.status, 'disabled');
     assert.equal(afterDiagnostic.details.runtime.execution, 'blocked');
     await hooks.get('session_shutdown').at(-1)({}, ctx);
@@ -550,4 +557,47 @@ test("custom image preparation footer names each phase, respects visibility and 
     for (const frame of [0, 1]) styleFooterStatus(theme, footerStatus(state, true)!, state, frame);
     assert.deepEqual(colors, ["warning", "dim"]);
   }
+});
+
+for (const hasUI of [true, false]) test(`automatic safe configuration notifications follow replacement lifecycle, hasUI=${hasUI}`, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-config-notice-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"); await mkdir(cwd);
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { mkdir, writeFile } from 'node:fs/promises';
+    import { dirname } from 'node:path';
+    const { hostConfigPaths } = await import(${JSON.stringify(new URL("./config.ts", import.meta.url).href)});
+    const paths = await hostConfigPaths({ cwd: process.cwd(), agentDir: process.env.PI_CODING_AGENT_DIR, env: process.env });
+    await mkdir(dirname(paths.global), { recursive: true });
+    await writeFile(paths.global, '[broken\\n# REJECTED_PRIVATE_VALUE\\n');
+    const { default: register } = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const hooks = new Map(), tools = new Map(), notices = [];
+    register({ registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
+      on(event, handler) { hooks.set(event, [...(hooks.get(event) ?? []), handler]); } });
+    let sessionId = 'first';
+    const ctx = { cwd: process.cwd(), mode: 'tui', hasUI: ${hasUI}, isProjectTrusted: () => true,
+      sessionManager: { getSessionId: () => sessionId, getEntries: () => [] },
+      ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, notify(message, level) { notices.push([message, level]); } } };
+    const errors = () => notices.filter(([message, level]) => level === 'error' && message.includes('Microsandbox configuration failed'));
+    await hooks.get('session_start').at(-1)({}, ctx);
+    assert.equal(errors().length, ${hasUI ? 1 : 0});
+    if (${hasUI}) assert.match(errors()[0][0], /TOML syntax/);
+    for (let i = 0; i < 3; i++) await tools.get('msb_diagnostics').execute('diag', {}, undefined, undefined, ctx);
+    await hooks.get('session_info_changed').at(-1)({}, ctx);
+    assert.equal(errors().length, ${hasUI ? 1 : 0}, 'polling/reads/same-session churn cannot notify');
+    sessionId = 'replacement';
+    await hooks.get('session_info_changed').at(-1)({}, ctx);
+    assert.equal(errors().length, ${hasUI ? 2 : 0}, 'replacement owns a fresh failure notification');
+    assert.doesNotMatch(JSON.stringify(notices), /REJECTED_PRIVATE_VALUE/);
+    await writeFile(paths.global, 'auto_start = false\\n');
+    sessionId = 'recovered';
+    await hooks.get('session_info_changed').at(-1)({}, ctx);
+    const report = await tools.get('msb_diagnostics').execute('diag', {}, undefined, undefined, ctx);
+    assert.equal(report.details.configurationFailure, undefined);
+    assert.equal(errors().length, ${hasUI ? 2 : 0});
+    await hooks.get('session_shutdown').at(-1)({}, ctx);
+    console.log('PASS configuration notices');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS configuration notices/);
 });

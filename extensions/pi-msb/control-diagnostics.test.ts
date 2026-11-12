@@ -17,7 +17,8 @@ async function fixture(t: test.TestContext, active = false, fault?: { stage: "sd
   await mkdir(cwd);
   let forbidden = false, envReads = 0, sdkLoads = 0, stateChanges = 0, writes = 0;
   const calls: string[] = [];
-  const env = new Proxy({}, { get() { envReads++; if (forbidden) throw new Error("environment read"); return undefined; }, ownKeys() { throw new Error("environment enumeration"); } });
+  const configurationNotices: unknown[] = [];
+  const env = new Proxy({}, { get() { envReads++; if (forbidden) throw new Error("environment read"); return undefined; }, ownKeys() { if (forbidden) throw new Error("environment enumeration"); return []; } });
   const integration = createMsbIntegration({ sessionId: "diagnostics", cwd, configDirName: ".pi", agentDir: join(root, "agent"), env,
     sdkLoader: async () => {
       sdkLoads++; if (forbidden) throw new Error("SDK loaded");
@@ -40,10 +41,11 @@ async function fixture(t: test.TestContext, active = false, fault?: { stage: "sd
     acquireOwnerLock: async () => ({ path: join(root, "owner"), release: async () => undefined }),
     locksPort: { tryAcquire: async () => ({ path: join(root, "lock"), release: async () => undefined }) },
     appendEntry: () => { writes++; }, onState: () => { stateChanges++; },
+    onConfigurationFailure: (failure) => { configurationNotices.push(failure); },
   });
   const config = { ...structuredClone(DEFAULT_CONFIG), autoStart: active, bootstrapTools: false, docker: { mode: "disabled", startupTimeoutMs: 15000 }, pruneOnStart: false } as Config;
   t.after(async () => { forbidden = false; await integration.manager.shutdown(); integration.endSession(); await rm(root, { recursive: true, force: true }); });
-  return { root, cwd, integration, config, start: () => integration.configureSession({ sessionId: "diagnostics", cwd, projectTrusted: true, config: { config, provenance: {}, warnings: [] } }),
+  return { root, cwd, integration, config, configurationNotices, start: () => integration.configureSession({ sessionId: "diagnostics", cwd, projectTrusted: true, config: { config, provenance: {}, warnings: [] } }),
     forbid() { forbidden = true; }, allow() { forbidden = false; }, counters: () => ({ envReads, sdkLoads, stateChanges, writes, calls: [...calls] }) };
 }
 
@@ -99,8 +101,8 @@ for (const active of [false, true]) test(`invalid/rejected configuration with ${
   const f = await fixture(t, active);
   await f.start();
   const secret = "PRIVATE_REJECTED_LITERAL";
-  await mkdir(join(f.root, "agent"), { recursive: true });
-  await writeFile(join(f.root, "agent", "msb.toml"), `bad = [\n text_value = "${secret}"\n`);
+  await mkdir(join(f.root, "agent", "pi-microsandbox"), { recursive: true });
+  await writeFile(join(f.root, "agent", "pi-microsandbox", "default.toml"), `[broken\n# ${secret}\n`);
   await assert.rejects(f.integration.control.reload());
   f.forbid();
   const before = f.counters();
@@ -109,23 +111,29 @@ for (const active of [false, true]) test(`invalid/rejected configuration with ${
   assert.equal(f.integration.provider.hostExecutionToken!(), undefined);
   assert.equal(result.desired.settings, undefined);
   assert.equal(result.failure.phase, "configuration_not_ready");
+  assert.equal(result.configurationFailure.kind, "syntax");
+  assert.match(result.configurationFailure.summary, /TOML syntax/);
+  assert.equal(f.configurationNotices.length, 1);
   // Failed reload keeps an active runtime usable; an inactive runtime becomes unavailable.
   assert.equal(result.failure.code, active ? "none" : "invalid_configuration");
   if (active) assert.equal(result.failure.reason, "No cached blocking failure.");
   assert.ok(!JSON.stringify(result).includes(secret));
   assert.deepEqual(f.counters(), before);
+  assert.equal(f.configurationNotices.length, 1, "passive diagnostics do not notify");
 });
 
 test("invalid startup sources and workspace identity failures report honest readiness without defaults", async (t) => {
   const f = await fixture(t);
-  await mkdir(join(f.root, "agent"), { recursive: true });
-  await writeFile(join(f.root, "agent", "msb.toml"), 'secrets = [{ text_value = "PRIVATE_REJECTED", invalid = true }]\n');
+  await mkdir(join(f.root, "agent", "pi-microsandbox"), { recursive: true });
+  await writeFile(join(f.root, "agent", "pi-microsandbox", "default.toml"), 'secrets = [{ text_value = "PRIVATE_REJECTED", invalid = true }]\n');
   await f.integration.configureSession({ sessionId: "diagnostics", cwd: f.cwd, projectTrusted: true });
   const rejected: any = await f.integration.control.getDiagnostics!();
   assert.equal(rejected.readiness.configReady, false);
   assert.equal(rejected.desired.settings, undefined);
   assert.ok(!JSON.stringify(rejected).includes("PRIVATE_REJECTED"));
   assert.equal(rejected.failure.code, "invalid_configuration");
+  assert.equal(rejected.configurationFailure.kind, "validation");
+  assert.equal(f.configurationNotices.length, 1);
   assert.equal(f.counters().sdkLoads, 0);
   await f.integration.configureSession({ sessionId: "diagnostics", cwd: join(f.root, "missing-workspace"), projectTrusted: true });
   f.forbid();
@@ -135,6 +143,7 @@ test("invalid startup sources and workspace identity failures report honest read
   assert.equal(missing.readiness.settingsReady, false);
   assert.equal(missing.failure.phase, "workspace_or_session_not_ready");
   assert.equal(missing.failure.code, "workspace_unavailable");
+  assert.equal(missing.configurationFailure, undefined);
   assert.deepEqual(f.counters(), before);
 });
 
@@ -349,4 +358,86 @@ test("diagnostics tool description directs agents to separate simple host comman
   for (const required of ["passive msb_diagnostics and msb_config_get", "exactly ONE simple, clear, human-readable command per call and per approval", "expected host effects", "No command chaining (&&, || or semicolons)", "pipelines", "multiline command sequences", "shell substitutions", "loops", "eval", "encoded payloads", "sh -c", "code-oneliners", "script wrappers hiding multiple operations", "fresh approval for each step"]) assert.ok(tool.description.includes(required), required);
   assert.match(tool.description, /finite positive timeout <=120 seconds/);
   assert.match(tool.description, /existing host permission required/);
+});
+
+test("configuration constraints notify once per distinct failure, stay passive, and clear on resolution/session/end", async (t) => {
+  const f = await fixture(t);
+  const file = join(f.root, "agent", "pi-microsandbox", "default.toml");
+  await mkdir(join(f.root, "agent", "pi-microsandbox"), { recursive: true });
+  await writeFile(file, "cpus = 0\nauto_start = false\n");
+  await f.integration.configureSession({ sessionId: "diagnostics", cwd: f.cwd, projectTrusted: true });
+  let report: any = await f.integration.control.getDiagnostics!();
+  assert.equal(report.configurationFailure.problems[0].path, "cpus");
+  assert.equal(report.configurationFailure.problems[0].expectedSchema.minimum, 1);
+  assert.equal(f.configurationNotices.length, 1);
+  await assert.rejects(f.integration.control.reload(), /Virtual CPUs/);
+  await f.integration.provider.refreshState!();
+  await f.integration.control.getDiagnostics!();
+  assert.equal(f.configurationNotices.length, 1, "reload/state churn with identical constraints is deduplicated");
+  await writeFile(file, "memory_mib = 1\nauto_start = false\n");
+  await assert.rejects(f.integration.control.reload(), /Guest RAM/);
+  assert.equal(f.configurationNotices.length, 2);
+  await writeFile(file, "cpus = 2\nauto_start = false\n");
+  await f.integration.control.reload();
+  report = await f.integration.control.getDiagnostics!();
+  assert.equal(report.configurationFailure, undefined);
+  await writeFile(file, "cpus = 0\nauto_start = false\n");
+  await assert.rejects(f.integration.control.reload());
+  assert.equal(f.configurationNotices.length, 3, "success rearms notifications");
+  const replacing = f.start();
+  assert.equal((await f.integration.control.getDiagnostics!()).configurationFailure, undefined, "new session clears synchronously");
+  await replacing;
+  assert.equal((await f.integration.control.getDiagnostics!()).configurationFailure, undefined);
+  await assert.rejects(f.integration.control.reload());
+  f.integration.endSession();
+  assert.equal((await f.integration.control.getDiagnostics!()).configurationFailure, undefined);
+});
+
+test("configuration failure diagnostics perform no source/environment/command/SDK work, even after sources disappear", async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.root, "agent", "pi-microsandbox"), { recursive: true });
+  await writeFile(join(f.root, "agent", "pi-microsandbox", "default.toml"), "cpus = 0\n");
+  await f.integration.configureSession({ sessionId: "diagnostics", cwd: f.cwd, projectTrusted: true });
+  await rm(f.root, { recursive: true, force: true });
+  f.forbid();
+  const before = f.counters(), notices = f.configurationNotices.length;
+  for (const key of ["readFile", "stat", "lstat", "realpath", "access", "readdir", "open"] as const) t.mock.method(fs, key, () => assert.fail(`diagnostics called ${key}`));
+  for (const key of ["spawn", "exec", "execFile"] as const) t.mock.method(childProcess, key, () => assert.fail(`diagnostics called ${key}`));
+  syncBuiltinESMExports();
+  try {
+    for (let i = 0; i < 2; i++) {
+      const report: any = await f.integration.control.getDiagnostics!();
+      assert.equal(report.configurationFailure.problems[0].path, "cpus");
+    }
+    assert.deepEqual(f.counters(), before);
+    assert.equal(f.configurationNotices.length, notices);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); f.allow(); }
+});
+
+for (const supersession of ["replacement", "cancellation"]) test(`obsolete rejected resolution cannot publish configuration diagnostics or notifications after ${supersession}`, async (t) => {
+  const f = await fixture(t);
+  await f.start();
+  const file = join(f.root, "agent", "pi-microsandbox", "default.toml");
+  await mkdir(join(f.root, "agent", "pi-microsandbox"), { recursive: true });
+  await writeFile(file, "cpus = 0\n");
+  const target = await fs.realpath(file), read = fs.readFile;
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const deferred = new Promise<void>((resolve) => { release = resolve; });
+  t.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === target) { enter(); await deferred; return "cpus = 0\n"; }
+    return read(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const abort = new AbortController();
+    const rejected = assert.rejects(f.integration.control.reload({ signal: abort.signal }), /context changed|cancelled reload/);
+    await entered;
+    if (supersession === "cancellation") abort.abort(new Error("cancelled reload"));
+    else await f.integration.configureSession({ sessionId: "replacement", cwd: f.cwd, projectTrusted: true,
+      config: { config: f.config, provenance: {}, warnings: [] } });
+    release(); await rejected;
+    assert.equal((await f.integration.control.getDiagnostics!()).configurationFailure, undefined);
+    assert.equal(f.configurationNotices.length, 0);
+  } finally { release(); t.mock.restoreAll(); syncBuiltinESMExports(); }
 });

@@ -12,6 +12,7 @@ import {
 import { createHostReadAccess } from "./skill-access.ts";
 import { createSandboxGrepExecute } from "./operations-exec.ts";
 import { registerMsbCommand, systemPromptNote } from "./command.ts";
+import { formatConfigurationFailure } from "./configuration-failure.ts";
 import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
 import { createMsbFooter } from "./footer.ts";
@@ -60,6 +61,13 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     entries: () => currentContext?.sessionManager.getEntries() ?? [],
     onImagePreparation: (phase) => {
       if (currentContext) notifyImagePreparation(currentContext, phase);
+    },
+    onConfigurationFailure: (failure) => {
+      const ctx = currentContext;
+      const identity = currentProvider.execution!.current();
+      if (ctx?.hasUI && identity.sessionId === ctx.sessionManager.getSessionId() && identity.cwd === ctx.cwd) {
+        ctx.ui.notify(formatConfigurationFailure(failure), "error");
+      }
     },
     onImagePreparationFailure: (message) => {
       if (currentContext) notifyImagePreparationFailure(currentContext, message);

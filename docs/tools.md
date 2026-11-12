@@ -251,6 +251,18 @@ Call `{}` for a passive diagnostic report, or `{"format":"json"}` for JSON.
 It works headlessly and without a running sandbox. It reports cached runtime and
 configuration readiness, static failure categories, small last-known desired and
 adoption summaries, recovery actions, and checks that have **not** been performed.
+When configuration resolution fails, `configurationFailure` contains an immutable
+cached projection: a static validation/syntax/read/policy (or unknown) category,
+up to 32 safe field constraints with expected schemas, truncation status and repair
+guidance. No rejected values, parser prose, source paths or credentials are retained.
+This is separate from the runtime failure: a failed reload may retain the previous
+active VM while the new configuration is invalid. Successful resolution clears it;
+a new session or teardown clears it immediately, and superseded attempts cannot
+publish stale failures. Current configuration failures also notify Pi's UI without
+opening `/msb`; identical failures are deduplicated until recovery or a new session.
+Passive diagnostics and polling never produce notifications. Headless reports
+include the same safe information without attempting UI access.
+
 When available, `imagePreparationFailure` separately reports the latest automatic
 image preparation or explicit build/load failure: operation, phase, failed command,
 actual observed exit status (never invented for a timeout), typed failure kind,
