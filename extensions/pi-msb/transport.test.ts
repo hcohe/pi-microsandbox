@@ -41,28 +41,29 @@ class FakeHandle {
   }
 }
 
-// Import the installed SDK's JS wrapper directly, not its native-loading entrypoint.
+// Exercise the installed SDK's JS wrapper with a fake native execution handle.
 async function sdkHandle(
   events: Array<Record<string, unknown> | Error | null>,
   hooks: { kill?: () => Promise<void>; close?: () => Promise<void> } = {},
 ) {
-  const { ExecHandle } = await import(new URL("./exec.js", import.meta.resolve("microsandbox")).href);
+  const { ExecHandle } = await import("microsandbox");
   const state = { kills: 0, closes: 0, receives: 0 };
   const handle = new ExecHandle({
     async recv() {
       state.receives++;
       const event = events.shift() ?? null;
       if (event instanceof Error) throw event;
-      return event;
+      return event as Awaited<ReturnType<ConstructorParameters<typeof ExecHandle>[0]["recv"]>>;
     },
     async kill() {
       state.kills++;
       await hooks.kill?.();
     },
-  });
+  } as ConstructorParameters<typeof ExecHandle>[0]);
   const iterate = handle[Symbol.asyncIterator].bind(handle);
   handle[Symbol.asyncIterator] = () => {
     const iterator = iterate();
+    assert.ok(iterator.return);
     const close = iterator.return.bind(iterator);
     iterator.return = async () => {
       state.closes++;
@@ -84,7 +85,7 @@ function builderRecorder(calls: string[]): any {
       calls.push(`cwd:${cwd}`);
       return builder;
     },
-    timeout(timeoutMs: number) {
+    timeoutMilliseconds(timeoutMs: number) {
       calls.push(`timeout:${timeoutMs}`);
       return builder;
     },

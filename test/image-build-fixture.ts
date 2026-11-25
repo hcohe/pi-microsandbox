@@ -102,7 +102,7 @@ export function buildSdk(calls: string[], hooks: {
     let reference = "";
     let labels: Record<string, string> = {};
     const builder: any = {};
-    for (const method of ["image", "rootDisk", "pullPolicy", "cpus", "memory", "security", "user", "detached", "maxDuration", "idleTimeout", "workdir"]) builder[method] = (value: unknown) => { calls.push(`builder-${method}:${value}`); return builder; };
+    for (const method of ["image", "rootDisk", "pullPolicy", "cpus", "memory", "security", "user", "detached", "maxDurationSeconds", "idleTimeoutSeconds", "workdir"]) builder[method] = (value: unknown) => { calls.push(`builder-${method}:${value}`); return builder; };
     builder.labels = (value: Record<string, string>) => { labels = value; calls.push(`builder-labels:${JSON.stringify(value)}`); return builder; };
     builder.network = (configure: (network: any) => void) => { configure({ policy: (policy: any) => { calls.push(`builder-network:${JSON.stringify(policy)}`); } }); return builder; };
     builder.volume = (guest: string, configure: (mount: any) => void) => {
@@ -112,7 +112,7 @@ export function buildSdk(calls: string[], hooks: {
     builder.create = async () => {
       calls.push("builder-create");
       const handle = {
-        name, id: `record-${name}`, status: "running", backendKind: "local", config: () => ({ name, labels }),
+        name, id: `record-${name}`, status: async () => "running", contextKind: "local", config: () => ({ spec: { name, labels } }),
         destroy: async (options: { timeoutMs: number }) => {
           calls.push(`builder-record-destroy:${name}:${options.timeoutMs}`);
           if (records.get(name) !== handle) throw new Error("Sandbox replaced");
@@ -126,11 +126,11 @@ export function buildSdk(calls: string[], hooks: {
       await hooks.create?.();
       if (hooks.failStep === "create") throw new Error("PRIVATE CREATE OUTPUT");
       const raw: any = {
-        name, id: handle.id, ownsLifecycle: true, backendKind: "local", config: async () => ({ name, labels }),
+        name, id: handle.id, ownsLifecycle: true, contextKind: "local", config: async () => ({ spec: { name, labels } }),
         destroy: async (options: { timeoutMs: number }) => handle.destroy(options),
         execStreamWith: async (_command: string, configure: (exec: any) => void) => {
           let args: string[] = [];
-          const exec: any = { args: (value: string[]) => { args = value; return exec; }, timeout: () => exec };
+          const exec: any = { args: (value: string[]) => { args = value; return exec; }, timeoutMilliseconds: () => exec };
           configure(exec);
           calls.push(`builder-exec:${JSON.stringify(args)}`);
           return {

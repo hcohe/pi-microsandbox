@@ -85,6 +85,20 @@ not recovery magic. Don't disable protection just to get diagnostic tools back.
 
 ## Common snags
 
+### SDK and host runtime versions don’t match
+
+If a startup notification or `msb_diagnostics` reports a runtime version mismatch
+(`runtime_version_mismatch`), the Microsandbox SDK rejected the selected host
+runtime’s launch contract. The message shows the SDK version and, when available,
+the selected runtime version. Update `pi-microsandbox` to a release that supports
+your runtime, or select a compatible runtime. Check any `MSB_PATH` and
+`MSB_LIBKRUNFW_PATH` overrides; an independently upgraded user-wide runtime can
+also be selected. Use the executable and firmware from the same runtime release,
+then restart Pi and check `/msb` → **Status**.
+
+Changing the guest image does not fix this. Pi blocks sandbox-routed execution and
+does not attempt automatic host fallback for this error.
+
 ### Missing runtime or virtualization
 
 - Keep npm optional dependencies enabled; Microsandbox uses a platform package

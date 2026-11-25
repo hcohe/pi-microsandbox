@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Image, NetworkPolicy, Sandbox } from "microsandbox";
 import { BUILD_VERSION } from "./image-source.ts";
+import { loadLocalSdk } from "./local-sdk.ts";
 
 // Real native configuration serialization only: never create/start a sandbox.
 test("pinned microsandbox SDK retains cwd bind flags and fail-closed network builders", async () => {
@@ -11,9 +12,11 @@ test("pinned microsandbox SDK retains cwd bind flags and fail-closed network bui
     .egress((rule) => rule.allow((destination) => destination.ip("192.0.2.1")))
     .egress((rule) => rule.allow((destination) => destination.cidr("198.51.100.0/24")))
     .egress((rule) => rule.udp().tcp().port(53).allowHost());
-  const config: any = await Sandbox.builder("pi-msb-sdk-contract").image("alpine")
+  const local = await loadLocalSdk();
+  assert.equal(local.defaultBackendKind(), "local");
+  const config: any = await local.Sandbox.builder("pi-msb-sdk-contract").image("alpine")
     .workdir("/guest/project").cpus(2).memory(4096).rootDisk(8192)
-    .maxDuration(1200).detached(false)
+    .maxDurationSeconds(1200).detached(false)
     .volume("/guest/project", (mount) => mount.bind("/tmp/pi-msb-sdk-project"))
     .volume("/guest/readonly", (mount) => mount.bind("/tmp/pi-msb-sdk-readonly").readonly().noexec().nosuid().nodev())
     .network((network) => network.policy(policy)).build();
@@ -28,6 +31,8 @@ test("pinned microsandbox SDK retains cwd bind flags and fail-closed network bui
   assert.equal(config.network.policy.rules.length, 4);
   assert.equal(config.lifecycle.maxDurationSecs, 1200);
   assert.equal(config.lifecycle.idleTimeoutSecs, null);
+  const idle: any = await local.Sandbox.builder("pi-msb-sdk-idle").image("alpine").idleTimeoutSeconds(60).build();
+  assert.equal(idle.lifecycle.idleTimeoutSecs, 60);
 
   const denied: any = await Sandbox.builder("pi-msb-sdk-denied").image("alpine").disableNetwork().build();
   assert.equal(denied.network.enabled, false);
@@ -36,7 +41,7 @@ test("pinned microsandbox SDK retains cwd bind flags and fail-closed network bui
   assert.equal(builder.network.policy.defaultIngress, "deny");
   assert.deepEqual(builder.network.policy.rules.map((rule: any) => [rule.action, rule.destination.group]), [["allow", "host"], ["allow", "public"]]);
   assert.equal(builder.network.policy.defaultEgress, "deny");
-  for (const method of [Sandbox.get, Sandbox.prototype.execStreamWith, Sandbox.prototype.destroy, Image.get, Image.inspect, Image.load, Image.save]) {
+  for (const method of [local.Sandbox.get, local.Sandbox.remove, Sandbox.prototype.info, Sandbox.prototype.ping, Sandbox.prototype.restart, Sandbox.prototype.execStreamWith, Sandbox.prototype.destroy, Image.get, Image.inspect, Image.load, Image.save]) {
     assert.equal(typeof method, "function");
   }
 });
@@ -45,4 +50,7 @@ test("Dockerfile cache version follows the exact runtime SDK dependency", () => 
   const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
   assert.match(manifest.dependencies.microsandbox, /^\d+\.\d+\.\d+$/);
   assert.ok(BUILD_VERSION.includes(`sdk-${manifest.dependencies.microsandbox}-`));
+  for (const target of ["darwin-arm64", "linux-arm64-gnu", "linux-x64-gnu"]) {
+    assert.equal(manifest.optionalDependencies[`@superradcompany/microsandbox-${target}`], manifest.dependencies.microsandbox);
+  }
 });

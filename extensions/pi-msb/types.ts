@@ -1,5 +1,6 @@
 /** Shared pi-microsandbox contracts. */
 import { createHash } from "node:crypto";
+import type { RuntimeVersionMismatch } from "./runtime-compatibility.ts";
 import type {
   BashOperations,
   EditOperations,
@@ -376,6 +377,7 @@ export interface RuntimeState {
   pendingName?: string;
   /** Display-only progress for actual custom-image activation. */
   imagePreparation?: ImagePreparationPhase;
+  runtimeVersionMismatch?: RuntimeVersionMismatch;
   reason?: string;
   /** Display-only liveness; does not change routing or wake eligibility. */
   observation?: "asleep" | "unknown";

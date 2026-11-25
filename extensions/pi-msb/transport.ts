@@ -70,7 +70,7 @@ type ExecHandle = {
 type ExecBuilder = {
   args: (args: string[]) => ExecBuilder;
   cwd?: (cwd: string) => ExecBuilder;
-  timeout?: (timeoutMs: number) => ExecBuilder;
+  timeoutMilliseconds?: (timeoutMs: number) => ExecBuilder;
 };
 type SandboxLike = {
   fs?: () => UnknownRecord;
@@ -252,8 +252,8 @@ function configureExecution(
     configured = configured.cwd(options.cwd);
   }
   if (options?.timeoutMs !== undefined) {
-    if (typeof configured.timeout !== "function") invalidSdk("exec builder timeout");
-    configured = configured.timeout(options.timeoutMs);
+    if (typeof configured.timeoutMilliseconds !== "function") invalidSdk("exec builder timeoutMilliseconds");
+    configured = configured.timeoutMilliseconds(options.timeoutMs);
   }
   return configured;
 }

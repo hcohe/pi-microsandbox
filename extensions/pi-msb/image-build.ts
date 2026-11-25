@@ -9,6 +9,7 @@ import { BUILD_ROOT_DISK_MIB, buildImageReference, discoverDockerfile, selectedI
 import { lockPathFor, tryAcquireOrphanLock } from "./locks.ts";
 import { cachedImage, copyArtifactFile, pendingArtifacts, PendingArtifacts, readArtifactFile, selectionVersion, type BuildArtifact } from "./image-artifact.ts";
 import { buildLockDirectory } from "./image-build-lock.ts";
+import { formatRuntimeVersionMismatch, runtimeVersionMismatch, SDK_VERSION, type RuntimeVersionMismatch } from "./runtime-compatibility.ts";
 import { causalErrorDetails, createSdkTransport, SandboxTransportError, type StreamDiagnostics } from "./transport.ts";
 import type { ImagePreparationPhase, LockHandle, SandboxTransport } from "./types.ts";
 
@@ -16,7 +17,7 @@ const BUILD_TIMEOUT_MS = 20 * 60_000;
 const PATH_ENV = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 export const BUILD_FAILURE = "The current Dockerfile image could not be prepared or verified. Sandbox activation is blocked; no stale image or host fallback was used. Inspect the source or use msb_dockerfile_build then msb_dockerfile_load for diagnostics.";
 export interface BuildDiagnostics {
-  sdk: "microsandbox@0.7.16";
+  sdk: `microsandbox@${typeof SDK_VERSION}`;
   failureKind: "commandNonzero" | StreamDiagnostics["failureKind"] | "operation";
   elapsedMs: number;
   aggregateDeadlineMs: number;
@@ -34,6 +35,7 @@ export interface BuildDiagnostics {
 export interface BuildLog { phase: string; command: string; args: string[]; stdout: string; stderr: string; truncated: boolean; exitCode?: number; diagnostics?: StreamDiagnostics }
 export class ImagePhaseError extends Error {
   diagnostics?: BuildDiagnostics;
+  runtimeVersionMismatch?: RuntimeVersionMismatch;
   readonly phase: string;
   readonly logs: BuildLog[];
   readonly imported: boolean | "unknown";
@@ -99,9 +101,10 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
               if (!raw || typeof raw.id !== "string" || !raw.id || sdk.defaultBackendKind?.() !== "local") return unavailable;
               const id = raw.id;
               const record = await sdk.Sandbox.get(builderName);
-              if (record.id !== id || record.name !== builderName || record.backendKind !== "local" || sdk.defaultBackendKind?.() !== "local") return { outcome: "identityMismatch" };
+              if (record.id !== id || record.name !== builderName || record.contextKind !== "local" || sdk.defaultBackendKind?.() !== "local") return { outcome: "identityMismatch" };
               const statuses = ["created", "starting", "running", "draining", "paused", "stopped", "crashed"];
-              return statuses.includes(record.status) ? { outcome: "sampled", status: record.status } : unavailable;
+              const status = await record.status();
+              return statuses.includes(status) ? { outcome: "sampled", status } : unavailable;
             } catch { return { outcome: "probeFailed" }; }
           })(),
           (async () => {
@@ -137,7 +140,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     // Use the owned object, never a fresh name lookup that might select a replacement.
     if (transport) { await transport.dispose(); transport = undefined; }
     if (raw) {
-      const config = await raw.config();
+      const { spec: config } = await raw.config();
       const labels = Array.isArray(config.labels) ? Object.fromEntries(config.labels) : config.labels;
       if (raw.ownsLifecycle !== true || labels?.["pi-msb.builder"] !== owner) throw new Error("Builder ownership changed");
       await raw.destroy({ timeoutMs: 10_000 });
@@ -154,9 +157,9 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
         builderRemoved = true;
         return;
       }
-      const config = await handle.config();
+      const { spec: config } = await handle.config();
       const labels = Array.isArray(config.labels) ? Object.fromEntries(config.labels) : config.labels;
-      if (handle.name !== builderName || handle.backendKind !== "local" || typeof handle.id !== "string" || !handle.id || config.name !== builderName || labels?.["pi-msb.builder"] !== owner) throw new Error("Builder ownership could not be verified");
+      if (handle.name !== builderName || handle.contextKind !== "local" || typeof handle.id !== "string" || !handle.id || config.name !== builderName || labels?.["pi-msb.builder"] !== owner) throw new Error("Builder ownership could not be verified");
       await handle.destroy({ timeoutMs: 10_000 });
       builderRemoved = true;
     }
@@ -252,7 +255,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     if (!publicPolicy) throw new Error("Public-only builder network policy unavailable");
     const builder = sdk.Sandbox.builder(builderName)
       .image(DEFAULT_CONFIG.image).rootDisk(BUILD_ROOT_DISK_MIB).pullPolicy("if-missing").cpus(2).memory(4096)
-      .security("default").user("root").detached(false).maxDuration(BUILD_TIMEOUT_MS / 1000)
+      .security("default").user("root").detached(false).maxDurationSeconds(BUILD_TIMEOUT_MS / 1000)
       // The SDK treats zero as immediate idle expiry, not disabled.
       .workdir("/pi-msb-input").labels({ "pi-msb.builder": owner });
     builder.network((network: any) => network.policy({ ...publicPolicy, defaultIngress: "deny" }));
@@ -271,7 +274,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     raw = await builder.create();
     if (raw.ownsLifecycle !== true) throw new Error("Builder ownership could not be verified");
     check();
-    if (raw.backendKind !== "local") throw new Error("Builder backend could not be verified");
+    if (raw.contextKind !== "local") throw new Error("Builder backend could not be verified");
     transport = createSdkTransport(raw);
     const run = async (command: string, args: string[], timeoutMs: number) => {
       check(); await guard();
@@ -316,10 +319,12 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     const artifact = await artifacts.publish(source, sanitizedArchive, async () => { check(); await guard(); await validateLocation(); });
     return { artifact, cacheHit: false, logs };
   } catch (error) {
-    primaryFailure = new ImagePhaseError(phase, error instanceof Error ? error.message : String(error), logs);
+    const mismatch = runtimeVersionMismatch(error);
+    primaryFailure = new ImagePhaseError(phase, mismatch ? formatRuntimeVersionMismatch(mismatch) : error instanceof Error ? error.message : String(error), logs);
+    if (mismatch) primaryFailure.runtimeVersionMismatch = mismatch;
     const last = logs.at(-1);
     primaryFailure.diagnostics = {
-      sdk: "microsandbox@0.7.16",
+      sdk: `microsandbox@${SDK_VERSION}`,
       failureKind: cancellationSource === "aggregateDeadline" ? "timeout" : cancellationSource === "user" ? "cancelled" : last?.diagnostics?.failureKind ?? (last?.exitCode !== undefined && last.exitCode !== 0 ? "commandNonzero" : "operation"),
       elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000,
       cancellationSource, causes: causalErrorDetails(error), secondaryFailures: [],
@@ -339,7 +344,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     const cleanup = { builder: builderRemoved ? "removed" : createAttempted ? "unconfirmed" : "notCreated", staging: temporaryAlias ? "retained" : "notCreated", lock: lock ? "unconfirmed" : "notAcquired" };
     const secondary = (operation: string, error: unknown, message: string) => {
       const failure = primaryFailure ?? cleanupFailure ?? (cleanupFailure = new ImagePhaseError("cleanup", message, logs));
-      if (!failure.diagnostics) failure.diagnostics = { sdk: "microsandbox@0.7.16", failureKind: "operation", elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000, causes: [], secondaryFailures: [] };
+      if (!failure.diagnostics) failure.diagnostics = { sdk: `microsandbox@${SDK_VERSION}`, failureKind: "operation", elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000, causes: [], secondaryFailures: [] };
       failure.diagnostics.secondaryFailures.push({ operation, causes: causalErrorDetails(error) });
     };
     try { await cleanupBuilder(); cleanup.builder = builderRemoved ? "removed" : "notCreated"; }

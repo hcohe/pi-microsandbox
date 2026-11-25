@@ -18,7 +18,7 @@ export function fakeSdk(calls: string[], initial?: { name: string; status: strin
       const builder: any = {
         args(value: string[]) { execution.args = value; return builder; },
         cwd(value: string) { execution.cwd = value; return builder; },
-        timeout(value: number) { execution.timeout = value; return builder; },
+        timeoutMilliseconds(value: number) { execution.timeout = value; return builder; },
       };
       configure(builder);
       calls.push(`exec:${command}:${JSON.stringify(execution.args)}`);
@@ -30,13 +30,16 @@ export function fakeSdk(calls: string[], initial?: { name: string; status: strin
   const makeHandle = (name: string, status: string, labels: Record<string, string>) => {
     const raw = rawSandbox(name);
     const handle: any = {
-      name, status, createdAt: new Date(),
-      config: () => ({ name, labels }),
-      connect: async () => { calls.push(`connect:${name}`); return raw; },
-      startDetached: async () => { calls.push(`start:${name}`); return raw; },
+      ...raw,
+      info: async () => ({ name, status, createdAt: new Date().toISOString() }),
+      config: async () => ({ kind: "local", spec: { name, labels } }),
+      ping: async () => { calls.push(`connect:${name}`); },
+      restart: async () => { calls.push(`start:${name}`); return raw; },
       stopWithTimeout: async () => { calls.push(`stop:${name}`); },
-      waitUntilStopped: async () => ({ status: "stopped" }),
-      remove: async () => { calls.push(`remove:${name}`); sandboxes.delete(name); },
+      destroy: async ({ timeoutMs }: { timeoutMs?: number } = {}) => {
+        if (timeoutMs !== undefined) calls.push(`stop:${name}`);
+        calls.push(`remove:${name}`); sandboxes.delete(name);
+      },
       logs: async () => [{ text: () => logText }],
     };
     sandboxes.set(name, handle);
@@ -52,7 +55,7 @@ export function fakeSdk(calls: string[], initial?: { name: string; status: strin
         pullPolicy(value: string) { calls.push(`pull-policy:${value}`); return builder; },
         cpus(value: number) { calls.push(`cpus:${value}`); return builder; },
         memory(value: number) { calls.push(`memory:${value}`); return builder; },
-        idleTimeout(value: number) { calls.push(`idle:${value}`); return builder; },
+        idleTimeoutSeconds(value: number) { calls.push(`idle:${value}`); return builder; },
         detached(value: boolean) { calls.push(`detached:${value}`); return builder; },
         workdir(value: string) { calls.push(`workdir:${value}`); return builder; },
         labels(value: Record<string, string>) { metadata.labels = value; calls.push(`labels:${JSON.stringify(value)}`); return builder; },
@@ -88,6 +91,7 @@ export function fakeSdk(calls: string[], initial?: { name: string; status: strin
       return builder;
     },
     async get(name: string) { const handle = sandboxes.get(name); if (!handle) throw notFound(); return handle; },
+    async remove(name: string) { calls.push(`remove:${name}`); sandboxes.delete(name); },
     async listWith() { return { sandboxes: [], nextCursor: undefined }; },
   };
   return { Sandbox, defaultBackendKind: () => "local", Image: {

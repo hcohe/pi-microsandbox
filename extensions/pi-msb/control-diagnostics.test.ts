@@ -5,31 +5,35 @@ import { syncBuiltinESMExports } from "node:module";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { RuntimeError } from "microsandbox";
 import { fakeSdk } from "../../test/fake-msb-sdk.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { createMsbIntegration } from "./control.ts";
 import { boundDiagnosticsReport, registerDiagnosticsTool } from "./diagnostics-tools.ts";
+import { SDK_VERSION } from "./runtime-compatibility.ts";
 import type { Config } from "./types.ts";
 
-async function fixture(t: test.TestContext, active = false, fault?: { stage: "sdk" | "start" | "prepare"; enabled: boolean }) {
+async function fixture(t: test.TestContext, active = false, fault?: { stage: "sdk" | "start" | "prepare"; enabled: boolean; error?: Error }) {
   const root = await mkdtemp("/tmp/msb-passive-diagnostics-");
   const cwd = join(root, "workspace");
   await mkdir(cwd);
   let forbidden = false, envReads = 0, sdkLoads = 0, stateChanges = 0, writes = 0;
   const calls: string[] = [];
   const configurationNotices: unknown[] = [];
+  const runtimeMismatchNotices: unknown[] = [];
+  let loadedSdk: ReturnType<typeof fakeSdk>;
   const env = new Proxy({}, { get() { envReads++; if (forbidden) throw new Error("environment read"); return undefined; }, ownKeys() { if (forbidden) throw new Error("environment enumeration"); return []; } });
   const integration = createMsbIntegration({ sessionId: "diagnostics", cwd, configDirName: ".pi", agentDir: join(root, "agent"), env,
     sdkLoader: async () => {
       sdkLoads++; if (forbidden) throw new Error("SDK loaded");
       if (fault?.enabled && fault.stage === "sdk") throw new Error("PRIVATE_SDK_ERROR credential=PRIVATE_TOKEN");
-      const sdk = fakeSdk(calls);
+      const sdk = loadedSdk = fakeSdk(calls);
       const originalBuilder = sdk.Sandbox.builder;
       sdk.Sandbox.builder = (...args: Parameters<typeof originalBuilder>) => {
         const builder = originalBuilder(...args);
         const create = builder.create;
         builder.create = async () => {
-          if (fault?.enabled && fault.stage === "start") throw new Error("PRIVATE_START_ERROR credential=PRIVATE_TOKEN");
+          if (fault?.enabled && fault.stage === "start") throw fault.error ?? new Error("PRIVATE_START_ERROR credential=PRIVATE_TOKEN");
           const raw = await create();
           if (fault?.enabled && fault.stage === "prepare") raw.execWith = async () => { throw new Error("PRIVATE_PREPARE_ERROR credential=PRIVATE_TOKEN"); };
           return raw;
@@ -42,10 +46,11 @@ async function fixture(t: test.TestContext, active = false, fault?: { stage: "sd
     locksPort: { tryAcquire: async () => ({ path: join(root, "lock"), release: async () => undefined }) },
     appendEntry: () => { writes++; }, onState: () => { stateChanges++; },
     onConfigurationFailure: (failure) => { configurationNotices.push(failure); },
+    onRuntimeVersionMismatch: (failure) => { runtimeMismatchNotices.push(failure); },
   });
   const config = { ...structuredClone(DEFAULT_CONFIG), autoStart: active, bootstrapTools: false, docker: { mode: "disabled", startupTimeoutMs: 15000 }, pruneOnStart: false } as Config;
   t.after(async () => { forbidden = false; await integration.manager.shutdown(); integration.endSession(); await rm(root, { recursive: true, force: true }); });
-  return { root, cwd, integration, config, configurationNotices, start: () => integration.configureSession({ sessionId: "diagnostics", cwd, projectTrusted: true, config: { config, provenance: {}, warnings: [] } }),
+  return { root, cwd, integration, config, configurationNotices, runtimeMismatchNotices, sdk: () => loadedSdk, start: () => integration.configureSession({ sessionId: "diagnostics", cwd, projectTrusted: true, config: { config, provenance: {}, warnings: [] } }),
     forbid() { forbidden = true; }, allow() { forbidden = false; }, counters: () => ({ envReads, sdkLoads, stateChanges, writes, calls: [...calls] }) };
 }
 
@@ -267,6 +272,62 @@ async function assertPassiveFailure(t: test.TestContext, f: Awaited<ReturnType<t
     f.allow();
   }
 }
+
+test("SDK launch-contract rejection reports both versions, never falls back, and clears on recovery", async (t) => {
+  const fault = { stage: "start" as const, enabled: true, error: new RuntimeError("runtime error: no tested sandbox launch contract for runtime 0.99.1", { cause: new Error("PRIVATE_STACK_AND_PATH") }) };
+  const f = await fixture(t, true, fault);
+  f.config.fallbackMode = "host";
+  const state = await f.start();
+  assert.equal(state.status, "unavailable");
+  assert.match(state.reason!, /SDK.*0\.99\.1.*Update pi-microsandbox.*MSB_PATH.*restart Pi/);
+  assert.doesNotMatch(state.reason!, /PRIVATE_/);
+  const expected = { sdkVersion: SDK_VERSION, runtimeVersion: "0.99.1" };
+  assert.deepEqual(f.runtimeMismatchNotices, [expected]);
+  const report: any = boundDiagnosticsReport(await f.integration.control.getDiagnostics!());
+  assert.deepEqual(report.failure.versionMismatch, expected);
+  assert.equal(report.runtime.execution, "blocked");
+  assert.equal(report.failure.reason, state.reason);
+  await assertPassiveFailure(t, f, "runtime_version_mismatch");
+  assert.deepEqual(f.runtimeMismatchNotices, [expected]);
+  fault.enabled = false;
+  assert.equal((await f.start()).status, "active");
+  const recovered: any = await f.integration.control.getDiagnostics!();
+  assert.equal(recovered.failure.code, "none");
+  assert.equal(recovered.failure.versionMismatch, undefined);
+});
+
+test("lazy wake reports a launch-contract refusal without leaking an undisplayable version", async (t) => {
+  const f = await fixture(t, true);
+  f.config.fallbackMode = "host";
+  const active = await f.start();
+  assert.equal(active.status, "active");
+  const sandbox = await f.sdk().Sandbox.get(active.info!.name);
+  const info = await sandbox.info();
+  sandbox.info = async () => ({ ...info, status: "stopped" });
+  sandbox.restart = async () => { throw new RuntimeError(`runtime error: no tested sandbox launch contract for runtime 0.99.1-${"PRIVATE".repeat(80)}`); };
+  let ran = false;
+  await assert.rejects(f.integration.provider.withRuntime(async () => { ran = true; }), (error: Error) => {
+    assert.match(error.message, /selected host runtime \(version unavailable\).*restart Pi/);
+    assert.doesNotMatch(error.message, /PRIVATE/);
+    return true;
+  });
+  assert.equal(ran, false);
+  const report: any = await f.integration.control.getDiagnostics!();
+  assert.equal(report.failure.code, "runtime_version_mismatch");
+  assert.equal(report.runtime.execution, "blocked");
+  assert.deepEqual(report.failure.versionMismatch, { sdkVersion: SDK_VERSION, runtimeVersion: "unknown" });
+  assert.deepEqual(f.runtimeMismatchNotices, [report.failure.versionMismatch]);
+});
+
+test("untrusted mismatch-shaped messages and diagnostic details are not published as version evidence", async (t) => {
+  const f = await fixture(t, true, { stage: "start", enabled: true, error: new Error("no tested sandbox launch contract for runtime 0.99.1") });
+  await f.start();
+  await assertPassiveFailure(t, f, "runtime_start_failed");
+  assert.deepEqual(f.runtimeMismatchNotices, []);
+  const report: any = boundDiagnosticsReport({ outcome: "diagnosed", failure: { phase: "runtime_failure", code: "runtime_version_mismatch", versionMismatch: { sdkVersion: "0.8.2", runtimeVersion: "PRIVATE_NOT_A_VERSION" } } });
+  assert.equal(report.failure.code, "unknown");
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE_/);
+});
 
 for (const stage of ["sdk", "start", "prepare"] as const) test(`cached ${stage} failure is actionable, private and passive`, async (t) => {
   const fault = { stage, enabled: true };

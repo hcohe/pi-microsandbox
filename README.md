@@ -69,7 +69,7 @@ it yourself. Then try a change:
 > policy took effect and when it expires.
 
 `msb_config_set` shows what would change and where, with **No selected by default**.
-Choose **Session** for temporary changes, **Project** for settings shared across
+Choose **Session** for this session only, **Project** for settings shared across
 supported Git worktrees, or **Global** for defaults across projects. Session
 overrides reset on Pi `/reload`, a session/workspace switch, or shutdown.
 Persistent settings live outside the mounted project. A save is not proof the

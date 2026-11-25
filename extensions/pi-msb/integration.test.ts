@@ -839,7 +839,8 @@ test("UI refresh and manager notifications track sleep, wake, blocked preflight 
   const setup = { sessionId: "liveness", cwd, projectTrusted: true, config: resolved(config()) };
   await integration.configureSession(setup);
   const handle = await get(integration.control.getState().info!.name);
-  handle.status = "stopped";
+  const info = await handle.info();
+  handle.info = async () => ({ ...info, status: "stopped" });
   const before = calls.length;
   assert.equal((await integration.provider.refreshState!()).observation, "asleep");
   assert.equal(integration.provider.isActive(), true);

@@ -101,6 +101,8 @@ extensions/pi-msb/dockerfile-phase-tools.ts required
 extensions/pi-msb/image-source.ts required
 extensions/pi-msb/index.ts required
 extensions/pi-msb/labels.ts required
+extensions/pi-msb/local-sdk.ts required
+extensions/pi-msb/runtime-compatibility.ts required
 extensions/pi-msb/locks.ts required
 extensions/pi-msb/operations-exec.ts required
 extensions/pi-msb/operations.ts required

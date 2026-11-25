@@ -1,5 +1,6 @@
 import { generateName } from "@criblinc/docker-names";
 import { classifySettingsEffect } from "./settings-effect.ts";
+import { formatRuntimeVersionMismatch, runtimeVersionMismatch } from "./runtime-compatibility.ts";
 import {
   displayId,
   STATE_SCHEMA_VERSION,
@@ -222,11 +223,13 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   }
 
   function setFailure(request: BootRequest | null, error: unknown): RuntimeState {
-    const reason = redactMessage(error, request?.config, deps.redactError);
+    const mismatch = runtimeVersionMismatch(error);
+    const reason = mismatch ? formatRuntimeVersionMismatch(mismatch) : redactMessage(error, request?.config, deps.redactError);
     publish({
-      status: !request?.blockHostFallback && request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
+      status: !mismatch && !request?.blockHostFallback && request?.config.fallbackMode === "host" ? "host-fallback" : "unavailable",
       info: null,
       reason,
+      ...(mismatch ? { runtimeVersionMismatch: mismatch } : {}),
     });
     return state;
   }
@@ -696,6 +699,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         info: state.info ? { ...state.info, docker: { ...state.info.docker } } : null,
         ...(state.pendingName ? { pendingName: state.pendingName } : {}),
         ...(state.reason ? { reason: state.reason } : {}),
+        ...(state.runtimeVersionMismatch ? { runtimeVersionMismatch: state.runtimeVersionMismatch } : {}),
         ...(observation ? { observation } : {}),
       };
     },
@@ -756,6 +760,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
             // queued before failure (including callback reentry) must also reject
             // without waiting for the active callbacks that cleanup is draining.
             if (state.status === "active") ownRetirement = retireFailedRuntime(error);
+            if (state.runtimeVersionMismatch) throw unavailableError(state);
             throw error;
           }
         });

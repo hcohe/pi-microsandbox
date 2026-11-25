@@ -5,6 +5,7 @@ import type { MsbControl } from "./types.ts";
 import { isConfigurationFailureSnapshot } from "./configuration-failure.ts";
 import { isImagePreparationFailureSnapshot } from "./image-boot-notice.ts";
 import { HOST_COMMAND_GUIDANCE } from "./host-command-guidance.ts";
+import { formatRuntimeVersionMismatch, isRuntimeVersionMismatch } from "./runtime-compatibility.ts";
 
 export const MAX_DIAGNOSTICS_BYTES = 48 * 1024;
 const failureSummaries = {
@@ -15,6 +16,7 @@ const failureSummaries = {
   host_secret_environment_unavailable: "A configured host secret environment source was unavailable. Check the host environment before retrying activation.",
   runtime_preparation_failed: "Guest runtime preparation failed. Check required image tools, bootstrap configuration and required Docker readiness.",
   runtime_start_failed: "Sandbox startup failed. Check host Microsandbox runtime setup and configuration before retrying activation.",
+  runtime_version_mismatch: "The Microsandbox SDK cannot launch the selected host runtime.",
   invalid_configuration: "No valid configuration is cached. Inspect configuration with msb_config_get; invalid syntax may require manual host repair.",
   workspace_unavailable: "Workspace or session identity is unavailable. Check the host working directory and restart Pi.",
 } as const;
@@ -39,15 +41,19 @@ export function boundDiagnosticsReport(report: Record<string, unknown>): Record<
   for (const key of ["secretCount", "mountCount"]) if (Number.isSafeInteger(settings[key]) && Number(settings[key]) >= 0 && Number(settings[key]) <= 1_000_000) safeSettings[key] = settings[key];
   for (const [key, allowed] of Object.entries({ networkMode: ["default", "deny", "open", "allowlist"], dockerMode: ["disabled", "require", "auto"], fallbackMode: ["block", "host"] })) safeSettings[key] = pick(settings[key], allowed);
   const outcome = pick(report.outcome, ["diagnosed", "unavailable", "rejected"], "unavailable");
-  const phase = pick(record(report.failure).phase, ["workspace_or_session_not_ready", "configuration_not_ready", "runtime_failure", "none"]);
-  const code = (phase === "none" ? "none" : pick(record(report.failure).code, Object.keys(failureSummaries))) as DiagnosticFailureCode;
+  const failure = record(report.failure);
+  const phase = pick(failure.phase, ["workspace_or_session_not_ready", "configuration_not_ready", "runtime_failure", "none"]);
+  const mismatch = phase === "runtime_failure" && failure.code === "runtime_version_mismatch" && isRuntimeVersionMismatch(failure.versionMismatch)
+    ? failure.versionMismatch : undefined;
+  const reportedCode = pick(failure.code, Object.keys(failureSummaries)) as DiagnosticFailureCode;
+  const code = phase === "none" ? "none" : reportedCode === "runtime_version_mismatch" && !mismatch ? "unknown" : reportedCode;
   return {
     outcome, readOnly: true, evidence: "cached; last-known, not live-probed",
     ...(outcome === "diagnosed" ? {
       runtime: { status: pick(runtime.status, ["active", "off", "disabled", "unavailable", "host-fallback", "booting", "stopping"]), execution: pick(runtime.execution, ["sandbox", "explicit-host", "fallback-host", "blocked"]) },
       readiness: Object.fromEntries(["workspaceReady", "settingsReady", "configReady"].map((key) => [key, readiness[key] === true])),
       host: { platform: pick(host.platform, ["darwin", "linux", "win32", "freebsd", "openbsd", "aix", "sunos", "android"]), arch: pick(host.arch, ["arm", "arm64", "x64", "ia32", "ppc64", "s390x", "riscv64"]), node: typeof host.node === "string" && /^v\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host.node) ? host.node : "unknown" },
-      failure: { phase, code, reason: failureSummaries[code] },
+      failure: { phase, code, reason: mismatch ? formatRuntimeVersionMismatch(mismatch) : failureSummaries[code], ...(mismatch ? { versionMismatch: mismatch } : {}) },
       ...(isConfigurationFailureSnapshot(report.configurationFailure) ? { configurationFailure: report.configurationFailure } : {}),
       ...(isImagePreparationFailureSnapshot(report.imagePreparationFailure) ? { imagePreparationFailure: report.imagePreparationFailure } : {}),
       desired: { evidence: "last-known resolution; not live", validForSession: readiness.configReady === true && desired.validForSession === true, ...(readiness.configReady === true && desired.validForSession === true ? { settings: safeSettings } : {}) },
@@ -72,7 +78,7 @@ function result(report: Record<string, unknown>, format: "text" | "json" = "text
 export function registerDiagnosticsTool(pi: ExtensionAPI, control: MsbControl): void {
   pi.registerTool({
     name: "msb_diagnostics", label: "Microsandbox diagnostics",
-    description: "Passive read-only diagnostics available even when off or blocked. Only already held state, cached safe configuration projections, latest immutable configuration failure (static field constraints or syntax/read/policy guidance, never rejected values/paths), and latest bounded sanitized image preparation/build/load failure output from this session/attempt. No settings inspection, source/environment reads, commands, SDK, live log fetching, credential resolution, live checks, bootstrap or writes. Cached image failure is separate from runtime blocking status and clears on a new image attempt or session; it is not live evidence. Start here and use msb_config_get before explaining a narrow live diagnostic need and requesting one explicitly approved host bash command (finite positive timeout <=120 seconds, execution cwd (default: fixed session cwd), ready identity/configuration and existing host permission required). Never disable protection or enable fallback as a workaround. Optional format=text/json only. Both text and details bounded to 48 KiB; no overflow files. " + HOST_COMMAND_GUIDANCE,
+    description: "Passive read-only diagnostics available even when off or blocked. Only already held state, cached safe configuration projections, bounded SDK/runtime version mismatch evidence, latest immutable configuration failure (static field constraints or syntax/read/policy guidance, never rejected values/paths), and latest bounded sanitized image preparation/build/load failure output from this session/attempt. No settings inspection, source/environment reads, commands, SDK, live log fetching, credential resolution, live checks, bootstrap or writes. Cached image failure is separate from runtime blocking status and clears on a new image attempt or session; it is not live evidence. Start here and use msb_config_get before explaining a narrow live diagnostic need and requesting one explicitly approved host bash command (finite positive timeout <=120 seconds, execution cwd (default: fixed session cwd), ready identity/configuration and existing host permission required). Never disable protection or enable fallback as a workaround. Optional format=text/json only. Both text and details bounded to 48 KiB; no overflow files. " + HOST_COMMAND_GUIDANCE,
     parameters,
     renderCall() { return new Text("Microsandbox diagnostics (passive, read-only)", 0, 0); },
     renderResult() { return new Text("Passive diagnostics; no live checks or changes. See tool content for results.", 0, 0); },

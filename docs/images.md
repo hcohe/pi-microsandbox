@@ -8,8 +8,9 @@ guest-local state.
 
 **New in source builds:** the default image includes **gcloud 592.0.0**, **AWS
 CLI v2 2.39.6**, and **curl** alongside all four runtimes. Existing published tags
-and the package's digest-pinned default are unchanged; use a new source build until a
-new image is published and the package pin updated.
+are unchanged, and the package still uses their existing image contents. It pins the
+platform manifest for the host architecture, not the multi-platform index. Use a
+new source build until a new image is published and the package pin updated.
 [Build one now →](#cloud-clis-from-this-branch)
 
 You can ask your agent to make the change:
@@ -282,7 +283,7 @@ the old native digest; the build ref is digest-checked before and after save.
 
 Microsandbox's cache is a **same-user trusted store**, not an adversarial registry
 or provenance boundary. Do not retag/replace generated references concurrently.
-SDK 0.7.16 has no native tag transaction or compare-and-swap: `Image.load` adds
+SDK 0.8.2 has no native tag transaction or compare-and-swap: `Image.load` adds
 both the sanitized archive tag and the selected alias sequentially. Failure can
 leave either/both durably changed, even when activation is withheld. Checks detect
 observed changes, not same-digest ABA, and cannot promise rollback or protect a
@@ -356,7 +357,7 @@ Build inputs/output are transcript-visible: never include secrets.
 In particular, **“Execution stream ended without an exit event”** originates in
 our SDK transport adapter: the async iterator reached EOF without an integer
 `exited` event (and without cancellation/disposal taking precedence). In pinned
-`microsandbox@0.7.16`, the JS iterator ends when native `recv()` returns `null`.
+`microsandbox@0.8.2`, the JS iterator ends when native `recv()` returns `null`.
 This is missing completion evidence, **not** proof that `docker save` completed,
 that a timeout fired, or that the VM ran out of memory. Successful retry does not
 identify the original cause. No automatic retry, salvage, import or activation
@@ -384,14 +385,14 @@ Deadlines are distinct:
   `cancellationSource=user` means the supplied tool/interaction signal fired.
   Only the former is classified as deadline timeout. An SDK typed timeout is
   separately reported as `transportCode=TIMEOUT`; EOF alone is never a timeout.
-- The attached builder separately requests **`maxDuration=1200` seconds**. Its
+- The attached builder separately requests **`maxDurationSeconds(1200)`**. Its
   enforcement timing or termination reason is not established by the command
   stream. Builder idle timeout remains **omitted**: pinned SDK/runtime zero means
   immediate idle eligibility, not “disable idle timeout”. This fixes a builder-only
   configuration mismatch, **not a proven cause of the historical incident**.
   Ordinary runtime idle policy is unchanged.
 - `requestedTimeoutMs` records the SDK exec request (17 seconds for Docker
-  startup; 20 minutes each for build/save). **Pinned SDK 0.7.16 implements streaming
+  startup; 20 minutes each for build/save). **Pinned SDK 0.8.2 implements streaming
   timeout enforcement**, hence `sdkStreamingTimeoutEnforced=true` (a source-verified
   implementation fact, not a live test result). Unlike 0.6.16, its deadline monitor
   requests SIGKILL after execution starts. Raw `recv()` reports the actual exit event;
@@ -431,11 +432,8 @@ separate load approval. New diagnostics cannot reconstruct the historical
 attempt's missing stream events, archive state, VM termination cause or first
 `docker save` completion.
 
-Pinned-source references: [SDK async iteration](https://github.com/superradcompany/microsandbox/blob/v0.7.16/sdk/node-ts/src/internal/async-iter.ts),
-[streaming exec and shared event receiver](https://github.com/superradcompany/microsandbox/blob/v0.7.16/sdk/rust/lib/sandbox/exec/session.rs)
-(`exec_stream` enforces its deadline; raw `recv` retains actual exit events;
-`wait` consumes the same receiver, not an independent cached status), [idle option storage](https://github.com/superradcompany/microsandbox/blob/v0.7.16/sdk/rust/lib/sandbox/builder.rs),
-and [runtime lifetime/idle handling](https://github.com/superradcompany/microsandbox/blob/v0.7.16/crates/runtime/lib/runner/vm.rs).
+See the [pinned SDK and runtime source](https://github.com/superradcompany/microsandbox/tree/v0.8.2)
+for the execution-stream and lifecycle contracts.
 
 Mutable `FROM` tags and external downloads are not refreshed on native cache hits.
 Prefer pinned dependencies; change the pin/input and explicitly build/load when

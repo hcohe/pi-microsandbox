@@ -78,7 +78,9 @@ function deepFreeze<T>(value: T): DeepReadonly<T> {
 
 /** Defaults from PLAN §11.2. Values containing credentials are deliberately absent. */
 export const DEFAULT_CONFIG = deepFreeze<Config>({
-  image: "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c",
+  image: `ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:${process.arch === "arm64"
+    ? "6718a81800e965a5bf519e8280c8a0de54db47451ff896854eaf7bb9515a2024"
+    : "b9f897ba190a5a94b24b12b47dcc9c6ba976e8a9fd65c29c3df93c15fa25c7a2"}`,
   pullPolicy: "if-missing",
   bootstrapTools: "auto",
   cpus: 4,

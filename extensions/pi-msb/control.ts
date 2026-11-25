@@ -4,7 +4,8 @@ import { PendingArtifacts, selectionVersion } from "./image-artifact.ts";
 import { homedir } from "node:os";
 import type { DockerfileSource } from "./image-source.ts";
 import { openDockerfile } from "./dockerfile-storage.ts";
-import { BUILD_FAILURE, buildDockerfileImage, ensureDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
+import { BUILD_FAILURE, ImagePhaseError, buildDockerfileImage, ensureDockerfileImage, loadDockerfileImage, verifyDockerfileImage } from "./image-build.ts";
+import { formatRuntimeVersionMismatch, isRuntimeVersionMismatch, runtimeVersionMismatch, RuntimeVersionMismatchError, type RuntimeVersionMismatch } from "./runtime-compatibility.ts";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
@@ -23,6 +24,7 @@ import { classifySettingsEffect, LIVE_SETTINGS_KEYS } from "./settings-effect.ts
 import { SettingsEditor } from "./settings.ts";
 import { buildSandboxLabels, decodeSessionState, normalizeSandboxRecord, encodeSessionState } from "./labels.ts";
 import { acquireOwnerLock, createLocksPort } from "./locks.ts";
+import { loadLocalSdk } from "./local-sdk.ts";
 import { createBashOps, createFindOps, createGrepOps } from "./operations-exec.ts";
 import { createEditOps, createLsOps, createReadOps, createWriteOps } from "./operations.ts";
 import { pruneStale, type PrunePort } from "./prune.ts";
@@ -62,7 +64,7 @@ export interface MicrosandboxModule {
   NetworkPolicy?: AnyRecord;
   Rule?: AnyRecord;
   Image?: Pick<typeof import("microsandbox").Image, "get" | "load" | "save" | "inspect">;
-  defaultBackendKind?: () => "local" | "cloud";
+  defaultBackendKind?: () => "local" | "remote" | "cloud";
 }
 
 export interface SessionSetup {
@@ -89,6 +91,7 @@ export interface MsbControlOptions {
   onImagePreparation?: (phase: ImagePreparationPhase) => void;
   onImagePreparationFailure?: (message: string) => void;
   onConfigurationFailure?: (failure: ConfigurationFailureSnapshot) => void;
+  onRuntimeVersionMismatch?: (failure: RuntimeVersionMismatch) => void;
   onCustomImageBoot?: (source: DockerfileSource) => void;
 }
 
@@ -156,30 +159,17 @@ function sdkLabels(value: unknown): Record<string, string> {
   return out;
 }
 
-function sdkStatus(value: unknown): string | undefined {
-  const status = objectConfig(value).status ?? objectConfig(value).state;
-  return typeof status === "string" ? status : undefined;
-}
-
-async function handleConfig(handle: AnyRecord): Promise<AnyRecord> {
-  try {
-    if (typeof handle.config === "function") return objectConfig(await handle.config());
-  } catch { /* configJson is a compatible fallback */ }
-  try {
-    if (typeof handle.configJson === "string") return objectConfig(JSON.parse(handle.configJson));
-    if (typeof handle.configJson === "function") return objectConfig(JSON.parse(await handle.configJson()));
-  } catch { /* malformed SDK metadata is treated as untrusted */ }
-  return {};
-}
-
-function inspectedFromHandle(handle: AnyRecord, config: AnyRecord = {}): InspectedSandbox {
+async function inspectHandle(handle: AnyRecord): Promise<InspectedSandbox> {
+  const [info, config] = await Promise.all([handle.info(), handle.config()]);
+  const observed = objectConfig(info);
+  const spec = objectConfig(objectConfig(config).spec);
+  const time = typeof observed.createdAt === "string" ? Date.parse(observed.createdAt) : NaN;
   return {
-    name: typeof handle.name === "string" ? handle.name : String(config.name ?? ""),
-    status: sdkStatus(handle),
-    labels: sdkLabels(config),
-    createdAt: handle.createdAt instanceof Date ? handle.createdAt.getTime() : typeof handle.createdAt === "number" ? handle.createdAt : undefined,
+    name: typeof observed.name === "string" ? observed.name : "",
+    status: typeof observed.status === "string" ? observed.status : undefined,
+    labels: sdkLabels(spec),
+    createdAt: Number.isFinite(time) ? time : undefined,
     _handle: handle,
-    _config: config,
   };
 }
 
@@ -350,7 +340,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     } catch { return "Diagnostic unavailable: a secret source could not be read for redaction."; }
   };
   const loadSdk = async (): Promise<MicrosandboxModule> => {
-    if (!sdkPromise) sdkPromise = (options.sdkLoader ?? (async () => await import("microsandbox")))();
+    if (!sdkPromise) sdkPromise = (options.sdkLoader ?? loadLocalSdk)();
     return sdkPromise;
   };
   const lockPort = () => options.locksPort ?? createLocksPort({ lockDir: expandHome(configRef.value.lockDir) });
@@ -371,12 +361,10 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       return list;
     });
     return {
-      sandboxes: page.sandboxes.map((item: AnyRecord) => normalizeSandboxRecord({
-        name: item.name,
-        status: item.status,
-        labels: sdkLabels(item.config?.() ?? item),
-        createdAt: item.createdAt instanceof Date ? item.createdAt.getTime() : item.createdAt,
-      })).filter((item: any): item is any => item !== null),
+      sandboxes: (await Promise.all(page.sandboxes.map(async (item: AnyRecord) => {
+        try { return normalizeSandboxRecord(await inspectHandle(item)); }
+        catch (error) { if (sdkNotFound(error)) return null; throw error; }
+      }))).filter((item: any): item is any => item !== null),
       nextCursor: page.nextCursor,
     };
   };
@@ -390,8 +378,8 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     },
     remove: async (name) => {
       const msb = await sdk();
-      const handle = await msb.Sandbox.get(name);
-      await handle.remove();
+      // Prune has a separate stop step; removal must not stop a running replacement.
+      await msb.Sandbox.remove(name);
     },
   };
 
@@ -410,18 +398,22 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const msb = await sdk();
       try {
         const handle = await msb.Sandbox.get(name);
-        return inspectedFromHandle(handle, await handleConfig(handle));
+        return await inspectHandle(handle);
       } catch (error) {
         if (sdkNotFound(error)) return null;
         throw error;
       }
     },
-    connectSandbox: async (value) => objectConfig(value)._handle.connect(),
-    startSandbox: async (value) => objectConfig(value)._handle.startDetached(),
+    connectSandbox: async (value) => {
+      const handle = objectConfig(value)._handle;
+      await handle.ping();
+      return handle;
+    },
+    startSandbox: async (value) => objectConfig(value)._handle.restart({ detached: true }),
     createSandbox: async (request, name, activationGuard) => {
       const msb = await sdk();
       const labels = buildSandboxLabels({ sessionId: request.sessionId, cwd: request.cwd, root: request.workspace.hostRoot, guestRoot: request.workspace.guestRoot, pid: process.pid, image: request.config.image });
-      let builder = msb.Sandbox.builder(name).image(request.config.image).pullPolicy(request.config.pullPolicy).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeout(request.config.idleTimeoutSec).detached(request.config.detached).workdir(request.workspace.cwd).labels(labels);
+      let builder = msb.Sandbox.builder(name).image(request.config.image).pullPolicy(request.config.pullPolicy).cpus(request.config.cpus).memory(request.config.memoryMiB).idleTimeoutSeconds(request.config.idleTimeoutSec).detached(request.config.detached).workdir(request.workspace.cwd).labels(labels);
       builder.volume(request.workspace.guestRoot, (m: AnyRecord) => m.bind(request.workspace.hostRoot));
       for (const mount of request.config.mounts) applyMount(builder, mount);
       applyNetwork(builder, request.config, msb);
@@ -456,21 +448,21 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
           });
         }
         await activationGuard?.();
-        return await builder.create();
+        try { return await builder.create(); }
+        catch (error) {
+          const mismatch = runtimeVersionMismatch(error);
+          if (mismatch) throw new RuntimeVersionMismatchError(mismatch);
+          throw error;
+        }
       } catch (error) {
+        if (error instanceof RuntimeVersionMismatchError) throw error;
         throw redactedError(error, request.config, resolvedSecrets);
       }
     },
     stopAndRemove: async (name, timeout) => {
       const msb = await sdk();
       const handle = await msb.Sandbox.get(name);
-      await handle.stopWithTimeout(timeout);
-      if (typeof handle.waitUntilStopped === "function") {
-        const stopped = await handle.waitUntilStopped();
-        const status = String(stopped?.status ?? "").toLowerCase();
-        if (status && !["stopped", "exited", "dead", "killed", "created"].includes(status)) throw new Error(`sandbox ${name} did not stop`);
-      }
-      await handle.remove();
+      await handle.destroy({ timeoutMs: timeout });
     },
     createTransport: (raw) => createSdkTransport(raw),
     createOperations: (transport) => {
@@ -643,7 +635,13 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     buildAbort.abort();
     buildAbort = new AbortController();
   };
-  const boot = async (request: Parameters<typeof manager.boot>[0], approval?: { guard?: () => Promise<void>; signal?: AbortSignal }) => {
+  const notifiedMismatches = new WeakSet<RuntimeVersionMismatch>();
+  const notifyMismatch = (mismatch: RuntimeVersionMismatch) => {
+    if (notifiedMismatches.has(mismatch)) return;
+    notifiedMismatches.add(mismatch);
+    try { options.onRuntimeVersionMismatch?.(mismatch); } catch { /* UI must not affect blocking. */ }
+  };
+  const boot = async (request: BootRequest, approval?: { guard?: () => Promise<void>; signal?: AbortSignal }): Promise<RuntimeState> => {
     invalidateActivation();
     const generation = activationGeneration;
     const identity = execution.context.current();
@@ -718,6 +716,11 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         } catch (error) {
           await assertApproval();
           if (!current()) return visibleState();
+          const mismatch = error instanceof ImagePhaseError ? error.runtimeVersionMismatch : runtimeVersionMismatch(error);
+          if (isRuntimeVersionMismatch(mismatch)) {
+            notifyMismatch(mismatch);
+            return { status: "unavailable", info: null, reason: formatRuntimeVersionMismatch(mismatch), runtimeVersionMismatch: mismatch };
+          }
           const snapshot = safeImageFailure(error, resolution, request.config, "activation");
           if (current() && imageFailureAttempt === failureAttempt && snapshot.failureKind !== "cancelled") {
             beginImageFailureAttempt();
@@ -742,6 +745,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       const result = await manager.boot(request, source ? assertRuntime : approvalBound ? assertApproval : undefined);
       if (approvalBound) await assertApproval();
       if (!current()) return visibleState();
+      if (result.runtimeVersionMismatch) notifyMismatch(result.runtimeVersionMismatch);
       if (result.status !== "unavailable" && result.status !== "host-fallback") diagnosticFailure = "unknown";
       if (result.status === "active") {
         bootedDockerfileDigest = source?.loadedDigest;
@@ -807,6 +811,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     hostExecutionToken = {};
     if (managerIdentity !== execution.context.current()) return;
     const state = visibleState();
+    if (!capturingBootFailure && execution.context.isReady() && state.runtimeVersionMismatch) notifyMismatch(state.runtimeVersionMismatch);
     if (execution.context.isReady() || state.status === "booting" && state.pendingName) notifyState(state);
   };
   const provider: ToolOpsProvider = {
@@ -1043,13 +1048,13 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
         : !configReady ? "configuration_not_ready"
         : failed ? "runtime_failure" : "none";
       const code: DiagnosticFailureCode = !failed ? "none" : !settingsReady ? "workspace_unavailable"
-        : !configReady ? "invalid_configuration" : diagnosticFailure;
+        : !configReady ? "invalid_configuration" : state.runtimeVersionMismatch ? "runtime_version_mismatch" : diagnosticFailure;
       return boundDiagnosticsReport({
         outcome: "diagnosed", readOnly: true, evidence: "cached; last-known, not live-probed",
         runtime: { status, execution: status === "active" ? "sandbox" : status === "off" ? "explicit-host" : status === "host-fallback" ? "fallback-host" : "blocked" },
         readiness: { workspaceReady: workspace !== null && settingsReady, settingsReady, configReady },
         host: { platform: process.platform, arch: process.arch, node: process.version },
-        failure: { phase, code },
+        failure: { phase, code, ...(code === "runtime_version_mismatch" ? { versionMismatch: state.runtimeVersionMismatch } : {}) },
         ...(diagnosticConfigurationFailure ? { configurationFailure: diagnosticConfigurationFailure } : {}),
         ...(diagnosticImageFailure?.identity === execution.context.current() ? { imagePreparationFailure: diagnosticImageFailure.snapshot } : {}),
         desired: { evidence: "last-known resolution; not live", validForSession: configReady,

@@ -24,7 +24,9 @@ test("defaults and precedence are deterministic and ignore worktree config", asy
   assert.equal("mode" in DEFAULT_CONFIG, false);
   assert.equal(
     DEFAULT_CONFIG.image,
-    "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:ab4e99d4232f827b3f295ff3210437e01446dbb672ef0d0c78358566170ac86c",
+    process.arch === "arm64"
+      ? "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:6718a81800e965a5bf519e8280c8a0de54db47451ff896854eaf7bb9515a2024"
+      : "ghcr.io/hcohe/pi-microsandbox:1.1.0@sha256:b9f897ba190a5a94b24b12b47dcc9c6ba976e8a9fd65c29c3df93c15fa25c7a2",
   );
   assert.equal(DEFAULT_CONFIG.pullPolicy, "if-missing");
   assert.equal(DEFAULT_CONFIG.bootstrapTools, "auto");

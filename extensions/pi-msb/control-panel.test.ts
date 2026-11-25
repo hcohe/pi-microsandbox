@@ -397,9 +397,9 @@ test("saved-but-rejected restart and failed resolution keep active runtime snaps
 test("reconnect with missing or conflicting actual image never guesses disk VM policy as running", async (t) => {
   for (const actualImage of [undefined, "different-actual-image"]) {
     const f = await fixture(t, plainTheme, true); const name = f.control.getState().info!.name;
-    const labels = (await f.sdk.Sandbox.get(name)).config().labels;
+    const { spec: { labels } } = await (await f.sdk.Sandbox.get(name)).config();
     const calls: string[] = []; const sdk = fakeSdk(calls, { name, status: "running", labels });
-    const handle = await sdk.Sandbox.get(name); handle.config = () => ({ name, labels, ...(actualImage ? { image: actualImage } : {}) });
+    const handle = await sdk.Sandbox.get(name); handle.config = async () => ({ kind: "local", spec: { name, labels, ...(actualImage ? { image: actualImage } : {}) } });
     await mkdir(dirname(f.paths.global!), { recursive: true });
     await writeFile(f.paths.global!, 'cpus = 2\nmemory_mib = 2048\n[network]\nmode = "deny"\n');
     const integration = createMsbIntegration({ sessionId: "panel-session", cwd: f.input.cwd, agentDir: f.input.agentDir, configDirName: ".pi", env: {}, sdkLoader: async () => sdk, entries: () => f.entries, acquireOwnerLock: async () => ({ path: join(f.root, "second.lock"), release: async () => {} }) });

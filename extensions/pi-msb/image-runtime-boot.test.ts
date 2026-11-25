@@ -4,6 +4,7 @@ import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { RuntimeError } from "microsandbox";
 import { buildSdk, tarArchive } from "../../test/image-build-fixture.ts";
 import { DEFAULT_CONFIG, hostConfigPaths } from "./config.ts";
 import { createMsbIntegration, type MsbControlOptions } from "./control.ts";
@@ -39,7 +40,7 @@ async function fixture(t: TestContext, options: Parameters<typeof buildSdk>[1] =
     "config.json": JSON.stringify({ os: "linux", architecture: nativeBuildPlatform().split("/")[1], reference }),
   }), ...options });
   const integrations: ReturnType<typeof createMsbIntegration>[] = [];
-  const integration = (observers: Pick<MsbControlOptions, "onState" | "onImagePreparation" | "onImagePreparationFailure" | "onCustomImageBoot"> = {}) => {
+  const integration = (observers: Pick<MsbControlOptions, "onState" | "onImagePreparation" | "onImagePreparationFailure" | "onCustomImageBoot" | "onRuntimeVersionMismatch"> = {}) => {
     const value = createMsbIntegration({ ...input, sessionId: "runtime-image", sdkLoader: async () => { sdkLoads++; if (forbid) throw new Error("Forbidden SDK load"); return sdk; }, ...observers,
       acquireOwnerLock: async () => ({ path: "test", release: async () => undefined }) });
     integrations.push(value);
@@ -50,6 +51,22 @@ async function fixture(t: TestContext, options: Parameters<typeof buildSdk>[1] =
   return { root, cwd, agentDir, paths, policy, dockerfile, input, calls, sdk, integration, start,
     forbid: () => { forbid = true; }, allow: () => { forbid = false; }, counters: () => ({ envReads, sdkLoads, calls: [...calls] }) };
 }
+
+test("a Dockerfile builder launch-contract rejection is surfaced as a runtime version mismatch", async (t) => {
+  const f = await fixture(t, { create: async () => { throw new RuntimeError("runtime error: no tested sandbox launch contract for runtime 0.99.1-PRIVATE-BUILD"); } });
+  const notices: unknown[] = [];
+  const integration = f.integration({ onRuntimeVersionMismatch: (notice) => notices.push(notice) });
+  const state = await f.start(integration);
+  assert.equal(state.status, "unavailable");
+  assert.match(state.reason!, /host runtime 0\.99\.1 \(non-release build\)/);
+  assert.equal(count(f.calls, "create:"), 0);
+  assert.equal(count(f.calls, "image-load:"), 0);
+  assert.equal(count(f.calls, "builder-destroy"), 1);
+  const report: any = await integration.control.getDiagnostics!();
+  assert.equal(report.failure.code, "runtime_version_mismatch");
+  assert.deepEqual(notices, [report.failure.versionMismatch]);
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE-BUILD/);
+});
 
 for (const scope of ["global", "project"] as const) test(`actual ${scope} startup builds/imports once; unchanged native source reuses image but not unproven persisted VM`, async (t) => {
   const f = await fixture(t, {}, scope);

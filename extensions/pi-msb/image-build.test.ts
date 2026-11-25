@@ -49,7 +49,7 @@ test("builder exports a reusable verified artifact without import or runtime cal
   assert.ok(calls.includes("builder-security:default"));
   assert.ok(calls.includes("builder-user:root"));
   assert.ok(calls.includes("builder-detached:false"));
-  assert.ok(calls.includes("builder-maxDuration:1200"));
+  assert.ok(calls.includes("builder-maxDurationSeconds:1200"));
   assert.equal(calls.some((call) => call.startsWith("builder-idleTimeout:")), false);
   assert.ok(calls.includes("builder-profiles:public"));
   assert.match(calls.find((call) => call.startsWith("builder-network:"))!, /"defaultIngress":"deny"/);
@@ -329,8 +329,8 @@ test("failed boot cleanup accepts persisted labels arrays without a handle lifec
   sdk.Sandbox.get = async (name: string) => {
     const handle = await get(name);
     assert.equal("ownsLifecycle" in handle, false);
-    const config = handle.config();
-    handle.config = () => ({ ...config, labels: Object.entries(config.labels) });
+    const { spec } = handle.config();
+    handle.config = () => ({ spec: { ...spec, labels: Object.entries(spec.labels) } });
     return handle;
   };
   await assert.rejects(buildDockerfileImage({ sdk, source: f.source, acquireLock }), ImagePhaseError);
@@ -354,11 +354,11 @@ for (const failure of ["label", "name", "config-name", "backend", "id", "inspect
       throw Object.assign(new Error("not found"), { code: "sandboxNotFound" });
     }
     const handle = original = await get(name);
-    const config = handle.config();
-    if (failure === "label") handle.config = () => ({ ...config, labels: { "pi-msb.builder": "foreign" } });
+    const { spec } = handle.config();
+    if (failure === "label") handle.config = () => ({ spec: { ...spec, labels: { "pi-msb.builder": "foreign" } } });
     if (failure === "name") handle.name = "pi-msb-builder-foreign";
-    if (failure === "config-name") handle.config = () => ({ ...config, name: "foreign" });
-    if (failure === "backend") handle.backendKind = "cloud";
+    if (failure === "config-name") handle.config = () => ({ spec: { ...spec, name: "foreign" } });
+    if (failure === "backend") handle.contextKind = "remote";
     if (failure === "id") handle.id = "";
     if (failure === "config") handle.config = () => { throw new Error("PRIVATE CONFIG FAILURE"); };
     if (failure === "destroy") handle.destroy = async () => { throw new Error("PRIVATE DESTROY FAILURE"); };
@@ -380,7 +380,7 @@ for (const failure of ["label", "name", "config-name", "backend", "id", "inspect
   if (failure === "replacement") {
     const replacement = await get(original.name);
     assert.notEqual(replacement, original);
-    assert.equal(replacement.config().labels["pi-msb.builder"], "foreign");
+    assert.equal(replacement.config().spec.labels["pi-msb.builder"], "foreign");
   }
   if (failure === "backend-switch") assert.equal(calls.some((call) => call.startsWith("builder-get:")), false);
   for (const path of temporaryPaths(calls)) assert.ok((await fs.stat(path)).isDirectory());
@@ -398,7 +398,7 @@ test("failed boot cleanup never sweeps previously registered builder names", asy
   const lookups = calls.filter((call) => call.startsWith("builder-get:"));
   assert.equal(lookups.length, 1);
   assert.equal(previous.some((name) => lookups[0] === `builder-get:${name}`), false);
-  for (const name of previous) assert.equal((await sdk.Sandbox.get(name)).config().labels["pi-msb.builder"], "previous-owner");
+  for (const name of previous) assert.equal((await sdk.Sandbox.get(name)).config().spec.labels["pi-msb.builder"], "previous-owner");
   await assertClean(calls);
 });
 
@@ -434,7 +434,7 @@ for (const mode of ["nonzero", "silentEOF", "partialEOF", "transport", "timeout"
       assert.equal(log.diagnostics?.transportCode, mode === "transport" ? "SANDBOX_DOWN" : mode === "timeout" ? "TIMEOUT" : "INVALID");
       assert.equal(log.diagnostics?.requestedTimeoutMs, 1_200_000);
       assert.equal(log.diagnostics?.sdkStreamingTimeoutEnforced, true);
-      assert.equal(error.diagnostics?.sdk, "microsandbox@0.7.16");
+      assert.equal(error.diagnostics?.sdk, "microsandbox@0.8.2");
       assert.equal(log.diagnostics?.stderrBytes, mode === "silentEOF" ? 0 : Buffer.byteLength(log.stderr));
       assert.ok(log.diagnostics!.elapsedMs >= 0);
       assert.equal(log.diagnostics?.cleanup.length, 2);

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import type { MicrosandboxModule } from "./control.ts";
+import { loadLocalSdk } from "./local-sdk.ts";
 import { prepareBuildArchive } from "./image-archive.ts";
 import { buildImageReference, selectedImageReference, type DockerfileSource } from "./image-source.ts";
 
@@ -30,7 +31,7 @@ export async function cachedImage(sdk: MicrosandboxModule, reference: string, pl
     throw error;
   }
 }
-export async function readLoadedImage(source: NativeSource, loader: ImageSdkLoader = async () => import("microsandbox")) {
+export async function readLoadedImage(source: NativeSource, loader: ImageSdkLoader = loadLocalSdk) {
   const image = await cachedImage(await loader(), selectedImageReference(source), source.platform);
   return image ? { digest: image.manifestDigest! } : undefined;
 }
