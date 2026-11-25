@@ -488,7 +488,7 @@ for (const action of ["initial-no", "yes", "escape", "ctrl-c", "abort", "source"
   f.ctx.mode = "tui";
   f.ctx.ui.select = async () => { assert.fail("Custom TUI must not use native select"); };
   f.ctx.ui.custom = async (factory: any, options: unknown) => {
-    assert.deepEqual(options, { overlay: false });
+    assert.deepEqual(options, { overlay: false, blocked: { kind: "permission", message: "Allow Dockerfile image load?" } });
     let complete!: (value: boolean) => void;
     const answer = new Promise<boolean>((resolve) => { complete = resolve; });
     const view = factory({ terminal: { rows: 24, columns: 80 }, requestRender() {} }, { fg: (_role: string, text: string) => text }, new KeybindingsManager(TUI_KEYBINDINGS), complete);

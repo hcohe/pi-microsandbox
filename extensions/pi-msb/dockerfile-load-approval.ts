@@ -70,7 +70,7 @@ export async function approveDockerfileLoad(ctx: ExtensionContext, scope: Docker
         // A cancelled host may invoke its factory only after this interaction has ended.
         if (finished) { component.dispose(); queueMicrotask(() => complete(false)); }
         return component;
-      }, { overlay: false }), cancelled]);
+      }, { overlay: false, blocked: { kind: "permission", message: "Allow Dockerfile image load?" } }), cancelled]);
       return !signal.aborted && result === true && explicitlyApproved;
     }
     // Native select has no initial-index option: No-first is required to keep denial the default.

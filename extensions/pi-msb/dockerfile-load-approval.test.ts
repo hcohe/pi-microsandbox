@@ -103,7 +103,7 @@ for (const approve of [false, true]) test(`load TUI helper inline completion app
   const ctx = { mode: "tui", hasUI: true, ui: {
     select() { assert.fail("Custom TUI must not invoke native fallback"); },
     custom(factory: any, options: unknown) {
-      assert.deepEqual(options, { overlay: false });
+      assert.deepEqual(options, { overlay: false, blocked: { kind: "permission", message: "Allow Dockerfile image load?" } });
       return new Promise<boolean>((done) => {
         view = factory({ terminal: { rows: 24, columns: 80 }, requestRender() {} }, theme, keys, done);
         assert.deepEqual(view!.render(80), [question, "", "Scope: Project", "", "→ No", "  Yes", ""]);
@@ -157,7 +157,8 @@ for (const deferFactory of [false, true]) test(`load helper abort settles and di
   let view: ReturnType<typeof createDockerfileLoadApproval> | undefined;
   const answers: boolean[] = [];
   const mount = () => { view = factory({ terminal: { rows: 24 }, requestRender() {} }, theme, keys, (value: boolean) => { answers.push(value); complete(value); }); };
-  const ctx = { mode: "tui", hasUI: true, ui: { custom(create: any) {
+  const ctx = { mode: "tui", hasUI: true, ui: { custom(create: any, options: unknown) {
+    assert.deepEqual(options, { overlay: false, blocked: { kind: "permission", message: "Allow Dockerfile image load?" } });
     factory = create;
     return new Promise<boolean>((resolve) => { complete = resolve; if (!deferFactory) mount(); });
   } } } as any;

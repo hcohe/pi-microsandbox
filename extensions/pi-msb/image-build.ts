@@ -16,7 +16,7 @@ const BUILD_TIMEOUT_MS = 20 * 60_000;
 const PATH_ENV = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 export const BUILD_FAILURE = "The current Dockerfile image could not be prepared or verified. Sandbox activation is blocked; no stale image or host fallback was used. Inspect the source or use msb_dockerfile_build then msb_dockerfile_load for diagnostics.";
 export interface BuildDiagnostics {
-  sdk: "microsandbox@0.7.14";
+  sdk: "microsandbox@0.7.16";
   failureKind: "commandNonzero" | StreamDiagnostics["failureKind"] | "operation";
   elapsedMs: number;
   aggregateDeadlineMs: number;
@@ -253,7 +253,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     const builder = sdk.Sandbox.builder(builderName)
       .image(DEFAULT_CONFIG.image).rootDisk(BUILD_ROOT_DISK_MIB).pullPolicy("if-missing").cpus(2).memory(4096)
       .security("default").user("root").detached(false).maxDuration(BUILD_TIMEOUT_MS / 1000)
-      // SDK 0.7.14 treats zero as immediate idle expiry, not disabled.
+      // The SDK treats zero as immediate idle expiry, not disabled.
       .workdir("/pi-msb-input").labels({ "pi-msb.builder": owner });
     builder.network((network: any) => network.policy({ ...publicPolicy, defaultIngress: "deny" }));
     builder.volume("/pi-msb-input", (mount: any) => mount.bind(input).readonly());
@@ -319,7 +319,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     primaryFailure = new ImagePhaseError(phase, error instanceof Error ? error.message : String(error), logs);
     const last = logs.at(-1);
     primaryFailure.diagnostics = {
-      sdk: "microsandbox@0.7.14",
+      sdk: "microsandbox@0.7.16",
       failureKind: cancellationSource === "aggregateDeadline" ? "timeout" : cancellationSource === "user" ? "cancelled" : last?.diagnostics?.failureKind ?? (last?.exitCode !== undefined && last.exitCode !== 0 ? "commandNonzero" : "operation"),
       elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000,
       cancellationSource, causes: causalErrorDetails(error), secondaryFailures: [],
@@ -339,7 +339,7 @@ export async function buildDockerfileImage(options: ImageBuildOptions): Promise<
     const cleanup = { builder: builderRemoved ? "removed" : createAttempted ? "unconfirmed" : "notCreated", staging: temporaryAlias ? "retained" : "notCreated", lock: lock ? "unconfirmed" : "notAcquired" };
     const secondary = (operation: string, error: unknown, message: string) => {
       const failure = primaryFailure ?? cleanupFailure ?? (cleanupFailure = new ImagePhaseError("cleanup", message, logs));
-      if (!failure.diagnostics) failure.diagnostics = { sdk: "microsandbox@0.7.14", failureKind: "operation", elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000, causes: [], secondaryFailures: [] };
+      if (!failure.diagnostics) failure.diagnostics = { sdk: "microsandbox@0.7.16", failureKind: "operation", elapsedMs: Math.round(performance.now() - started), aggregateDeadlineMs: BUILD_TIMEOUT_MS, builderMaxDurationSec: BUILD_TIMEOUT_MS / 1000, causes: [], secondaryFailures: [] };
       failure.diagnostics.secondaryFailures.push({ operation, causes: causalErrorDetails(error) });
     };
     try { await cleanupBuilder(); cleanup.builder = builderRemoved ? "removed" : "notCreated"; }

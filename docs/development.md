@@ -2,7 +2,7 @@
 
 [Back to README](../README.md)
 
-This release requires Node.js 22.19.0 or newer. The development toolchain pins Pi and TUI 1.5.2, and the runtime dependency is pinned exactly to `microsandbox` 0.7.14.
+This release requires Node.js 22.19.0 or newer. The development toolchain pins Pi and TUI 1.5.2, and the runtime dependency is pinned exactly to `microsandbox` 0.7.16.
 
 Dependabot groups the Pi packages (including major updates) because coding-agent
 and TUI share public types. Keep their development fixtures coordinated. Pi-provided
@@ -22,7 +22,7 @@ to override `execute` completely: Pi's deprecated `GrepOperations.readFile` cann
 provide remote context and its built-in grep always launches local ripgrep.
 Sandbox context reads and ripgrep execution remain guest-transport operations.
 
-SDK 0.7.14 retains the mount, network, lifecycle and image APIs used here. The
+SDK 0.7.16 retains the mount, network, lifecycle and image APIs used here. The
 non-VM `microsandbox-sdk.test.ts` inspects real native builder serialization for
 mount flags, deny/allowlist policies and builder limits. This is not VM/network
 validation. The SDK update changes the Dockerfile build cache key and diagnostic
