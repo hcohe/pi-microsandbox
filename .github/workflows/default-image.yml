@@ -70,8 +70,7 @@ jobs:
               exit 1
             fi
             version="${REF_NAME#image-v}"
-            # Materialize the complete cohort now so concrete cross-variant tag
-            # collisions fail before any matrix job can publish.
+            # Validate the single release reference before any job can publish.
             node scripts/image-variants.mjs refs release "$IMAGE_NAME" "$version" >/dev/null
             channel=release
             cache_suffix="$version"
@@ -111,14 +110,12 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build and verify the image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./default-image
           platforms: linux/amd64,linux/arm64
           push: false
           build-args: |
-            IMAGE_VARIANT=${{ matrix.variant }}
-            TOOLCHAINS=${{ matrix.toolchains }}
             IMAGE_VERSION=${{ needs.variants.outputs.version }}
           labels: |
             org.opencontainers.image.variant=${{ matrix.variant }}
@@ -157,7 +154,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -219,15 +216,13 @@ jobs:
       - name: Build and publish the image
         id: build
         if: needs.variants.outputs.channel == 'main' || steps.existing.outputs.build == 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./default-image
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.build_tags }}
           build-args: |
-            IMAGE_VARIANT=${{ matrix.variant }}
-            TOOLCHAINS=${{ matrix.toolchains }}
             IMAGE_VERSION=${{ needs.variants.outputs.version }}
           labels: |
             org.opencontainers.image.variant=${{ matrix.variant }}

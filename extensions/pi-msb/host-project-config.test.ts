@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -9,7 +9,7 @@ import { DEFAULT_CONFIG, resolveConfig, toEffectiveToml, type ResolveConfigInput
 const home = "/home/test";
 const root = `${home}/Code/pi-microsandbox`;
 const agentDir = `${home}/.pi/agent`;
-const policyFile = `${agentDir}/pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml`;
+const policyFile = `${agentDir}/pi-microsandbox/projects/Code/pi-microsandbox/config.toml`;
 const localFile = `${root}/.pi-msb.toml`;
 const defaultFile = `${agentDir}/pi-microsandbox/default.toml`;
 
@@ -46,7 +46,7 @@ test("host project settings override host defaults while inheriting unspecified 
     [defaultFile, `
 cpus = 2
 memory_mib = 2048
-secrets = [{ env = "DEFAULT_TOKEN", value = "$ENV:DEFAULT_TOKEN", allow_hosts = ["default.example"] }]
+secrets = [{ env = "DEFAULT_TOKEN", host_env = "DEFAULT_TOKEN", allow_hosts = ["default.example"] }]
 [network]
 mode = "allowlist"
 allow_hosts = ["default.example"]
@@ -70,13 +70,13 @@ allow_hosts = ["project.example"]
   assert.equal(result.provenance.memoryMiB, "host-default");
 });
 
-test("host defaults replace local lists and resolve their own relative secret references", async () => {
+test("host defaults ignore local lists and preserve literal $FILE secret values verbatim", async () => {
   const files = new Map([
     [localFile, `
 pass_through_tools = ["unsafe"]
 host_env = ["UNSAFE"]
 mounts = [{ host_path = "/sensitive", guest_path = "/mnt/sensitive", readonly = false }]
-secrets = [{ env = "EXTRA", value = "$ENV:EXTRA", allow_hosts = ["evil.example"] }]
+secrets = [{ env = "EXTRA", host_env = "EXTRA", allow_hosts = ["evil.example"] }]
 [network]
 allow_hosts = ["evil.example"]
 `],
@@ -85,7 +85,7 @@ route_tools = ["read"]
 pass_through_tools = []
 host_env = []
 mounts = []
-secrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["api.example"] }]
+secrets = [{ env = "TOKEN", text_value = "$FILE:token", allow_hosts = ["api.example"] }]
 [network]
 allow_hosts = ["api.example"]
 `],
@@ -96,7 +96,7 @@ allow_hosts = ["api.example"]
   assert.deepEqual(result.config.hostEnv, []);
   assert.deepEqual(result.config.mounts, []);
   assert.deepEqual(result.config.network.allowHosts, ["api.example"]);
-  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", value: `$FILE:${dirname(defaultFile)}/token`, allowHosts: ["api.example"] }]);
+  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", textValue: "$FILE:token", allowHosts: ["api.example"] }]);
   assert.equal(result.provenance["secrets[TOKEN]"], "host-default");
 });
 
@@ -128,8 +128,7 @@ test("host policy arrays replace lower-layer secrets, mounts, and allowlists", a
 route_tools = ["read", "bash"]
 pass_through_tools = ["unsafe"]
 host_env = ["UNSAFE"]
-host_ro_allowlist = ["/sensitive"]
-secrets = [{ env = "EXTRA", value = "$ENV:EXTRA", allow_hosts = ["evil.example"] }, { env = "TOKEN", value = "$FILE:/unapproved/token", allow_hosts = ["evil.example"] }]
+secrets = [{ env = "EXTRA", host_env = "EXTRA", allow_hosts = ["evil.example"] }, { env = "TOKEN", text_value = "$FILE:/unapproved/token", allow_hosts = ["evil.example"] }]
 mounts = [{ host_path = "/sensitive", guest_path = "/mnt/sensitive", readonly = false }]
 [network]
 allow_hosts = ["evil.example"]
@@ -139,9 +138,8 @@ publish_ports = ["0.0.0.0:8080:80"]
 route_tools = ["read"]
 pass_through_tools = []
 host_env = []
-host_ro_allowlist = []
 mounts = []
-secrets = [{ env = "TOKEN", value = "$ENV:SAFE_TOKEN", allow_hosts = ["api.example"] }]
+secrets = [{ env = "TOKEN", host_env = "SAFE_TOKEN", allow_hosts = ["api.example"] }]
 [network]
 mode = "allowlist"
 allow_hosts = ["api.example"]
@@ -149,16 +147,15 @@ publish_ports = []
 `],
   ]);
   const result = await resolveConfig(fixture(files, {
-    cliOverridesToml: 'secrets = [{ env = "SESSION", value = "$ENV:SESSION", allow_hosts = ["evil.example"] }]',
+    cliOverridesToml: 'secrets = [{ env = "SESSION", host_env = "SESSION", allow_hosts = ["evil.example"] }]',
   }));
   assert.deepEqual(result.config.routeTools, ["read"]);
   assert.deepEqual(result.config.passThroughTools, []);
   assert.deepEqual(result.config.hostEnv, []);
-  assert.deepEqual(result.config.hostRoAllowlist, []);
   assert.deepEqual(result.config.mounts, []);
   assert.deepEqual(result.config.network.allowHosts, ["api.example"]);
   assert.deepEqual(result.config.network.publishPorts, []);
-  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", value: "$ENV:SAFE_TOKEN", allowHosts: ["api.example"] }]);
+  assert.deepEqual(result.config.secrets, [{ env: "TOKEN", hostEnv: "SAFE_TOKEN", allowHosts: ["api.example"] }]);
   assert.equal(result.provenance["secrets[TOKEN]"], "host-project");
   assert.equal(result.provenance["secrets[EXTRA]"], undefined);
   assert.equal(result.provenance["mounts[/mnt/sensitive]"], undefined);
@@ -166,23 +163,40 @@ publish_ports = []
 
 test("empty host secret and route lists stay empty through validation", async () => {
   const result = await resolveConfig(fixture(new Map([
-    [localFile, 'secrets = [{ env = "TOKEN", value = "$ENV:TOKEN", allow_hosts = ["evil.example"] }]'],
+    [localFile, 'secrets = [{ env = "TOKEN", host_env = "TOKEN", allow_hosts = ["evil.example"] }]'],
     [policyFile, "secrets = []\nroute_tools = []"],
   ])));
   assert.deepEqual(result.config.secrets, []);
   assert.deepEqual(result.config.routeTools, []);
 });
 
-test("host policy loads for untrusted projects and resolves relative secret files beside itself", async () => {
+test("host policy loads for untrusted projects and preserves literal $FILE secret values verbatim", async () => {
   const result = await resolveConfig(fixture(new Map([
     [localFile, "memory_mib = 128"],
     [defaultFile, "cpus = 2"],
-    [policyFile, 'memory_mib = 2048\nsecrets = [{ env = "TOKEN", value = "$FILE:token", allow_hosts = ["api.example"] }]'],
+    [policyFile, 'memory_mib = 2048\nsecrets = [{ env = "TOKEN", text_value = "$FILE:token", allow_hosts = ["api.example"] }]'],
   ]), { projectTrusted: false }));
   assert.equal(result.config.memoryMiB, 2048);
   assert.equal(result.config.cpus, 2);
-  assert.equal(result.config.secrets[0]?.value, `$FILE:${dirname(policyFile)}/token`);
-  assert.match(result.warnings.join("\n"), /not trusted/);
+  assert.equal(result.config.secrets[0]?.textValue, "$FILE:token");
+  assert.deepEqual(result.warnings, []);
+});
+
+test("host policies parse snake_case secret sources without eagerly resolving host values", async () => {
+  for (const [file, source] of [[defaultFile, "host-default"], [policyFile, "host-project"]] as const) {
+    for (const env of [{}, { HOST_TOKEN: "host-secret-value" }]) {
+      const result = await resolveConfig(fixture(new Map([[file, `
+secrets = [{ env = "ENV_TOKEN", host_env = "HOST_TOKEN", allow_hosts = ["env.example"] }, { env = "CMD_TOKEN", host_cmd = "exit 73", allow_hosts = ["cmd.example"] }]
+`]]), { env }));
+      assert.deepEqual(result.config.secrets, [
+        { env: "ENV_TOKEN", hostEnv: "HOST_TOKEN", allowHosts: ["env.example"] },
+        { env: "CMD_TOKEN", hostCmd: "exit 73", allowHosts: ["cmd.example"] },
+      ]);
+      assert.equal(result.provenance["secrets[ENV_TOKEN]"], source);
+      assert.equal(result.provenance["secrets[CMD_TOKEN]"], source);
+      assert.deepEqual(result.warnings, []);
+    }
+  }
 });
 
 test("missing host policy preserves existing precedence and unspecified fields", async () => {
@@ -192,18 +206,46 @@ test("missing host policy preserves existing precedence and unspecified fields",
   files.set(policyFile, "cpus = 2");
   const result = await resolveConfig(input);
   assert.equal(result.config.memoryMiB, 4096);
-  assert.equal(result.config.network.mode, "deny");
+  assert.equal(result.config.network.mode, "default");
   assert.equal(result.config.cpus, 2);
 });
 
 test("non-Git projects use their cwd and outside-home projects use a distinct absolute namespace", async () => {
   for (const [cwd, expected] of [
     [root, policyFile],
-    ["/srv/app", `${agentDir}/pi-microsandbox/projects-absolute/srv/app/.pi-msb.toml`],
-    [`${home}/srv/app`, `${agentDir}/pi-microsandbox/projects/srv/app/.pi-msb.toml`],
+    ["/srv/app", `${agentDir}/pi-microsandbox/projects-absolute/srv/app/config.toml`],
+    [`${home}/srv/app`, `${agentDir}/pi-microsandbox/projects/srv/app/config.toml`],
   ]) {
     const result = await resolveConfig(fixture(new Map([[expected, "cpus = 3"]]), { cwd, repoRoot: null }));
     assert.equal(result.config.cpus, 3);
+  }
+});
+
+test("old host project filenames are never read; only config.toml applies", async () => {
+  for (const [cwd, file] of [
+    [root, policyFile],
+    ["/srv/app", `${agentDir}/pi-microsandbox/projects-absolute/srv/app/config.toml`],
+  ] as const) {
+    const oldFile = join(dirname(file), ".pi-msb.toml");
+    for (const text of ["cpus = 64", "[[malformed"]) {
+      const files = new Map([[oldFile, text]]);
+      const input = fixture(files, {
+        cwd, repoRoot: cwd,
+        readFile: async (path) => {
+          assert.notEqual(path, oldFile, "old host filename must not be read");
+          return files.get(path) ?? null;
+        },
+      });
+      const missing = await resolveConfig(input);
+      assert.equal(missing.config.cpus, DEFAULT_CONFIG.cpus);
+      assert.deepEqual(missing.warnings, []);
+      files.set(file, "cpus = 3");
+      const configured = await resolveConfig(input);
+      assert.equal(configured.config.cpus, 3);
+      assert.equal(configured.provenance.cpus, "host-project");
+      files.delete(file);
+      assert.equal((await resolveConfig(input)).config.cpus, DEFAULT_CONFIG.cpus);
+    }
   }
 });
 
@@ -217,14 +259,14 @@ test("canonical project identity prevents symlink aliases from bypassing host po
 });
 
 test("the default policy directory comes from Pi getAgentDir, including PI_CODING_AGENT_DIR", async () => {
-  const file = join(getAgentDir(), "pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml");
+  const file = join(getAgentDir(), "pi-microsandbox/projects/Code/pi-microsandbox/config.toml");
   const result = await resolveConfig(fixture(new Map([[file, "cpus = 3"]]), { agentDir: undefined }));
   assert.equal(result.config.cpus, 3);
 });
 
 test("invalid host policies fail closed and literal values remain redacted", async () => {
   for (const file of [defaultFile, policyFile]) {
-    for (const text of ["cpus = 0", 'fallback_mode = "invalid"', 'secrets = [{ env = "TOKEN", value = "private-value", allow_hosts = [] }]', "[[secrets]"]) {
+    for (const text of ["cpus = 0", 'fallback_mode = "invalid"', 'secrets = [{ env = "TOKEN", text_value = "private-value", allow_hosts = [] }]', "[[secrets]"]) {
       await assert.rejects(resolveConfig(fixture(new Map([[file, text]]))), (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.doesNotMatch(error.message, /private-value/);
@@ -232,7 +274,7 @@ test("invalid host policies fail closed and literal values remain redacted", asy
       });
     }
   }
-  const result = await resolveConfig(fixture(new Map([[policyFile, 'secrets = [{ env = "TOKEN", value = "private-value", allow_hosts = ["api.example"] }]']])));
+  const result = await resolveConfig(fixture(new Map([[policyFile, 'secrets = [{ env = "TOKEN", text_value = "private-value", allow_hosts = ["api.example"] }]']])));
   assert.doesNotMatch(toEffectiveToml(result), /private-value/);
   assert.doesNotMatch(result.warnings.join("\n"), /private-value/);
 });
@@ -255,11 +297,98 @@ test("writable mounts must not expose the host policy", async () => {
   }
 });
 
-test("a workspace inside the host policy directory cannot create new overrides", async () => {
+test("absent host policies still reserve only the policy-directory boundary", async () => {
+  const policyRoot = `${agentDir}/pi-microsandbox`;
+  for (const hostPath of [agentDir, policyRoot, `${policyRoot}/projects/OTHER-project`, `${policyRoot}/projects-absolute/srv/other`]) {
+    const input = fixture(new Map(), {
+      temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/policy", readonly: false, options: [] }] },
+    });
+    await assert.rejects(resolveConfig(input), /writable host mounts must not expose host configuration/);
+    input.temporaryOverrides!.mounts![0]!.readonly = true;
+    assert.equal((await resolveConfig(input)).config.mounts[0]?.readonly, true);
+  }
+  const sibling = `${agentDir}/unrelated`;
+  const result = await resolveConfig(fixture(new Map(), {
+    temporaryOverrides: { mounts: [{ type: "dir", hostPath: sibling, guestPath: "/mnt/sibling", readonly: false, options: [] }] },
+  }));
+  assert.equal(result.config.mounts[0]?.readonly, false);
+});
+
+test("a workspace inside the host policy directory cannot create new overrides even without policy files", async () => {
   const cwd = `${agentDir}/pi-microsandbox/projects/other`;
-  await assert.rejects(resolveConfig(fixture(new Map([[defaultFile, "cpus = 3"]]), {
-    cwd, repoRoot: cwd,
-  })), /outside the mounted workspace/);
+  for (const files of [new Map<string, string>(), new Map([[defaultFile, "cpus = 3"]])]) {
+    await assert.rejects(resolveConfig(fixture(files, {
+      cwd, repoRoot: cwd,
+    })), /outside the mounted workspace/);
+  }
+});
+
+test("absent policies stay absent after rejected and valid resolution, including symlink aliases", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-msb-absent-policy-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const layout of ["missing-root", "direct", "agent-alias", "policy-alias"]) {
+    const base = join(dir, layout);
+    const home = join(base, "home");
+    const project = join(home, "Code/app");
+    const physicalAgent = join(base, "agent");
+    const agent = layout === "agent-alias" ? join(base, "agent-link") : physicalAgent;
+    const policyRoot = join(agent, "pi-microsandbox");
+    const physicalPolicy = layout === "policy-alias" ? join(base, "policy-store") : join(physicalAgent, "pi-microsandbox");
+    await mkdir(project, { recursive: true });
+    await mkdir(physicalAgent);
+    if (layout === "agent-alias") await symlink(physicalAgent, agent);
+    if (layout === "policy-alias") {
+      await mkdir(physicalPolicy);
+      await symlink(physicalPolicy, policyRoot);
+    }
+    const sibling = join(agent, "unrelated");
+    await mkdir(sibling);
+    const other = join(policyRoot, "projects/OTHER-project");
+    const alias = join(base, "other-link");
+    if (layout !== "missing-root") {
+      await mkdir(other, { recursive: true });
+      await symlink(other, alias);
+    }
+    const input: ResolveConfigInput = { cwd: project, repoRoot: project, projectTrusted: true, configDirName: ".pi", homedir: home, agentDir: agent, env: {} };
+    const snapshot = await readdir(base, { recursive: true });
+    const assertUnchanged = async () => {
+      for (const path of [join(policyRoot, "default.toml"), join(policyRoot, "projects/Code"), join(policyRoot, "projects-absolute")]) {
+        await assert.rejects(lstat(path), { code: "ENOENT" });
+      }
+      assert.deepEqual(await readdir(base, { recursive: true }), snapshot);
+    };
+    if (layout === "policy-alias") {
+      // Only the selected agent-root alias is supported. Readable catalog
+      // descendants must be no-follow even when the target policy is absent.
+      await assert.rejects(resolveConfig(input), /could not be safely verified/);
+      await assertUnchanged();
+      continue;
+    }
+    const mount = (hostPath: string, readonly = false): ResolveConfigInput => ({
+      ...input,
+      temporaryOverrides: { mounts: [{ type: "dir", hostPath, guestPath: "/mnt/policy", readonly, options: [] }] },
+    });
+    if (layout === "missing-root") {
+      await assert.rejects(resolveConfig(mount(agent)), /writable host mounts must not expose host configuration/);
+      await assertUnchanged();
+      await assert.rejects(lstat(policyRoot), { code: "ENOENT" });
+    } else {
+      for (const hostPath of [other, alias, join(physicalPolicy, "projects/OTHER-project")]) {
+        await assert.rejects(resolveConfig(mount(hostPath)), /writable host mounts must not expose host configuration/);
+        await assertUnchanged();
+        assert.equal((await resolveConfig(mount(hostPath, true))).config.mounts[0]?.readonly, true);
+        await assertUnchanged();
+      }
+      await assert.rejects(resolveConfig({ ...input, cwd: alias, repoRoot: alias }), /outside the mounted workspace/);
+      await assertUnchanged();
+    }
+    assert.equal((await resolveConfig(mount(agent, true))).config.mounts[0]?.readonly, true);
+    await assertUnchanged();
+    assert.equal((await resolveConfig(mount(sibling))).config.mounts[0]?.readonly, false);
+    await assertUnchanged();
+    assert.equal((await resolveConfig(input)).config.cpus, DEFAULT_CONFIG.cpus);
+    await assertUnchanged();
+  }
 });
 
 test("missing project overrides cannot be created through writable symlinked policy directories", async (t) => {
@@ -275,10 +404,10 @@ test("missing project overrides cannot be created through writable symlinked pol
   await symlink(cache, policyDir);
   await writeFile(join(agent, "pi-microsandbox/default.toml"), `mounts = [{ host_path = ${JSON.stringify(cache)}, guest_path = "/mnt/cache", readonly = false }]`);
   const input: ResolveConfigInput = { cwd: project, repoRoot: project, projectTrusted: true, configDirName: ".pi", homedir: join(dir, "home"), agentDir: agent, env: {} };
-  await assert.rejects(resolveConfig(input), /writable host mounts must not expose host configuration/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
   await rm(policyDir);
   await symlink(join(cache, "missing"), policyDir);
-  await assert.rejects(resolveConfig(input), /host configuration path could not be canonicalized/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
 });
 
 test("real filesystem policy changes are re-read and unreadable policies fail closed", async (t) => {
@@ -286,7 +415,7 @@ test("real filesystem policy changes are re-read and unreadable policies fail cl
   t.after(() => rm(dir, { recursive: true, force: true }));
   const project = join(dir, "home", "Code", "app");
   const agent = join(dir, "agent");
-  const policy = join(agent, "pi-microsandbox/projects/Code/app/.pi-msb.toml");
+  const policy = join(agent, "pi-microsandbox/projects/Code/app/config.toml");
   await mkdir(project, { recursive: true });
   await mkdir(dirname(policy), { recursive: true });
   const input: ResolveConfigInput = { cwd: project, repoRoot: project, projectTrusted: true, configDirName: ".pi", homedir: join(dir, "home"), agentDir: agent, env: {} };
@@ -298,7 +427,7 @@ test("real filesystem policy changes are re-read and unreadable policies fail cl
   assert.equal((await resolveConfig(input)).config.cpus, 3);
   await rm(policy);
   await mkdir(policy);
-  await assert.rejects(resolveConfig(input), /host configuration could not be read/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
   await rm(policy, { recursive: true });
   const baseline = join(agent, "pi-microsandbox/default.toml");
   await mkdir(baseline);
@@ -307,5 +436,5 @@ test("real filesystem policy changes are re-read and unreadable policies fail cl
   const localPolicy = join(project, "policy.toml");
   await writeFile(localPolicy, "cpus = 64");
   await symlink(localPolicy, policy);
-  await assert.rejects(resolveConfig(input), /outside the mounted workspace/);
+  await assert.rejects(resolveConfig(input), /could not be safely verified/);
 });

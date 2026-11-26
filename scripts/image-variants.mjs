@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const imageRoot = fileURLToPath(new URL("../default-image/", import.meta.url));
 const variantsPath = fileURLToPath(new URL("../default-image/variants.json", import.meta.url));
-const namePattern = /^[a-z][a-z0-9-]{0,47}$/;
 const tagPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const revisionPattern = /^[0-9a-f]{40}$/;
@@ -159,72 +158,39 @@ function validateGlobalTags(variants) {
   }
 }
 
-function loadVariants() {
-  const document = JSON.parse(readFileSync(variantsPath, "utf8"));
-  if (document.schemaVersion !== 1 || !Array.isArray(document.variants) || document.variants.length === 0) {
-    fail("variants.json must contain a non-empty schemaVersion 1 variants array");
+// Keep the existing matrix/ref protocol, but never publish a reduced or extra image.
+function validateVariants(document) {
+  if (document?.schemaVersion !== 1 || !Array.isArray(document.variants)
+      || document.variants.length !== 1 || document.variants[0]?.name !== "default") {
+    fail("variants.json must define exactly one schemaVersion 1 default image");
   }
-
-  const names = new Set();
-  for (const variant of document.variants) {
-    if (!variant || typeof variant !== "object" || !namePattern.test(variant.name ?? "")) {
-      fail(`Invalid variant name: ${variant?.name ?? "<missing>"}`);
-    }
-    if (variant.name === "dispatch") fail("Reserved variant name: dispatch");
-    if (names.has(variant.name)) fail(`Duplicate variant name: ${variant.name}`);
-    names.add(variant.name);
-    if (typeof variant.description !== "string" || variant.description.trim().length === 0) {
-      fail(`Missing description for variant ${variant.name}`);
-    }
-
-    if (!Array.isArray(variant.toolchains) || variant.toolchains.some((item) => !namePattern.test(item))) {
-      fail(`Invalid toolchains for variant ${variant.name}`);
-    }
-    for (const toolchain of variant.toolchains) {
-      if (["base", "default", "dispatch"].includes(toolchain)) {
-        fail(`Reserved toolchain name: ${toolchain}`);
-      }
-    }
-    if (new Set(variant.toolchains).size !== variant.toolchains.length) {
-      fail(`Duplicate toolchain for variant ${variant.name}`);
-    }
-
-    const latest = variant.tags?.latest;
-    const release = variant.tags?.release;
-    if (!tagPattern.test(latest ?? "") || latest.includes("{version}")) {
-      fail(`Invalid latest tag for variant ${variant.name}`);
-    }
-    if (typeof release !== "string" || (release.match(/\{version\}/g) ?? []).length !== 1) {
-      fail(`Release tag for variant ${variant.name} must contain {version} exactly once`);
-    }
-    if (!tagPattern.test(release.replace("{version}", "1.2.3"))) {
-      fail(`Invalid release tag for variant ${variant.name}`);
-    }
+  const variant = document.variants[0];
+  if (typeof variant.description !== "string" || variant.description.trim().length === 0) {
+    fail("Missing description for default image");
   }
-
-  if (!names.has("base")) fail("variants.json must define the base variant");
-  if (!names.has("default")) fail("variants.json must define the default variant");
-  for (const variant of document.variants) {
-    if (variant.name === "base" && variant.toolchains.length !== 0) {
-      fail("The base variant cannot include toolchains");
-    }
-    if (variant.name !== "base" && variant.toolchains.length === 0) {
-      fail(`Variant ${variant.name} must include at least one toolchain`);
-    }
-    for (const toolchain of variant.toolchains) {
-      if (!names.has(toolchain)) fail(`Toolchain ${toolchain} must have a matching variant`);
-      for (const kind of ["install", "verify"]) {
-        const path = `${imageRoot}${kind}/${toolchain}.sh`;
-        let stat;
-        try { stat = lstatSync(path); } catch { fail(`Missing ${kind} script for toolchain ${toolchain}`); }
-        if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) {
-          fail(`${kind}/${toolchain}.sh must be an executable regular file`);
-        }
+  const requiredToolchains = ["node", "python", "rust", "go"];
+  if (JSON.stringify(variant.toolchains) !== JSON.stringify(requiredToolchains)) {
+    fail("The default image must include exactly node python rust go in that order");
+  }
+  if (variant.tags?.latest !== "latest" || variant.tags?.release !== "{version}") {
+    fail("The default image tags must be latest and {version}");
+  }
+  for (const toolchain of requiredToolchains) {
+    for (const kind of ["install", "verify"]) {
+      const path = `${imageRoot}${kind}/${toolchain}.sh`;
+      let stat;
+      try { stat = lstatSync(path); } catch { fail(`Missing ${kind} script for toolchain ${toolchain}`); }
+      if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) {
+        fail(`${kind}/${toolchain}.sh must be an executable regular file`);
       }
     }
   }
   validateGlobalTags(document.variants);
   return document.variants;
+}
+
+function loadVariants() {
+  return validateVariants(JSON.parse(readFileSync(variantsPath, "utf8")));
 }
 
 function releaseTag(template, version) {
@@ -308,7 +274,7 @@ function verifyManifest(path, reference) {
 }
 
 function configRevisionDocument(image, variant, version, platform, allowCommitVersion = false) {
-  if (!namePattern.test(variant ?? "")) fail(`Invalid expected variant: ${variant ?? "<missing>"}`);
+  if (variant !== "default") fail(`Expected variant must be default: ${variant ?? "<missing>"}`);
   if (!versionPattern.test(version ?? "") && !(allowCommitVersion && revisionPattern.test(version ?? ""))) {
     fail(`Invalid expected image version: ${version ?? "<missing>"}`);
   }
@@ -362,14 +328,38 @@ function selfTest() {
     }
     fail(`Self-test failed: ${message}`);
   };
-  expect(templateRegex("base-{version}").test("base-12.0.34"), "release template match");
-  expect(!templateRegex("base-{version}").test("base-01.0.0"), "leading-zero rejection");
+  const document = JSON.parse(readFileSync(variantsPath, "utf8"));
+  const validVariants = validateVariants(document);
+  expect(validVariants.length === 1 && validVariants[0].name === "default", "single default matrix");
+  expect(JSON.stringify(concreteTags(validVariants, "latest")) === JSON.stringify([
+    { variant: "default", tag: "latest" },
+  ]), "single latest reference");
+  expect(JSON.stringify(concreteTags(validVariants, "release", "2.3.4")) === JSON.stringify([
+    { variant: "default", tag: "2.3.4" },
+  ]), "single release reference");
+  const invalidVariants = (variants, pattern, message) => expectThrows(
+    () => validateVariants({ schemaVersion: 1, variants }), pattern, message,
+  );
+  const valid = validVariants[0];
+  invalidVariants([], /exactly one/, "empty image set rejection");
+  invalidVariants([valid, { ...valid, name: "extra" }], /exactly one/, "extra image rejection");
+  invalidVariants([{ ...valid, name: "node" }], /exactly one/, "language-only image rejection");
+  for (const toolchains of [[], ["node"], ["node", "python", "rust"],
+    ["node", "python", "rust", "go", "extra"], ["node", "python", "rust", "rust"]]) {
+    invalidVariants([{ ...valid, toolchains }], /exactly node python rust go/, "fixed runtime contract");
+  }
+  for (const tags of [{ latest: "other", release: "{version}" },
+    { latest: "latest", release: "other-{version}" }]) {
+    invalidVariants([{ ...valid, tags }], /tags must be latest and/, "default-only tag namespace");
+  }
+  expect(templateRegex("example-{version}").test("example-12.0.34"), "release template match");
+  expect(!templateRegex("example-{version}").test("example-01.0.0"), "leading-zero rejection");
   expect(intersectingTag("{version}-9.8.7", "9.8.7-{version}") === "9.8.7-9.8.7", "non-probe template collision");
-  expect(intersectingTag("node-{version}", "python-{version}") === undefined, "disjoint templates");
+  expect(intersectingTag("left-{version}", "right-{version}") === undefined, "disjoint templates");
   expectThrows(
     () => validateGlobalTags([
-      { name: "moving", tags: { latest: "node-42.0.1", release: "moving-{version}" } },
-      { name: "node", tags: { latest: "node-latest", release: "node-{version}" } },
+      { name: "moving", tags: { latest: "left-42.0.1", release: "moving-{version}" } },
+      { name: "left", tags: { latest: "left-latest", release: "left-{version}" } },
     ]),
     /Latest tag .* collides with release tags/,
     "latest/release namespace collision",
@@ -459,6 +449,13 @@ function selfTest() {
     "org.opencontainers.image.revision": revision,
   } } };
   expect(configRevisionDocument(validConfig, "default", "1.0.0", "linux/amd64") === revision, "config revision");
+  expectThrows(
+    () => configRevisionDocument({ config: { Labels: {
+      ...validConfig.config.Labels, "org.opencontainers.image.variant": "node",
+    } } }, "default", "1.0.0", "linux/amd64"),
+    /variant.*does not match/,
+    "variant label mismatch",
+  );
   const commitVersionConfig = { config: { Labels: {
     ...validConfig.config.Labels,
     "org.opencontainers.image.version": revision,
@@ -469,8 +466,8 @@ function selfTest() {
   );
   expectThrows(
     () => configRevisionDocument(validConfig, "python", "1.0.0", "linux/amd64"),
-    /variant.*does not match/,
-    "variant label mismatch",
+    /Expected variant must be default/,
+    "non-default variant rejection",
   );
   expectThrows(
     () => configRevisionDocument({ config: { Labels: { ...validConfig.config.Labels, "org.opencontainers.image.revision": "bad\nvalue" } } }, "default", "1.0.0", "linux/amd64"),
@@ -491,7 +488,7 @@ switch (command) {
         toolchains: variant.toolchains.join(" "),
         latestTag: variant.tags.latest,
         releaseTemplate: variant.tags.release,
-        shaPrefix: variant.name === "default" ? "sha-" : `${variant.name}-sha-`,
+        shaPrefix: "sha-",
       })),
     }));
     break;

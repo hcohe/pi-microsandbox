@@ -82,7 +82,7 @@ test("App-published releases hand off to the existing exact-artifact OIDC publis
   assert.match(release, /^on:\n  release:\n    types: \[published\]$/m);
   assert.match(release, /^  publish:\n    name: Publish exact artifact\n    needs: \[verify, artifact-smoke\][\s\S]*?    environment: npm\n    permissions:\n      contents: read\n      id-token: write$/m);
   assert.match(release, /ref: \$\{\{ github.sha \}\}/);
-  assert.match(release, /Verify provenance for the immutable image cohort/);
+  assert.match(release, /Verify provenance for the immutable image/);
   assert.match(release, /Smoke-test the exact release artifact/);
   assert.match(release, /npm publish "\$TARBALL" --access public/);
   assert.doesNotMatch(release, /NODE_AUTH_TOKEN|NPM_TOKEN/);
@@ -112,7 +112,7 @@ test("release.yml verify installs once after identity validation and before impo
 
   let previous = config;
   for (const name of [
-    "Verify provenance for the immutable image cohort",
+    "Verify provenance for the immutable image",
     "Recheck public image tags are unchanged",
     "Run release checks",
     "Reject generated or dirty files",

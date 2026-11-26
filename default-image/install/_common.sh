@@ -3,8 +3,9 @@
 set -euo pipefail
 
 apt_install() {
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    # Retry transient acquisition failures, but never install from partial indexes.
+    apt-get update --error-on=any -o Acquire::Retries=3
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Acquire::Retries=3 "$@"
 }
 
 cleanup_apt() {

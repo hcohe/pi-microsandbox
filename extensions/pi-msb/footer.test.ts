@@ -5,7 +5,8 @@ import type {
   ReadonlyFooterDataProvider,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { styleFooterStatus } from "./index.ts";
 import { alignFooterRow, createMsbFooter } from "./footer.ts";
 
 const plainTheme = {
@@ -57,6 +58,17 @@ test("MSB status occupies the upper-right footer without adding a status row", (
   assert.equal(lines.length, 2);
   assert.match(lines[0]!, /^\/repo \(main\)\s+msb-bf9379$/);
   assert.match(lines[1]!, /^0\.0%\/272k\s+no-model$/);
+});
+
+test("the themed right-hand circle survives upper-right footer alignment", () => {
+  const theme = { fg: (role: string, text: string) => `\x1b[${role === "success" ? 32 : 90}m${text}\x1b[39m` };
+  const status = styleFooterStatus(theme, "msb-bf9379", { status: "active", info: null });
+  const component = createMsbFooter(tui, plainTheme, context(), footerData(new Map([["pi-msb", status]])));
+  const lines = component.render(80);
+  assert.equal(lines.length, 2);
+  assert.equal(visibleWidth(lines[0]!), 80);
+  assert.match(stripTerminalSequences(lines[0]!), /^\/repo \(main\)\s+msb-bf9379 ●$/);
+  assert.ok(lines[0]!.includes(theme.fg("success", "●")));
 });
 
 test("keeps statuses from other extensions on the shared status row", () => {

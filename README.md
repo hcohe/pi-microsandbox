@@ -1,144 +1,125 @@
 # pi-microsandbox
 
-**Let your agents work. Stop babysitting every command.**
+**Give Pi a Linux VM, not your host shell.**
 
-Give an agent a task and get on with your day. pi-microsandbox uses
-[Microsandbox](https://microsandbox.dev/) to run
-[Pi](https://github.com/earendil-works/pi)'s file and shell tools in lightweight
-microVMs. Microsandbox is an open-source, local-first runtime for isolating
-untrusted workloads, with a separate Linux kernel for each sandbox.
+`pi-microsandbox` runs the [Pi coding agent](https://github.com/earendil-works/pi)'s
+file and shell tools inside a [Microsandbox](https://microsandbox.dev/) Linux
+microVM. Your agent can build and test in Linux without a separate copy of your
+project: edits show up in your working directory as they happen.
 
-Each project can define its own environment and safety boundaries. Set them up
-once, then let the agent get to work.
-
-[Get started](#get-started) · [Documentation](#documentation) · [Releases](https://github.com/hcohe/pi-microsandbox/releases)
-
-## Try it
-
-Run Pi with pi-microsandbox for one session, without installing it:
-
-```sh
-pi -e npm:pi-microsandbox
-```
-
-## Less supervision. More work getting done.
-
-- Let routine file and shell work happen inside the sandbox. Host execution
-  stays an explicit escape, with approval required while the sandbox is active.
-- Work at the same path inside and outside the VM. Sandboxed writes appear in
-  the host checkout immediately, with no export step.
-- If the sandbox cannot start, routed tools stop by default. They do not quietly
-  run on your host instead.
-
-You still review what the agent produces. The point is to spend your attention
-on the results rather than supervise every step along the way.
-
-## Workspace behavior
-
-If Pi starts inside a Git worktree, pi-microsandbox mounts the whole worktree
-root read/write at the same lexical path in the guest. If Pi starts outside
-Git, it mounts the current working directory itself. Commands start in the
-original current working directory.
-
-This is a VM boundary, not checkout isolation. The selected root is fully
-visible, including `.git`, secrets such as `.env`, untracked files, and sibling
-directories. Writes change the host immediately. Multiple sessions using the
-same checkout share those files and can conflict; use separate host worktrees
-or checkouts when you need independent changes. Containers started inside the
-microVM can also reach the mounted workspace.
-
-[Understand workspace storage and legacy-volume recovery →](docs/storage.md)
-
-## Every project gets its own boundaries
-
-Your frontend app and your internal service do not need the same sandbox.
-Choose a [published variant or custom image](docs/images.md) with the tools a
-project needs, allow only the network hosts it should reach, and configure its
-extra file mounts and secrets. Another project can have a different setup,
-including no network access.
-
-Keep host-owned defaults in `~/.pi/agent/pi-microsandbox/default.toml` and
-shared project settings in `.pi-msb.toml`. For host-owned per-project overrides, use
-`~/.pi/agent/pi-microsandbox/projects/<home-relative-project-path>/.pi-msb.toml`.
-For example, `~/Code/pi-microsandbox` uses
-`~/.pi/agent/pi-microsandbox/projects/Code/pi-microsandbox/.pi-msb.toml`.
-Host-owned defaults and project overrides take precedence over local config,
-environment variables, and session settings; project overrides win over the
-host defaults, and configured lists replace lower-layer lists. Pi's custom agent
-directory is respected. See [Configuration](docs/configuration.md#host-owned-project-overrides)
-for details and security-sensitive settings to pin.
-
-The agent gets an environment built for the job. Image cohorts built from this
-version include Docker Engine 29.8.0, Buildx 0.37.1, and Compose 5.5.1. The
-daemon and its containers run inside the microVM; pi-microsandbox never connects
-them to the host Docker socket. Nested containers can still access the mounted
-workspace and remain subject to the outer network policy.
-
-[Configure your project's sandbox →](docs/configuration.md)
-
-## Get started
-
-You'll need Pi, **Node.js 22.19.0+**, and one of the supported host targets:
-Apple Silicon macOS (`darwin-arm64`), GNU Linux x86_64
-(`linux-x64-gnu`), or GNU Linux arm64 (`linux-arm64-gnu`). Live sandboxes also
-need host virtualization support. The POSIX lock addon is bundled and installs
-without lifecycle scripts or a compiler.
-[Full requirements and installation help →](docs/getting-started.md)
-
-Install pi-microsandbox:
-
-```sh
-pi install npm:pi-microsandbox
-```
-
-That command also installs the pinned Microsandbox SDK, CLI, and matching
-platform runtime. A separate Microsandbox installation is not required on a
-supported host. Keep npm optional dependencies enabled so npm installs the
-platform package.
-
-If the platform package is unavailable, you can provide a standalone `msb`
-binary with `MSB_PATH`. See the official
-[Microsandbox documentation](https://docs.microsandbox.dev/) for standalone
-installation and runtime troubleshooting. The documentation in this repository
-covers the Pi integration.
-
-Start Pi from the directory where you want to work:
-
-```sh
-cd /path/to/project
-pi
-```
-
-Once you're in Pi, inspect the selected workspace root:
+- **Linux, ready to work.** The default image ships with Node.js, Python, Rust,
+  Go, and Docker. Docker runs inside the VM, not through your host socket.
+- **Your files stay put.** The VM mounts the directory you start Pi in. No sync
+  step, and no automatic mounts for Git parents or sibling directories.
+- **You approve changes.** Let Pi propose network rules, mounts, or resources,
+  then review the settings diff before anything is saved.
+- **No silent host fallback.** If the VM can't start, routed tools stay blocked
+  by default instead of running on your host.
 
 ```text
-/msb status
+Pi's sandboxed Bash: uname -s && echo hello > sandbox-demo.txt
+Linux
+
+Your host shell: cat sandbox-demo.txt
+hello
 ```
 
-> **Host execution is separate.** `/msb off` explicitly hands tools to the
-> host. `fallback_mode = "host"` opts into automatic host execution after a
-> sandbox failure. Neither control changes the workspace mount, and neither is
-> sandboxed. The default fallback blocks tools when startup fails.
-
-Upgrading from a release that used named Git volumes requires a manual recovery
-check. Before upgrading, use the old `/msb volumes` and `/msb export` commands
-to inventory and copy retained work. After upgrading, use Microsandbox's own
-tooling to recover or remove legacy volumes; they are never deleted
-automatically. See [workspace storage](docs/storage.md).
-
-## Documentation
-
-| When you want to… | Read |
-| --- | --- |
-| Install or check host support | [Getting started](docs/getting-started.md) |
-| Understand the workspace mount or recover legacy volumes | [Storage](docs/storage.md) |
-| Choose an image variant or build a custom image | [Images](docs/images.md) |
-| Set up networking, secrets, mounts, or other options | [Configuration](docs/configuration.md) |
-| Look up an `/msb` command | [Command reference](docs/commands.md) |
-| Understand the isolation boundary and host access | [Safety model](docs/safety.md) |
-| Fix a sandbox that won't start | [Troubleshooting](docs/troubleshooting.md) |
-| Run tests or work on the extension | [Development](docs/development.md) |
+[Get started](#get-started) · [Try an agent recipe](#let-your-agent-propose-the-settings) · [Know the boundary](#a-sandbox-not-a-spare-checkout) · [Documentation](#documentation)
 
 ---
 
-[MIT license](LICENSE) · [Report a bug](https://github.com/hcohe/pi-microsandbox/issues) · [Report a security issue privately](SECURITY.md)
+## Get started
+
+You'll need **Pi**, **Node.js 22.19.0+**, and either **Apple Silicon macOS** or
+**GNU Linux (x86_64 or arm64) with accessible KVM**. The runtime is bundled;
+keep npm optional dependencies enabled. [Full requirements →](docs/getting-started.md)
+
+Try it in an empty directory. The first start may need to download the image.
+
+```sh
+demo=$(mktemp -d)
+cd "$demo"
+pi -e npm:pi-microsandbox
+```
+
+In Pi, open **`/msb` → Status** and check that the sandbox is active before
+running commands. Close the panel with `q`, then enter this in Pi (not your host
+shell):
+
+```text
+!uname -s && echo hello > sandbox-demo.txt
+```
+
+You should see `Linux`. Quit Pi and run `cat sandbox-demo.txt` in the same
+terminal. You'll see `hello`: the command ran in the guest, and the file showed
+up on your host. On a Linux host, `uname` alone doesn't tell you which shell ran.
+If `/msb` is missing or the sandbox is blocked, see [Troubleshooting](docs/troubleshooting.md).
+
+When you're ready to use it in a project, run `pi -e npm:pi-microsandbox` from
+that directory. To keep the extension enabled for future sessions, run
+`pi install npm:pi-microsandbox`, then start `pi` as usual.
+
+## Let your agent propose the settings
+
+Ask Pi to inspect the sandbox with `msb_config_get`, or open **`/msb`** to check
+it yourself. Then try a change:
+
+> For this session, propose denying network access. Keep host fallback blocked
+> and don't add any host-tool bypasses. After I approve, tell me whether the
+> policy took effect and when it expires.
+
+`msb_config_set` shows what would change and where, with **No selected by default**.
+Choose **Session** for this session only, **Project** for settings shared across
+supported Git worktrees, or **Global** for defaults across projects. Session
+overrides reset on Pi `/reload`, a session/workspace switch, or shutdown.
+Persistent settings live outside the mounted project. A save is not proof the
+VM adopted the change.
+[More recipes →](docs/agent-recipes.md) · [Settings and precedence →](docs/configuration.md)
+
+Need a different stack? [Choose a Linux image](docs/images.md) or
+[build from a host-owned Dockerfile](docs/images.md#host-owned-dockerfile-no-host-docker),
+without installing Docker on your host.
+
+## A sandbox, not a spare checkout
+
+**Your working directory is mounted read/write.** That includes `.env`, `.git`,
+and ignored or untracked files inside it. Edits reach the host immediately and
+aren't rolled back when the VM restarts. Use a separate checkout to keep edits
+apart, and keep sensitive files out of the directory you mount.
+
+**The VM boundary applies to routed tools, not everything Pi can do.** Extra
+mounts, host execution, and pass-through tools can widen access. Guest network
+rules don't apply to host/pass-through tools. Leave the default fallback set to
+`block` if you don't want a failed VM to hand routed tools back to the host.
+[Know what the agent can access →](docs/safety.md)
+
+## Documentation
+
+| I want to… | Start here |
+| --- | --- |
+| Install, check requirements, or recover from a startup failure | [Getting started](docs/getting-started.md) · [Troubleshooting](docs/troubleshooting.md) |
+| Lock down network access, share a read-only mount, or scope a secret | [Agent recipes](docs/agent-recipes.md) · [Google Cloud read-only access](docs/google-cloud.md) |
+| Configure Pi or review what it can access | [Control panel](docs/commands.md) · [Configuration](docs/configuration.md) · [Safety](docs/safety.md) · [Storage](docs/storage.md) |
+| Choose or build a Linux image | [Images](docs/images.md) |
+| Look up tool arguments and approval behavior | [Tool reference](docs/tools.md) |
+| Work on the extension | [Development](docs/development.md) · [Settings internals](docs/settings-backend.md) |
+
+<details>
+<summary>Terminal agent status (OSC 7501)</summary>
+
+Pi reports working, blocked, done, error, and idle through native **OSC 7501**
+program status on supported terminals. Host execution and Dockerfile review/load
+prompts report blocked permission status while awaiting approval, with fixed
+messages that contain no commands or paths. Pi owns status restoration when the
+prompt closes; no separate extension status emitter is needed.
+
+Reporting normally waits for the terminal to confirm support. Launch with
+`PI_PROGRAM_STATUS=1 pi` to force reporting, or `PI_PROGRAM_STATUS=0 pi` to disable
+it. Use a recent Pi with custom-UI blocked-status support (tested with 1.5.2);
+tmux and screen do not forward these reports.
+
+</details>
+
+---
+
+[MIT license](LICENSE) · [Releases](https://github.com/hcohe/pi-microsandbox/releases) · [Report a bug](https://github.com/hcohe/pi-microsandbox/issues) · [Report a security issue privately](SECURITY.md)

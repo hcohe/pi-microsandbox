@@ -79,7 +79,7 @@ jobs:
           NODE
 
       - name: Set up build Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.19.0"
           cache: npm
@@ -142,7 +142,7 @@ jobs:
           shasum -a 256 "$artifact_root/$TARGET/flock.node" > "$RUNNER_TEMP/flock.sha256"
 
       - name: Set up compatibility Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.x"
           package-manager-cache: false
@@ -157,7 +157,7 @@ jobs:
           shasum -a 256 -c "$RUNNER_TEMP/flock.sha256"
 
       - name: Upload exact target artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flock-${{ matrix.target }}
           path: ${{ runner.temp }}/flock-artifact
@@ -190,7 +190,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
@@ -307,7 +307,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Resolve and verify the public configured image cohort
+      - name: Resolve and verify the public configured image
         shell: bash
         env:
           EXPECTED_DEFAULT_REFERENCE: ${{ steps.image.outputs.tag_reference }}
@@ -328,7 +328,7 @@ jobs:
             if [[ "$variant" == "default" ]]; then
               saw_default=true
               if [[ "$image_reference" != "$EXPECTED_DEFAULT_REFERENCE" ]]; then
-                echo "Generated default cohort reference ${image_reference} does not match configured ${EXPECTED_DEFAULT_REFERENCE}." >&2
+                echo "Generated default image reference ${image_reference} does not match configured ${EXPECTED_DEFAULT_REFERENCE}." >&2
                 exit 1
               fi
             fi
@@ -366,18 +366,18 @@ jobs:
           done < "$refs"
 
           if [[ "$saw_default" != true || ! -s "$resolved" ]]; then
-            echo "The generated image cohort did not contain the configured default variant." >&2
+            echo "The generated image references did not contain the configured default image." >&2
             exit 1
           fi
 
       - name: Log in to GitHub Container Registry for provenance lookup
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Verify provenance for the immutable image cohort
+      - name: Verify provenance for the immutable image
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -448,7 +448,7 @@ jobs:
           fi
 
       - name: Download all release native artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: flock-*
           path: ${{ runner.temp }}/flock-artifacts
@@ -644,7 +644,7 @@ jobs:
 
       - name: Upload the exact release artifact
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-package-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -707,14 +707,14 @@ jobs:
           NODE
 
       - name: Download the verified workflow artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           path: ${{ runner.temp }}/release-artifact
           digest-mismatch: error
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
@@ -740,14 +740,14 @@ jobs:
       id-token: write
     steps:
       - name: Download the verified workflow artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           path: ${{ runner.temp }}/release-artifact
           digest-mismatch: error
 
       - name: Set up Node.js and the public npm registry
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org/
