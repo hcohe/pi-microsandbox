@@ -11,8 +11,15 @@ Ask your agent:
 > supported settings repair for approval. Don't turn off the sandbox, enable host
 > fallback, or broaden host tools/mounts as a workaround. Verify activation.
 
-Configuration failures automatically produce an error notification in Pi's UI—no
-`/msb` required. The same safe information appears in `msb_diagnostics` as
+When Microsandbox can't apply settings, Pi shows a warning explaining why and
+what to do next. It doesn't interrupt Pi or require opening `/msb`. If the
+settings would expose the files that control the sandbox, code inside it could
+change those files to get access you didn't approve. Microsandbox rejects those
+settings and doesn't switch to running tools on the host. If you start Pi from
+a directory that contains those settings, an interactive dialog offers to exit
+Pi or keep it open without sandboxed tools. To start the sandbox, reopen Pi
+from a narrower project folder that doesn't contain the settings. More detail
+appears in `msb_diagnostics` as
 `configurationFailure`: known setting names with static constraints (for example,
 `cpus` must be 1–64), or TOML syntax, file-access or policy-boundary guidance.
 Rejected values, source paths and raw parser errors are withheld. Syntax errors

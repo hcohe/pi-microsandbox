@@ -373,9 +373,12 @@ destination-scoped secrets.
   `source_check`, and `fetch_content` pass-throughs. `todo` and
   `ask_user_question` are not default exceptions. Permitted third-party tools
   run outside the VM, without per-call host approval. [Safety →](safety.md)
-- **Footer:** `show_footer = true` uses Pi's single custom-footer slot. It keeps
-  common location/usage/model/shared status fields, but replaces other custom
-  footers and cannot reproduce every Pi-only indicator. Set false to hide it.
+- **Footer:** `show_footer = true` uses Pi's single custom-footer slot after
+  Microsandbox loads the session's settings. It keeps common location, usage,
+  model, and shared status fields, but replaces other custom footers. Set it to
+  `false` to leave the slot alone. If Microsandbox already replaced a footer in
+  the current session, save `false` in Project or Global and restart Pi to let
+  the other extension install its footer again.
   The dot is green for an active sandbox, red when sandbox execution is blocked,
   and orange for other states, including sleep and explicit host execution.
   Flashing orange means booting or reloading configuration. Docker capability

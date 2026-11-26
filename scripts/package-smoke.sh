@@ -100,6 +100,7 @@ extensions/pi-msb/image-artifact.ts required
 extensions/pi-msb/dockerfile-phase-tools.ts required
 extensions/pi-msb/image-source.ts required
 extensions/pi-msb/index.ts required
+extensions/pi-msb/package.json required
 extensions/pi-msb/labels.ts required
 extensions/pi-msb/local-sdk.ts required
 extensions/pi-msb/runtime-compatibility.ts required

@@ -39,6 +39,10 @@ cd /path/to/project
 pi
 ```
 
+For a local checkout, install the repository root or its `extensions/pi-msb`
+directory. Both declare the concrete extension entry point Pi uses to verify the
+origin of Microsandbox's settings and diagnostics tools.
+
 The default image includes Node.js, Python, Rust, Go, and guest Docker. The first
 start may need an image download. [Other images and custom images →](images.md)
 

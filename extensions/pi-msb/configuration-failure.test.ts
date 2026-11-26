@@ -46,9 +46,22 @@ for (const [issue, kind] of [
 ] as const) test(`configuration failure classifies ${kind} without source/error text: ${issue.split(" ")[0]}`, () => {
   const snapshot = configurationFailureSnapshot(new ConfigError([issue]));
   assert.equal(snapshot.kind, kind);
+  assert.equal(snapshot.workspaceOverlap, issue.includes("outside the mounted workspace") ? true : undefined);
   assert.equal(snapshot.problems.length, 0);
   assert.doesNotMatch(JSON.stringify(snapshot), /REJECTED_SECRET/);
   if (kind === "syntax") assert.match(snapshot.summary, /TOML syntax/);
+});
+
+test("policy warning explains the risk, safe behavior and next steps in plain text", () => {
+  const snapshot = configurationFailureSnapshot(new ConfigError([
+    "writable host mounts must not expose host configuration", privateText,
+  ]));
+  const [title, risk, behavior, recovery] = formatConfigurationFailure(snapshot).split("\n\n");
+  assert.equal(title, "Microsandbox didn’t apply these settings");
+  assert.match(risk!, /grant itself access you didn’t approve/);
+  assert.match(behavior!, /keep using Pi.*previous settings.*won’t automatically run on your host/);
+  assert.match(recovery!, /Check msb_diagnostics and msb_config_get.*outside the workspace.*reload/);
+  assert.doesNotMatch(formatConfigurationFailure(snapshot), /REJECTED_SECRET|\x1b/);
 });
 
 test("unknown exceptions and oversized configuration issues are withheld and bounded", () => {

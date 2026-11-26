@@ -100,6 +100,8 @@ export interface MsbIntegration {
   manager: ReturnType<typeof createSandboxManager>;
   provider: ToolOpsProvider;
   configRef: { value: Config };
+  /** True once this execution identity has a validated configuration, even during a reload. */
+  hasResolvedSessionConfig(): boolean;
   configureSession(setup: SessionSetup): Promise<RuntimeState>;
   /** Lifecycle owner must call this on shutdown; does not stop the manager. */
   endSession(): void;
@@ -894,6 +896,15 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
     }
   };
 
+  let resolvedConfigIdentity: SessionExecutionIdentity | undefined;
+  const applyResolvedConfig = (next: ResolvedConfig): void => {
+    resolved = next;
+    cacheDiagnosticConfig(next.config);
+    configReady = true;
+    Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+    resolvedConfigIdentity = execution.context.current();
+  };
+
   const configureSessionInternal = async (setup: SessionSetup, isCurrent: () => boolean): Promise<RuntimeState> => {
     await artifacts.dispose();
     if (!isCurrent()) return visibleState();
@@ -939,10 +950,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
       failureState = { status: "unavailable", info: null, reason: redactedError(error, configRef.value, logSecretRedactions).message };
       return visibleState();
     }
-    resolved = next;
-    cacheDiagnosticConfig(next.config);
-    configReady = true;
-    Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+    applyResolvedConfig(next);
     const state = setup.restored ?? persistenceState(options.entries?.() ?? [], sessionId);
     explicitOff = isDisabledByEnv(options.env ?? process.env);
     failureState = explicitOff ? { status: "off", info: null } : null;
@@ -1114,10 +1122,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
             activeProjectRoot = workspace.guestRoot;
             const next = await resolveForWorkspace(workspace, false, true);
             assertCurrent();
-            resolved = next;
-            cacheDiagnosticConfig(next.config);
-            configReady = true;
-            Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+            applyResolvedConfig(next);
             const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate: pendingRestart, restored: persistenceState(options.entries?.() ?? [], sessionId) });
             assertCurrent();
             if (result.status === "active") pendingRestart = false;
@@ -1177,10 +1182,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
             throw new Error("Settings saved, but newly changed runtime settings need restart confirmation. Open Actions and choose Reload settings.");
           }
           const forceRecreate = pendingRestart;
-          resolved = next;
-          cacheDiagnosticConfig(next.config);
-          configReady = true;
-          Object.assign(configRef.value, next.config, { network: { ...next.config.network }, docker: { ...next.config.docker }, secrets: [...next.config.secrets], mounts: [...next.config.mounts] });
+          applyResolvedConfig(next);
           if (!explicitOff && workspace && (next.config.autoStart || manager.isActive())) {
             const result = await boot({ sessionId, cwd, workspace, config: configSnapshot(), forceRecreate, restored: persistenceState(options.entries?.() ?? [], sessionId) }, reloadOptions);
             assertCurrent();
@@ -1233,6 +1235,7 @@ export function createMsbIntegration(options: MsbControlOptions): MsbIntegration
 
   return {
     control, manager, provider, configRef, configureSession,
+    hasResolvedSessionConfig: () => resolvedConfigIdentity === execution.context.current(),
     endSession: () => {
       invalidateActivation();
       const identity = execution.context.current();

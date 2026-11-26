@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { footerStatus, styleFooterStatus } from "./index.ts";
 import { imagePreparationMessages } from "./image-boot-notice.ts";
 import type { ImagePreparationPhase, RuntimeState } from "./types.ts";
@@ -31,6 +32,39 @@ test("index bare import and factory registration do not create host configuratio
     register({ registerTool() {}, registerCommand() {}, on() {} });
   `], { cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, stdio: "pipe" });
   await assert.rejects(stat(agentDir), { code: "ENOENT" });
+});
+
+test("Pi local directory installs retain exact settings tool provenance", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-msb-local-package-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace"), agentDir = join(root, "agent");
+  await mkdir(cwd);
+  execFileSync(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { join, relative } from 'node:path';
+    import { realpathSync } from 'node:fs';
+    import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+    const cwd = ${JSON.stringify(cwd)}, agentDir = process.env.PI_CODING_AGENT_DIR;
+    const extensionDir = ${JSON.stringify(fileURLToPath(new URL("./", import.meta.url)))};
+    const settingsManager = SettingsManager.inMemory({ packages: [relative(agentDir, extensionDir)] });
+    const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+    await resourceLoader.reload();
+    const { session } = await createAgentSession({ cwd, agentDir, resourceLoader, settingsManager, sessionManager: SessionManager.inMemory() });
+    await session.bindExtensions({});
+    try {
+      const gate = toolName => session.extensionRunner.emitToolCall({ type:'tool_call', toolName, toolCallId:toolName, input:{} });
+      for (const name of ['msb_config_get', 'msb_config_set', 'msb_diagnostics']) {
+        const source = session.getAllTools().find(tool => tool.name === name)?.sourceInfo?.path;
+        assert.ok(source, name + ' must have provenance');
+        assert.equal(realpathSync(source), realpathSync(join(extensionDir, 'index.ts')));
+        assert.equal(await gate(name), undefined, name + ' must pass its ownership check');
+      }
+      assert.equal((await gate('unapproved_external_tool'))?.block, true, 'the third-party gate is enabled');
+    } finally {
+      await session.extensionRunner.emit({ type:'session_shutdown', reason:'quit' });
+      session.dispose();
+    }
+  `], { env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "invalid", PI_MSB_BLOCK_THIRD_PARTY: "true" }, stdio: "pipe" });
 });
 
 test("blocked invalid startup exposes passive diagnostics and approval-bound host settings repair", async (t) => {
@@ -72,11 +106,12 @@ test("blocked invalid startup exposes passive diagnostics and approval-bound hos
     assert.equal(diagnostic.details.readiness.configReady, false);
     assert.equal(diagnostic.details.readOnly, true);
     assert.equal(diagnostic.details.configurationFailure.problems[0].path, 'cpus');
-    const configErrors = () => notices.filter(([message, level]) => level === 'error' && message.includes('Microsandbox configuration failed'));
-    assert.equal(configErrors().length, 1, 'startup automatically notifies without /msb');
-    assert.match(configErrors()[0][0], /cpus:.*1–64/);
+    const configWarnings = () => notices.filter(([message, level]) => level === 'warning' && message.includes('Microsandbox didn’t apply these settings'));
+    assert.equal(configWarnings().length, 1, 'startup automatically warns without /msb');
+    assert.match(configWarnings()[0][0], /cpus:.*1–64/);
+    assert.ok(!notices.some(([, level]) => level === 'error'), 'no duplicate error notification');
     await run('msb_diagnostics', {});
-    assert.equal(configErrors().length, 1, 'passive reads do not notify');
+    assert.equal(configWarnings().length, 1, 'passive reads do not notify');
     assert.equal(approvals, 0);
     const inspection = await run('msb_config_get', {});
     assert.equal(inspection.details.recovery.available, true);
@@ -281,15 +316,15 @@ test("footer polling, boot/reload animation and stale callbacks stop on hidden f
     const lifecycle = (event) => hooks.get(event).at(-1)({}, ctx);
     await lifecycle('session_start');
     assert.equal(timers.size, 1); assert.equal([...timers.values()][0].delay, 2000);
-    assert.ok(statuses.some(value => value?.includes('warning:●')));
-    assert.ok(statuses.some(value => value?.includes('dim:●')));
-    assert.match(statuses.at(-1), /warning:●/);
+    assert.ok(!created.some(timer => timer.delay === 400), 'auto_start=false does not animate a boot');
+    assert.match(statuses.at(-1), /Running on host warning:●/);
     const run = (value) => tools.get('msb_config_set').execute('set',
       {scope:'session', path:'show_footer', operation:'set', value}, undefined, undefined, ctx);
     const animations = () => created.filter(timer => timer.delay === 400).length;
     const beforeReload = animations();
     assert.equal((await run(true)).details.outcome, 'applied');
     assert.ok(animations() > beforeReload, 'config reload must animate');
+    assert.ok(statuses.some(value => value?.includes('dim:●')));
     assert.equal(timers.size, 1, 'reload settles and stops animation');
     assert.equal((await run(false)).details.outcome, 'applied');
     assert.equal(timers.size, 0); assert.equal(statuses.at(-1), undefined);
@@ -416,8 +451,9 @@ test("selected boot names reach the footer through deferred lock, create, prepar
   const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
     import assert from 'node:assert/strict';
     import fs from 'node:fs';
-    import {join} from 'node:path';
+    import {dirname, join} from 'node:path';
     import {registerHooks, syncBuiltinESMExports} from 'node:module';
+    const {hostConfigPaths} = await import(${JSON.stringify(new URL("./config.ts", import.meta.url).href)});
     const {fakeSdk} = await import(${JSON.stringify(new URL("../../test/fake-msb-sdk.ts", import.meta.url).href)});
     const {STATE_SCHEMA_VERSION} = await import(${JSON.stringify(new URL("./types.ts", import.meta.url).href)});
     const controlUrl = ${JSON.stringify(new URL("./control.ts", import.meta.url).href)};
@@ -456,12 +492,12 @@ test("selected boot names reach the footer through deferred lock, create, prepar
     }};
     const fixture = globalThis.bootFixture;
     const {default:register} = await import(indexUrl);
-    const hooks = new Map(), statuses = []; let session = 'automatic', entries = [];
+    const hooks = new Map(), statuses = []; let session = 'automatic', entries = [], footer;
     register({registerTool() {}, registerCommand() {}, appendEntry(customType, data) {entries.push({type:'custom', customType, data});},
       on(event, handler) {hooks.set(event, [...(hooks.get(event) ?? []), handler]);}});
     const ctx = {cwd:process.cwd(), mode:'rpc', hasUI:true, isProjectTrusted:()=>true,
       sessionManager:{getSessionId:()=>session, getEntries:()=>entries},
-      ui:{theme:{fg:(role,text)=>role+':'+text}, setFooter() {}, setStatus(_key,value) {statuses.push(value);}, notify() {}}};
+      ui:{theme:{fg:(role,text)=>role+':'+text}, setFooter(factory) {footer = factory;}, setStatus(_key,value) {statuses.push(value);}, notify() {}}};
     const lifecycle = event => hooks.get(event).at(-1)({},ctx);
     const animation = () => [...timers.values()].find(timer=>timer.delay===400);
     const tick = () => {assert.ok(animation()); animation().callback();};
@@ -525,10 +561,11 @@ test("selected boot names reach the footer through deferred lock, create, prepar
       process.env.PI_MSB_SANDBOX_NAME = 'replacement-'+change;
       const switching = lifecycle('session_info_changed'), count = statuses.length;
       staleAnimation.callback(); assert.equal(statuses.length, count, 'obsolete animation cannot update replacement UI');
-      tick(); assert.match(statuses.at(-1), /MSB starting/);
+      assert.equal(animation(), undefined, 'do not animate with a previous session’s settings');
+      assert.equal(statuses.at(-1), undefined);
       assert.equal(fixture.integration.control.getState().pendingName, undefined, 'old manager name must not cross identity boundary');
       old.created.resolve(); old.prepared.resolve(); await oldStarting; await discovering.promise;
-      tick(); assert.match(statuses.at(-1), /MSB starting/);
+      assert.equal(animation(), undefined, 'replacement has not resolved its settings yet');
       assert.ok(!statuses.slice(count).some(value=>value?.includes(old.name)), 'old boot completion must not republish its name');
       discoveryHeld = false; discovered.resolve();
       await complete(switching, replacement, false);
@@ -536,6 +573,27 @@ test("selected boot names reach the footer through deferred lock, create, prepar
       fs.promises.realpath = realpath; syncBuiltinESMExports();
       await lifecycle('session_shutdown'); delete process.env.PI_MSB_SANDBOX_NAME;
     }
+    // Simulate a UI extension that has already installed its footer.
+    ctx.cwd = firstCwd; session = 'custom-footer'; entries = [];
+    const {global} = await hostConfigPaths({cwd:ctx.cwd, agentDir:process.env.PI_CODING_AGENT_DIR, env:process.env});
+    await fs.promises.mkdir(dirname(global), {recursive:true});
+    await fs.promises.writeFile(global, 'show_footer = false\\n');
+    const uiFooter = () => {};
+    ctx.ui.setFooter(uiFooter);
+    statuses.length = 0;
+    const hidden = currentGates = gates(), hiddenStarting = lifecycle('session_start');
+    assert.equal(footer, uiFooter, 'startup must not install a footer using defaults');
+    assert.equal(timers.size, 0);
+    await hidden.locking.promise;
+    assert.equal(footer, uiFooter, 'the enabled VM boots without replacing the UI footer');
+    assert.equal(timers.size, 0);
+    hidden.locked.resolve(); await hidden.creating.promise; hidden.created.resolve();
+    await hidden.preparing.promise; hidden.prepared.resolve(); await hiddenStarting;
+    assert.equal(fixture.integration.provider.isActive(), true);
+    assert.equal(footer, uiFooter);
+    assert.ok(statuses.every(value => value === undefined), 'a hidden footer never publishes a status');
+    await lifecycle('session_shutdown');
+    assert.equal(footer, uiFooter, 'shutdown must preserve the other footer');
     assert.equal(timers.size, 0);
     console.log('PASS pending-footer');
   `], {
@@ -559,6 +617,43 @@ test("custom image preparation footer names each phase, respects visibility and 
   }
 });
 
+for (const action of ["exit", "stay", "dismiss", "headless"] as const) test(`workspace overlap startup dialog: ${action}`, async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-msb-overlap-dialog-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    const { default: register } = await import(${JSON.stringify(new URL("./index.ts", import.meta.url).href)});
+    const hooks = new Map(), tools = new Map(), notices = [];
+    const action = ${JSON.stringify(action)};
+    let exits = 0, prompts = 0;
+    register({ registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
+      on(event, handler) { hooks.set(event, [...(hooks.get(event) ?? []), handler]); } });
+    const ctx = { cwd: process.cwd(), mode: action === 'headless' ? 'print' : 'tui', hasUI: action !== 'headless',
+      isProjectTrusted: () => true, shutdown() { exits++; },
+      sessionManager: { getSessionId: () => 'overlap', getEntries: () => [] },
+      ui: { theme: { fg: (role, text) => '[' + role + ']' + text, bold: (text) => text },
+        setFooter() {}, setStatus() {}, notify(message, level) { notices.push([message, level]); },
+        async select(title, choices) {
+          prompts++;
+          assert.match(title, /accent.*contains Microsandbox’s settings/);
+          assert.match(title, /text.*including for future sessions/);
+          assert.match(title, /text.*narrower project folder/);
+          assert.deepEqual(choices, ['Exit Pi', 'Keep Pi open without sandboxed tools']);
+          return action === 'exit' ? choices[0] : action === 'stay' ? choices[1] : undefined;
+        } } };
+    await hooks.get('session_start').at(-1)({}, ctx);
+    assert.equal(prompts, action === 'headless' ? 0 : 1);
+    assert.equal(exits, action === 'exit' ? 1 : 0);
+    assert.deepEqual(notices, []);
+    const { details } = await tools.get('msb_diagnostics').execute('diag', {}, undefined, undefined, ctx);
+    assert.equal(details.configurationFailure.workspaceOverlap, true);
+    assert.equal(details.runtime.execution, 'blocked');
+    await hooks.get('session_shutdown').at(-1)({}, ctx);
+    console.log('PASS overlap dialog');
+  `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false" }, encoding: "utf8", stdio: "pipe" });
+  assert.match(output, /PASS overlap dialog/);
+});
+
 for (const hasUI of [true, false]) test(`automatic safe configuration notifications follow replacement lifecycle, hasUI=${hasUI}`, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-msb-config-notice-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -579,23 +674,24 @@ for (const hasUI of [true, false]) test(`automatic safe configuration notificati
     const ctx = { cwd: process.cwd(), mode: 'tui', hasUI: ${hasUI}, isProjectTrusted: () => true,
       sessionManager: { getSessionId: () => sessionId, getEntries: () => [] },
       ui: { theme: { fg: (_role, text) => text }, setFooter() {}, setStatus() {}, notify(message, level) { notices.push([message, level]); } } };
-    const errors = () => notices.filter(([message, level]) => level === 'error' && message.includes('Microsandbox configuration failed'));
+    const warnings = () => notices.filter(([message, level]) => level === 'warning' && message.includes('Microsandbox didn’t apply these settings'));
     await hooks.get('session_start').at(-1)({}, ctx);
-    assert.equal(errors().length, ${hasUI ? 1 : 0});
-    if (${hasUI}) assert.match(errors()[0][0], /TOML syntax/);
+    assert.equal(warnings().length, ${hasUI ? 1 : 0});
+    if (${hasUI}) assert.match(warnings()[0][0], /TOML syntax/);
     for (let i = 0; i < 3; i++) await tools.get('msb_diagnostics').execute('diag', {}, undefined, undefined, ctx);
     await hooks.get('session_info_changed').at(-1)({}, ctx);
-    assert.equal(errors().length, ${hasUI ? 1 : 0}, 'polling/reads/same-session churn cannot notify');
+    assert.equal(warnings().length, ${hasUI ? 1 : 0}, 'polling/reads/same-session churn cannot notify');
     sessionId = 'replacement';
     await hooks.get('session_info_changed').at(-1)({}, ctx);
-    assert.equal(errors().length, ${hasUI ? 2 : 0}, 'replacement owns a fresh failure notification');
+    assert.equal(warnings().length, ${hasUI ? 2 : 0}, 'replacement owns a fresh warning');
     assert.doesNotMatch(JSON.stringify(notices), /REJECTED_PRIVATE_VALUE/);
     await writeFile(paths.global, 'auto_start = false\\n');
     sessionId = 'recovered';
     await hooks.get('session_info_changed').at(-1)({}, ctx);
     const report = await tools.get('msb_diagnostics').execute('diag', {}, undefined, undefined, ctx);
     assert.equal(report.details.configurationFailure, undefined);
-    assert.equal(errors().length, ${hasUI ? 2 : 0});
+    assert.equal(warnings().length, ${hasUI ? 2 : 0});
+    assert.ok(!notices.some(([, level]) => level === 'error'), 'no duplicate error notification');
     await hooks.get('session_shutdown').at(-1)({}, ctx);
     console.log('PASS configuration notices');
   `], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, "agent"), PI_MSB_DISABLE: "0", PI_MSB_AUTO_START: "false", PI_MSB_PRUNE_ON_START: "false" }, encoding: "utf8", stdio: "pipe" });

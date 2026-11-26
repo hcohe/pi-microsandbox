@@ -12,7 +12,7 @@ import {
 import { createHostReadAccess } from "./skill-access.ts";
 import { createSandboxGrepExecute } from "./operations-exec.ts";
 import { registerMsbCommand, systemPromptNote } from "./command.ts";
-import { formatConfigurationFailure } from "./configuration-failure.ts";
+import { formatConfigurationFailure, type ConfigurationFailureSnapshot } from "./configuration-failure.ts";
 import { formatRuntimeVersionMismatch } from "./runtime-compatibility.ts";
 import { createMsbIntegration } from "./control.ts";
 import { closeControlPanel } from "./control-panel.ts";
@@ -47,6 +47,27 @@ export function styleFooterStatus(theme: Pick<ExtensionContext["ui"]["theme"], "
   return `\x1b[22m${theme.fg("dim", text)} ${theme.fg(circleColor, "●")}\x1b[22m`;
 }
 
+const overlapDialogTitle = "This folder contains Microsandbox’s settings";
+const overlapDialogRisk = "Microsandbox shares the working folder read/write. If it started here, code inside it could change the files that control its access, including for future sessions.";
+const overlapDialogRecovery = "Start Pi from a narrower project folder that doesn’t contain those files. If you keep Pi open here, sandboxed tools will stay unavailable.";
+const exitPi = "Exit Pi";
+const stayInPi = "Keep Pi open without sandboxed tools";
+
+function notifyConfigurationWarning(ctx: ExtensionContext, failure: ConfigurationFailureSnapshot): void {
+  const message = formatConfigurationFailure(failure);
+  const [title, ...body] = message.split("\n");
+  ctx.ui.notify(ctx.mode === "tui" ? [title, ...body.map((line) => line ? ctx.ui.theme.fg("text", line) : line)].join("\n") : message, "warning");
+}
+
+async function askAboutWorkspaceOverlap(ctx: ExtensionContext): Promise<string | undefined> {
+  const lines = ctx.mode === "tui" ? [
+    ctx.ui.theme.bold(ctx.ui.theme.fg("accent", overlapDialogTitle)),
+    ctx.ui.theme.fg("text", overlapDialogRisk),
+    ctx.ui.theme.fg("text", overlapDialogRecovery),
+  ] : [overlapDialogTitle, overlapDialogRisk, overlapDialogRecovery];
+  return ctx.ui.select(lines.join("\n\n"), [exitPi, stayInPi], { signal: ctx.signal });
+}
+
 /**
  * The extension entry point intentionally imports no native SDK. Loading this
  * module must remain safe on hosts without KVM or the microsandbox binary;
@@ -67,7 +88,11 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       const ctx = currentContext;
       const identity = currentProvider.execution!.current();
       if (ctx?.hasUI && identity.sessionId === ctx.sessionManager.getSessionId() && identity.cwd === ctx.cwd) {
-        ctx.ui.notify(formatConfigurationFailure(failure), "error");
+        if (failure.workspaceOverlap && starting?.ctx === ctx && ["tui", "rpc"].includes(ctx.mode)) {
+          starting.overlap = failure;
+        } else {
+          notifyConfigurationWarning(ctx, failure);
+        }
       }
     },
     onRuntimeVersionMismatch: (failure) => {
@@ -89,6 +114,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   });
   const currentProvider = integration.provider;
   let currentContext: ExtensionContext | undefined;
+  let starting: { ctx: ExtensionContext; overlap?: ConfigurationFailureSnapshot } | undefined;
   let lastConfig: ResolvedConfig = integration.control.getEffectiveConfig();
   let bootAnimation: ReturnType<typeof setInterval> | undefined;
   let bootState: { identity: SessionExecutionIdentity; state: RuntimeState } | undefined;
@@ -97,6 +123,9 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
   let uiGeneration = 0;
   let observationTimer: ReturnType<typeof setInterval> | undefined;
   let observationGeneration = 0;
+
+  // The defaults and a previous session's settings must not claim Pi's footer.
+  const isFooterVisible = (): boolean => integration.hasResolvedSessionConfig() && integration.configRef.value.showFooter;
 
   const stopObservation = (): void => {
     observationGeneration += 1;
@@ -109,7 +138,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     const generation = observationGeneration;
     let pending = false;
     observationTimer = setInterval(() => {
-      if (pending || generation !== observationGeneration || !integration.configRef.value.showFooter) return;
+      if (pending || generation !== observationGeneration || !isFooterVisible()) return;
       const ctx = currentContext;
       const identity = currentProvider.execution!.current();
       if (!ctx?.hasUI) return;
@@ -143,7 +172,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     const render = (): void => {
       // Read the current UI and theme on every tick, never a previous context.
       const ctx = currentContext;
-      if (!ctx || generation !== bootGeneration || !integration.configRef.value.showFooter) return;
+      if (!ctx || generation !== bootGeneration || !isFooterVisible()) return;
       const identity = currentProvider.execution!.current();
       let state: RuntimeState = { status: "booting", info: null };
       if (bootState?.identity === identity && identity.sessionId === ctx.sessionManager.getSessionId() && identity.cwd === ctx.cwd) {
@@ -164,16 +193,20 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     customFooterInstalled = true;
   };
 
+  const clearStatus = (ctx: ExtensionContext): void => {
+    stopBootAnimation();
+    stopObservation();
+    if (ctx.hasUI) ctx.ui.setStatus("pi-msb", undefined);
+  };
+
   const updateStatus = (ctx: ExtensionContext, state: RuntimeState): void => {
     if (!ctx.hasUI) return;
-    const text = footerStatus(state, integration.configRef.value.showFooter);
-    if (text !== undefined) ensureCustomFooter(ctx);
+    const text = footerStatus(state, isFooterVisible());
     if (text === undefined) {
-      stopBootAnimation();
-      stopObservation();
-      ctx.ui.setStatus("pi-msb", undefined);
+      clearStatus(ctx);
       return;
     }
+    ensureCustomFooter(ctx);
     startObservation(ctx);
     if (state.status === "booting") {
       bootState = { identity: currentProvider.execution!.current(), state };
@@ -204,10 +237,9 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     const generation = ++uiGeneration;
-    stopBootAnimation();
-    stopObservation();
+    clearStatus(ctx);
     currentContext = ctx;
-    updateStatus(ctx, { status: "booting", info: null });
+    const startup: NonNullable<typeof starting> = starting = { ctx };
     try {
       // Discover the workspace before host config bootstrap/resolution, then
       // pass that same identity through sandbox boot. Bare loads never write.
@@ -222,13 +254,32 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
       if (generation !== uiGeneration || currentProvider.execution!.current() !== identity) return;
       lastConfig = integration.control.getEffectiveConfig();
       updateStatus(ctx, state);
-      if (ctx.hasUI) for (const warning of lastConfig.warnings) ctx.ui.notify(`pi-microsandbox: ${warning}`, "warning");
+      if (ctx.hasUI) {
+        if (state.status === "off" && !integration.hasResolvedSessionConfig()) {
+          ctx.ui.notify("pi-microsandbox: Disabled by PI_MSB_DISABLE. Running on host.", "warning");
+        }
+        for (const warning of lastConfig.warnings) ctx.ui.notify(`pi-microsandbox: ${warning}`, "warning");
+      }
+      if (starting === startup) starting = undefined;
+      if (startup.overlap && state.status === "unavailable" && !ctx.signal?.aborted) {
+        let choice: string | undefined;
+        try { choice = await askAboutWorkspaceOverlap(ctx); }
+        catch {
+          if (generation === uiGeneration && !ctx.signal?.aborted) notifyConfigurationWarning(ctx, startup.overlap);
+          return;
+        }
+        if (choice === exitPi && generation === uiGeneration && currentProvider.execution!.current() === identity && !ctx.signal?.aborted) {
+          ctx.shutdown();
+        }
+      }
     } catch (error) {
       // Invalid config and native boot failures are fail-closed. Do not throw from
       // the lifecycle hook: Pi remains usable and routed tools remain blocked.
       if (generation !== uiGeneration) return;
       updateStatus(ctx, { status: "unavailable", info: null });
       if (ctx.hasUI) ctx.ui.notify(`pi-microsandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
+    } finally {
+      if (starting === startup) starting = undefined;
     }
   });
 
@@ -244,10 +295,8 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     integration.endSession();
     uiGeneration += 1;
     currentContext = undefined;
-    stopBootAnimation();
-    stopObservation();
+    clearStatus(ctx);
     customFooterInstalled = false;
-    if (ctx.hasUI) ctx.ui.setStatus("pi-msb", undefined);
     await closeControlPanel();
     await integration.manager.shutdown();
     // Pi tears down extension-owned UI after this hook. Do not call
@@ -265,9 +314,7 @@ export default function registerPiMsb(pi: ExtensionAPI): void {
     integration.endSession();
     currentContext = ctx;
     const generation = ++uiGeneration;
-    stopObservation();
-    stopBootAnimation();
-    updateStatus(ctx, { status: "booting", info: null });
+    clearStatus(ctx);
     const pending = integration.configureSession({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
     const replacement = currentProvider.execution!.current();
     await closeControlPanel();

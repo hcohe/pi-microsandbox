@@ -427,7 +427,7 @@ test("unsafe host config paths block setup and explicit on even when environment
     });
     const state = await integration.configureSession({ sessionId: "blocked-bootstrap", cwd, projectTrusted: true });
     assert.equal(state.status, "unavailable");
-    assert.match(state.reason ?? "", /Microsandbox configuration failed/);
+    assert.match(state.reason ?? "", /Microsandbox didn’t apply these settings/);
     const diagnostics: any = await integration.control.getDiagnostics!();
     assert.equal(diagnostics.configurationFailure.kind, agentDir === unusableAgent ? "read" : "policy");
     await integration.control.setEnabled(true);

@@ -258,8 +258,9 @@ guidance. No rejected values, parser prose, source paths or credentials are reta
 This is separate from the runtime failure: a failed reload may retain the previous
 active VM while the new configuration is invalid. Successful resolution clears it;
 a new session or teardown clears it immediately, and superseded attempts cannot
-publish stale failures. Current configuration failures also notify Pi's UI without
-opening `/msb`; identical failures are deduplicated until recovery or a new session.
+publish stale failures. Current configuration failures also appear as warnings in
+Pi's UI without opening `/msb`; identical failures are deduplicated until recovery
+or a new session.
 Passive diagnostics and polling never produce notifications. Headless reports
 include the same safe information without attempting UI access.
 

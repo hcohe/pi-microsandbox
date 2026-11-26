@@ -34,6 +34,7 @@
     "docs/*.md",
     "extensions/pi-msb/*.ts",
     "!extensions/pi-msb/*.test.ts",
+    "extensions/pi-msb/package.json",
     "native/flock/prebuilds/darwin-arm64/flock.node",
     "native/flock/prebuilds/linux-x64-gnu/flock.node",
     "native/flock/prebuilds/linux-arm64-gnu/flock.node"
